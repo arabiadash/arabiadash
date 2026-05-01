@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import {
   BarChart3,
   TrendingUp,
@@ -82,6 +83,7 @@ export default function LandingPage() {
         "تحديث البيانات كل 6 ساعات",
       ],
       cta: "ابدأ الآن",
+      ctaLink: "/signup",
       popular: false,
     },
     {
@@ -98,6 +100,7 @@ export default function LandingPage() {
         "دعم فني مخصص",
       ],
       cta: "الأكثر شعبية",
+      ctaLink: "/signup",
       popular: true,
     },
     {
@@ -115,6 +118,7 @@ export default function LandingPage() {
         "تدريب للفريق",
       ],
       cta: "تواصل معنا",
+      ctaLink: "/signup",
       popular: false,
     },
   ];
@@ -152,12 +156,12 @@ export default function LandingPage() {
       <header className="fixed top-0 right-0 left-0 z-50 bg-white/80 backdrop-blur-md border-b border-gray-100">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-2">
+            <Link href="/" className="flex items-center gap-2">
               <div className="w-9 h-9 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-lg flex items-center justify-center">
                 <BarChart3 className="w-5 h-5 text-white" />
               </div>
               <span className="text-xl font-bold text-gray-900">ArabiaDash</span>
-            </div>
+            </Link>
 
             <nav className="hidden md:flex items-center gap-8">
               <a href="#features" className="text-gray-600 hover:text-gray-900 transition">
@@ -175,12 +179,18 @@ export default function LandingPage() {
             </nav>
 
             <div className="hidden md:flex items-center gap-3">
-              <button className="text-gray-700 hover:text-gray-900 font-medium">
+              <Link
+                href="/login"
+                className="text-gray-700 hover:text-gray-900 font-medium"
+              >
                 تسجيل الدخول
-              </button>
-              <button className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-5 py-2.5 rounded-lg font-medium hover:shadow-lg hover:shadow-indigo-500/30 transition">
+              </Link>
+              <Link
+                href="/signup"
+                className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-5 py-2.5 rounded-lg font-medium hover:shadow-lg hover:shadow-indigo-500/30 transition"
+              >
                 ابدأ مجاناً
-              </button>
+              </Link>
             </div>
 
             <button
@@ -199,9 +209,18 @@ export default function LandingPage() {
               <a href="#platforms" className="block text-gray-600 py-2">المنصات</a>
               <a href="#pricing" className="block text-gray-600 py-2">الأسعار</a>
               <a href="#faq" className="block text-gray-600 py-2">الأسئلة</a>
-              <button className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-3 rounded-lg font-medium">
+              <Link
+                href="/login"
+                className="block text-gray-700 py-2 font-medium"
+              >
+                تسجيل الدخول
+              </Link>
+              <Link
+                href="/signup"
+                className="block w-full bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-3 rounded-lg font-medium text-center"
+              >
                 ابدأ مجاناً
-              </button>
+              </Link>
             </div>
           </div>
         )}
@@ -234,13 +253,19 @@ export default function LandingPage() {
           </p>
 
           <div className="flex flex-col sm:flex-row gap-4 justify-center mb-12">
-            <button className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-8 py-4 rounded-lg font-semibold text-lg hover:shadow-xl hover:shadow-indigo-500/30 transition flex items-center justify-center gap-2">
+            <Link
+              href="/signup"
+              className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-8 py-4 rounded-lg font-semibold text-lg hover:shadow-xl hover:shadow-indigo-500/30 transition flex items-center justify-center gap-2"
+            >
               ابدأ تجربتك المجانية
               <ArrowLeft className="w-5 h-5" />
-            </button>
-            <button className="bg-white text-gray-900 px-8 py-4 rounded-lg font-semibold text-lg border-2 border-gray-200 hover:border-gray-300 transition">
+            </Link>
+            <a
+              href="#features"
+              className="bg-white text-gray-900 px-8 py-4 rounded-lg font-semibold text-lg border-2 border-gray-200 hover:border-gray-300 transition text-center"
+            >
               شاهد العرض التوضيحي
-            </button>
+            </a>
           </div>
 
           <div className="flex flex-wrap items-center justify-center gap-6 text-sm text-gray-500">
@@ -379,15 +404,16 @@ export default function LandingPage() {
                   ))}
                 </ul>
 
-                <button
-                  className={`w-full py-3 rounded-lg font-semibold transition ${
+                <Link
+                  href={plan.ctaLink}
+                  className={`block w-full py-3 rounded-lg font-semibold transition text-center ${
                     plan.popular
                       ? "bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:shadow-lg"
                       : "bg-gray-100 text-gray-900 hover:bg-gray-200"
                   }`}
                 >
                   {plan.cta}
-                </button>
+                </Link>
               </div>
             ))}
           </div>
@@ -439,10 +465,13 @@ export default function LandingPage() {
           <p className="text-xl text-indigo-100 mb-10 max-w-2xl mx-auto">
             انضم لأكثر من 500 متجر يستخدمون ArabiaDash لاتخاذ قرارات إعلانية أذكى
           </p>
-          <button className="bg-white text-indigo-600 px-8 py-4 rounded-lg font-bold text-lg hover:shadow-2xl transition inline-flex items-center gap-2">
+          <Link
+            href="/signup"
+            className="bg-white text-indigo-600 px-8 py-4 rounded-lg font-bold text-lg hover:shadow-2xl transition inline-flex items-center gap-2"
+          >
             ابدأ تجربتك المجانية الآن
             <ArrowLeft className="w-5 h-5" />
-          </button>
+          </Link>
           <p className="text-indigo-200 mt-6 text-sm">
             14 يوم مجاناً • بدون بطاقة ائتمان • إعداد في 5 دقائق
           </p>
@@ -468,9 +497,9 @@ export default function LandingPage() {
             <div>
               <h4 className="text-white font-bold mb-4">المنتج</h4>
               <ul className="space-y-2 text-sm">
-                <li><a href="#" className="hover:text-white transition">المميزات</a></li>
-                <li><a href="#" className="hover:text-white transition">الأسعار</a></li>
-                <li><a href="#" className="hover:text-white transition">التكاملات</a></li>
+                <li><a href="#features" className="hover:text-white transition">المميزات</a></li>
+                <li><a href="#pricing" className="hover:text-white transition">الأسعار</a></li>
+                <li><Link href="/signup" className="hover:text-white transition">ابدأ مجاناً</Link></li>
               </ul>
             </div>
 
@@ -488,6 +517,7 @@ export default function LandingPage() {
               <ul className="space-y-2 text-sm">
                 <li><a href="#" className="hover:text-white transition">سياسة الخصوصية</a></li>
                 <li><a href="#" className="hover:text-white transition">الشروط والأحكام</a></li>
+                <li><Link href="/login" className="hover:text-white transition">تسجيل الدخول</Link></li>
               </ul>
             </div>
           </div>
