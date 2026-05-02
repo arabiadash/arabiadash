@@ -231,17 +231,15 @@ export default function SettingsClient({
     setDeleteError(null);
     setDeleting(true);
 
+    // On success the server action calls redirect("/login"), so the framework
+    // handles navigation and the await never resolves with success here. Only
+    // the failure branch is reachable in client code.
     const result = await deleteAccountAction();
 
     if (!result.success) {
       setDeleting(false);
       setDeleteError(result.error || "حدث خطأ غير متوقع");
-      return;
     }
-
-    await supabase.auth.signOut();
-    router.push("/");
-    router.refresh();
   };
 
   // Format last sign-in date in Arabic
