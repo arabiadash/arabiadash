@@ -289,7 +289,7 @@ export default function ReportsClient({
     { label: "الرئيسية", icon: Home, href: "/dashboard", active: false },
     { label: "ربط المنصات", icon: Link2, href: "/dashboard/connections", active: false },
     { label: "التقارير", icon: FileText, href: "/dashboard/reports", active: true },
-    { label: "الإعدادات", icon: Settings, href: "#", active: false },
+    { label: "الإعدادات", icon: Settings, href: "/dashboard/settings", active: false },
     { label: "المساعدة", icon: HelpCircle, href: "#", active: false },
   ];
 

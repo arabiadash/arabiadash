@@ -104,7 +104,7 @@ export default function ConnectionsClient({
     { label: "الرئيسية", icon: Home, href: "/dashboard", active: false },
     { label: "ربط المنصات", icon: Link2, href: "/dashboard/connections", active: true },
     { label: "التقارير", icon: FileText, href: "/dashboard/reports", active: false },
-    { label: "الإعدادات", icon: Settings, href: "#", active: false },
+    { label: "الإعدادات", icon: Settings, href: "/dashboard/settings", active: false },
     { label: "المساعدة", icon: HelpCircle, href: "#", active: false },
   ];
 
