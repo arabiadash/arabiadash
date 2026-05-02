@@ -147,10 +147,10 @@ export default function SettingsClient({
     e.preventDefault();
     setPasswordMessage(null);
 
-    if (passwordForm.newPassword.length < 6) {
+    if (passwordForm.newPassword.length < 8) {
       setPasswordMessage({
         type: "error",
-        text: "كلمة السر الجديدة يجب أن تكون 6 أحرف على الأقل",
+        text: "كلمة السر الجديدة يجب أن تكون 8 أحرف على الأقل",
       });
       return;
     }
@@ -581,8 +581,8 @@ export default function SettingsClient({
                         next: !showPasswords.next,
                       })
                     }
-                    placeholder="6 أحرف على الأقل"
-                    helperText="استخدم 6 أحرف أو أكثر، ويُفضّل خليط من حروف وأرقام ورموز."
+                    placeholder="8 أحرف على الأقل"
+                    helperText="استخدم 8 أحرف أو أكثر، ويُفضّل خليط من حروف وأرقام ورموز."
                   />
 
                   <PasswordInput
