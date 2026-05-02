@@ -173,7 +173,7 @@ export default function DashboardClient({
   const menuItems = [
     { label: "الرئيسية", icon: Home, href: "/dashboard", active: true },
     { label: "ربط المنصات", icon: Link2, href: "/dashboard/connections", active: false },
-    { label: "التقارير", icon: FileText, href: "#", active: false },
+    { label: "التقارير", icon: FileText, href: "/dashboard/reports", active: false },
     { label: "الإعدادات", icon: Settings, href: "#", active: false },
     { label: "المساعدة", icon: HelpCircle, href: "#", active: false },
   ];
