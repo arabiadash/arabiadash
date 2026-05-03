@@ -515,8 +515,8 @@ export default function LandingPage() {
             <div>
               <h4 className="text-white font-bold mb-4">قانوني</h4>
               <ul className="space-y-2 text-sm">
-                <li><a href="#" className="hover:text-white transition">سياسة الخصوصية</a></li>
-                <li><a href="#" className="hover:text-white transition">الشروط والأحكام</a></li>
+                <li><Link href="/privacy" className="hover:text-white transition">سياسة الخصوصية</Link></li>
+                <li><Link href="/terms" className="hover:text-white transition">الشروط والأحكام</Link></li>
                 <li><Link href="/login" className="hover:text-white transition">تسجيل الدخول</Link></li>
               </ul>
             </div>
