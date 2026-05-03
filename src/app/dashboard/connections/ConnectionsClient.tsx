@@ -222,9 +222,9 @@ export default function ConnectionsClient({
         </header>
 
         {/* Page Content */}
-        <main className="p-4 sm:p-6 lg:p-8">
+        <main className="p-3 sm:p-6 lg:p-8">
           {/* Header */}
-          <div className="mb-8">
+          <div className="mb-4 sm:mb-8">
             <Link
               href="/dashboard"
               className="text-sm text-gray-500 hover:text-gray-700 inline-flex items-center gap-1 mb-2"
@@ -232,10 +232,10 @@ export default function ConnectionsClient({
               <ArrowLeft className="w-4 h-4" />
               العودة للرئيسية
             </Link>
-            <h1 className="text-2xl md:text-3xl font-bold text-gray-900 mb-2">
+            <h1 className="text-xl sm:text-2xl md:text-3xl font-bold text-gray-900 mb-1 sm:mb-2 leading-snug">
               ربط المنصات
             </h1>
-            <p className="text-gray-600">
+            <p className="text-sm sm:text-base text-gray-600 leading-relaxed">
               اربط حساباتك الإعلانية ومتاجرك لرؤية كل بياناتك في مكان واحد
             </p>
           </div>
@@ -250,7 +250,7 @@ export default function ConnectionsClient({
 
           {/* Connection Status */}
           {connectedPlatforms.length > 0 && (
-            <div className="bg-gradient-to-br from-green-50 to-emerald-50 border border-green-100 rounded-2xl p-6 mb-8">
+            <div className="bg-gradient-to-br from-green-50 to-emerald-50 border border-green-100 rounded-2xl p-4 sm:p-6 mb-4 sm:mb-8">
               <div className="flex items-start gap-4">
                 <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center flex-shrink-0">
                   <Sparkles className="w-6 h-6 text-green-600" />
@@ -275,8 +275,8 @@ export default function ConnectionsClient({
           )}
 
           {/* Ad Platforms Section */}
-          <div className="mb-10">
-            <div className="flex items-center gap-2 mb-6">
+          <div className="mb-6 sm:mb-10">
+            <div className="flex items-center gap-2 mb-4 sm:mb-6">
               <div className="w-10 h-10 bg-indigo-100 rounded-lg flex items-center justify-center">
                 <Megaphone className="w-5 h-5 text-indigo-600" />
               </div>
@@ -461,7 +461,7 @@ export default function ConnectionsClient({
           </div>
 
           {/* Info Banner */}
-          <div className="mt-10 bg-blue-50 border border-blue-100 rounded-xl p-6">
+          <div className="mt-6 sm:mt-10 bg-blue-50 border border-blue-100 rounded-xl p-4 sm:p-6">
             <div className="flex items-start gap-4">
               <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center flex-shrink-0">
                 <Sparkles className="w-5 h-5 text-blue-600" />

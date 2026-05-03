@@ -287,14 +287,14 @@ export default function DashboardClient({
         </header>
 
         {/* Page Content */}
-        <main className="p-4 sm:p-6 lg:p-8">
+        <main className="p-3 sm:p-6 lg:p-8">
           {/* Welcome Section */}
-          <div className="mb-8 flex items-center justify-between flex-wrap gap-4">
-            <div>
-              <h1 className="text-2xl md:text-3xl font-bold text-gray-900 mb-2">
+          <div className="mb-4 sm:mb-8 flex items-center justify-between flex-wrap gap-3 sm:gap-4">
+            <div className="min-w-0 flex-1">
+              <h1 className="text-xl sm:text-2xl md:text-3xl font-bold text-gray-900 mb-1 sm:mb-2 break-words leading-snug">
                 مرحباً، {fullName} 👋
               </h1>
-              <p className="text-gray-600">
+              <p className="text-sm sm:text-base text-gray-600 leading-relaxed">
                 {companyName
                   ? `إليك نظرة عامة على أداء ${companyName}`
                   : "إليك نظرة عامة على أداء حساباتك"}
@@ -309,7 +309,7 @@ export default function DashboardClient({
 
           {/* Empty State (only if no connections) */}
           {!hasConnections && (
-            <div className="bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-100 rounded-2xl p-8 mb-8">
+            <div className="bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-100 rounded-2xl p-5 sm:p-8 mb-4 sm:mb-8">
               <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
                 <div className="flex items-start gap-4">
                   <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center flex-shrink-0">
@@ -336,7 +336,7 @@ export default function DashboardClient({
           )}
 
           {/* Stats Grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-4 sm:mb-8">
             {stats.map((stat, i) => {
               const colorClasses: Record<string, string> = {
                 indigo: "bg-indigo-50 text-indigo-600",
@@ -348,18 +348,18 @@ export default function DashboardClient({
               return (
                 <div
                   key={i}
-                  className="bg-white border border-gray-100 rounded-xl p-6 hover:shadow-md transition"
+                  className="bg-white border border-gray-100 rounded-xl p-3 sm:p-6 hover:shadow-md transition"
                 >
-                  <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center justify-between mb-2 sm:mb-4">
                     <div
-                      className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                      className={`w-8 h-8 sm:w-10 sm:h-10 rounded-lg flex items-center justify-center ${
                         colorClasses[stat.color]
                       }`}
                     >
-                      <stat.icon className="w-5 h-5" />
+                      <stat.icon className="w-4 h-4 sm:w-5 sm:h-5" />
                     </div>
                     <span
-                      className={`text-xs font-semibold flex items-center gap-1 ${
+                      className={`text-xs font-semibold flex items-center gap-0.5 sm:gap-1 ${
                         stat.changeType === "up"
                           ? "text-green-600"
                           : stat.changeType === "down"
@@ -374,13 +374,17 @@ export default function DashboardClient({
                       {stat.change}
                     </span>
                   </div>
-                  <p className="text-sm text-gray-600 mb-1">{stat.label}</p>
-                  <div className="flex items-baseline gap-1">
-                    <span className="text-2xl font-bold text-gray-900">
+                  <p className="text-xs sm:text-sm text-gray-600 mb-1 truncate">
+                    {stat.label}
+                  </p>
+                  <div className="flex items-baseline gap-1 flex-wrap">
+                    <span className="text-lg sm:text-2xl font-bold text-gray-900">
                       {stat.value}
                     </span>
                     {stat.currency && (
-                      <span className="text-sm text-gray-500">{stat.currency}</span>
+                      <span className="text-xs sm:text-sm text-gray-500">
+                        {stat.currency}
+                      </span>
                     )}
                   </div>
                 </div>
@@ -392,18 +396,18 @@ export default function DashboardClient({
           {hasConnections && (
             <>
               {/* Performance Chart */}
-              <div className="bg-white border border-gray-100 rounded-xl p-6 mb-6">
-                <div className="flex items-center justify-between mb-6">
+              <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
+                <div className="flex items-center justify-between mb-3 sm:mb-6">
                   <div>
-                    <h3 className="text-lg font-bold text-gray-900 mb-1">
+                    <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
                       أداء آخر 7 أيام
                     </h3>
-                    <p className="text-sm text-gray-500">
+                    <p className="text-xs sm:text-sm text-gray-500">
                       الإنفاق مقابل الإيرادات (بالريال السعودي)
                     </p>
                   </div>
                 </div>
-                <div className="h-72">
+                <div className="h-56 sm:h-72">
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart data={mockChartData}>
                       <defs>
@@ -449,16 +453,16 @@ export default function DashboardClient({
               </div>
 
               {/* Two Column Charts */}
-              <div className="grid lg:grid-cols-2 gap-6 mb-6">
+              <div className="grid lg:grid-cols-2 gap-3 sm:gap-6 mb-4 sm:mb-6">
                 {/* Platform Performance */}
-                <div className="bg-white border border-gray-100 rounded-xl p-6">
-                  <h3 className="text-lg font-bold text-gray-900 mb-1">
+                <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6">
+                  <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
                     الأداء حسب المنصة
                   </h3>
-                  <p className="text-sm text-gray-500 mb-6">
+                  <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
                     توزيع الإيرادات على المنصات
                   </p>
-                  <div className="h-64">
+                  <div className="h-52 sm:h-64">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={mockPlatformPerformance}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
@@ -478,14 +482,14 @@ export default function DashboardClient({
                 </div>
 
                 {/* ROAS Trend */}
-                <div className="bg-white border border-gray-100 rounded-xl p-6">
-                  <h3 className="text-lg font-bold text-gray-900 mb-1">
+                <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6">
+                  <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
                     اتجاه ROAS
                   </h3>
-                  <p className="text-sm text-gray-500 mb-6">
+                  <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
                     العائد على الإنفاق الإعلاني
                   </p>
-                  <div className="h-64">
+                  <div className="h-52 sm:h-64">
                     <ResponsiveContainer width="100%" height="100%">
                       <AreaChart data={mockChartData}>
                         <defs>
@@ -519,18 +523,68 @@ export default function DashboardClient({
               </div>
 
               {/* Top Campaigns */}
-              <div className="bg-white border border-gray-100 rounded-xl p-6 mb-6">
-                <div className="flex items-center justify-between mb-6">
+              <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
+                <div className="flex items-center justify-between mb-4 sm:mb-6">
                   <div>
-                    <h3 className="text-lg font-bold text-gray-900 mb-1">
+                    <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
                       أفضل الحملات الإعلانية
                     </h3>
-                    <p className="text-sm text-gray-500">
+                    <p className="text-xs sm:text-sm text-gray-500">
                       الحملات الأعلى أداءً هذا الأسبوع
                     </p>
                   </div>
                 </div>
-                <div className="overflow-x-auto">
+
+                {/* Mobile: Cards view */}
+                <div className="lg:hidden space-y-3">
+                  {mockTopCampaigns.map((campaign) => (
+                    <div
+                      key={campaign.id}
+                      className="border border-gray-100 rounded-lg p-4 hover:bg-gray-50 transition"
+                    >
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <h4 className="font-semibold text-gray-900 text-sm leading-snug flex-1">
+                          {campaign.name}
+                        </h4>
+                        {campaign.status === "active" ? (
+                          <span className="bg-green-100 text-green-700 text-xs font-semibold px-2 py-1 rounded flex-shrink-0">
+                            نشطة
+                          </span>
+                        ) : (
+                          <span className="bg-gray-100 text-gray-600 text-xs font-semibold px-2 py-1 rounded flex-shrink-0">
+                            متوقفة
+                          </span>
+                        )}
+                      </div>
+                      <span className="bg-indigo-50 text-indigo-700 text-xs font-medium px-2 py-0.5 rounded inline-block mb-3">
+                        {campaign.platform}
+                      </span>
+                      <div className="grid grid-cols-3 gap-2 pt-3 border-t border-gray-100">
+                        <div>
+                          <p className="text-xs text-gray-500 mb-0.5">الإنفاق</p>
+                          <p className="text-sm font-semibold text-gray-900">
+                            {formatCurrency(campaign.spend)}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-gray-500 mb-0.5">الإيرادات</p>
+                          <p className="text-sm font-semibold text-gray-900">
+                            {formatCurrency(campaign.revenue)}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-gray-500 mb-0.5">ROAS</p>
+                          <p className="text-sm font-semibold text-green-600">
+                            {campaign.roas.toFixed(2)}x
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Desktop: Table view */}
+                <div className="hidden lg:block overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead className="text-xs text-gray-500 border-b border-gray-100">
                       <tr>

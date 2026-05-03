@@ -456,18 +456,18 @@ export default function ReportsClient({
         </header>
 
         {/* Page Content */}
-        <main className="p-4 sm:p-6 lg:p-8">
+        <main className="p-3 sm:p-6 lg:p-8">
           {/* Header */}
-          <div className="mb-8 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-            <div>
-              <h1 className="text-2xl md:text-3xl font-bold text-gray-900 mb-2">
+          <div className="mb-4 sm:mb-8 flex flex-col md:flex-row md:items-center md:justify-between gap-3 sm:gap-4">
+            <div className="min-w-0 flex-1">
+              <h1 className="text-xl sm:text-2xl md:text-3xl font-bold text-gray-900 mb-1 sm:mb-2 leading-snug">
                 التقارير والتحليلات
               </h1>
-              <p className="text-gray-600">
+              <p className="text-sm sm:text-base text-gray-600 leading-relaxed">
                 تحليل تفصيلي لأداء حملاتك الإعلانية ومبيعاتك
               </p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <button
                 onClick={() => handleExport("pdf")}
                 className="bg-white border border-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-50 transition flex items-center gap-2"
@@ -493,8 +493,8 @@ export default function ReportsClient({
           </div>
 
           {/* Filters */}
-          <div className="bg-white border border-gray-100 rounded-xl p-4 mb-6">
-            <div className="flex flex-col md:flex-row gap-4">
+          <div className="bg-white border border-gray-100 rounded-xl p-3 sm:p-4 mb-4 sm:mb-6">
+            <div className="flex flex-col md:flex-row gap-3 sm:gap-4">
               {/* Date Range Filter */}
               <div className="flex-1">
                 <label className="block text-xs font-medium text-gray-500 mb-2 flex items-center gap-1">
@@ -544,7 +544,7 @@ export default function ReportsClient({
           </div>
 
           {/* KPI Cards Grid */}
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4 mb-4 sm:mb-6">
             {kpiCards.map((stat, i) => {
               const colorClasses: Record<string, string> = {
                 indigo: "bg-indigo-50 text-indigo-600",
@@ -558,16 +558,16 @@ export default function ReportsClient({
               return (
                 <div
                   key={i}
-                  className="bg-white border border-gray-100 rounded-xl p-4 hover:shadow-md transition"
+                  className="bg-white border border-gray-100 rounded-xl p-3 sm:p-4 hover:shadow-md transition"
                 >
-                  <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center justify-between mb-2 sm:mb-3">
                     <div
-                      className={`w-9 h-9 rounded-lg flex items-center justify-center ${colorClasses[stat.color]}`}
+                      className={`w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center ${colorClasses[stat.color]}`}
                     >
                       <stat.icon className="w-4 h-4" />
                     </div>
                     <span
-                      className={`text-xs font-semibold flex items-center gap-1 ${
+                      className={`text-xs font-semibold flex items-center gap-0.5 sm:gap-1 ${
                         stat.changeType === "up" ? "text-green-600" : "text-red-600"
                       }`}
                     >
@@ -579,9 +579,9 @@ export default function ReportsClient({
                       {stat.change}
                     </span>
                   </div>
-                  <p className="text-xs text-gray-600 mb-1">{stat.label}</p>
-                  <div className="flex items-baseline gap-1">
-                    <span className="text-lg font-bold text-gray-900">
+                  <p className="text-xs text-gray-600 mb-1 truncate">{stat.label}</p>
+                  <div className="flex items-baseline gap-1 flex-wrap">
+                    <span className="text-base sm:text-lg font-bold text-gray-900">
                       {stat.value}
                     </span>
                     {stat.currency && (
@@ -594,18 +594,18 @@ export default function ReportsClient({
           </div>
 
           {/* Main Chart - Spend vs Revenue */}
-          <div className="bg-white border border-gray-100 rounded-xl p-6 mb-6">
-            <div className="flex items-center justify-between mb-6">
+          <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
+            <div className="flex items-center justify-between mb-3 sm:mb-6">
               <div>
-                <h3 className="text-lg font-bold text-gray-900 mb-1">
+                <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
                   الإنفاق مقابل الإيرادات
                 </h3>
-                <p className="text-sm text-gray-500">
+                <p className="text-xs sm:text-sm text-gray-500">
                   تطور الأرقام خلال الفترة المحددة
                 </p>
               </div>
             </div>
-            <div className="h-80">
+            <div className="h-56 sm:h-80">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={chartData}>
                   <defs>
@@ -651,16 +651,16 @@ export default function ReportsClient({
           </div>
 
           {/* Two Column Charts */}
-          <div className="grid lg:grid-cols-2 gap-6 mb-6">
+          <div className="grid lg:grid-cols-2 gap-3 sm:gap-6 mb-4 sm:mb-6">
             {/* Top Days */}
-            <div className="bg-white border border-gray-100 rounded-xl p-6">
-              <h3 className="text-lg font-bold text-gray-900 mb-1">
+            <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6">
+              <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
                 أفضل الأيام أداءً
               </h3>
-              <p className="text-sm text-gray-500 mb-6">
+              <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
                 ترتيب الأيام حسب الإيرادات
               </p>
-              <div className="h-64">
+              <div className="h-52 sm:h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={topDaysData} layout="vertical">
                     <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
@@ -680,22 +680,22 @@ export default function ReportsClient({
             </div>
 
             {/* Platform Share */}
-            <div className="bg-white border border-gray-100 rounded-xl p-6">
-              <h3 className="text-lg font-bold text-gray-900 mb-1">
+            <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 overflow-hidden">
+              <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
                 توزيع الإيرادات على المنصات
               </h3>
-              <p className="text-sm text-gray-500 mb-6">
+              <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
                 النسبة المئوية لكل منصة
               </p>
-              <div className="h-64">
+              <div className="h-56 sm:h-64 w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
+                  <PieChart margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
                     <Pie
                       data={platformShareData}
                       cx="50%"
-                      cy="50%"
-                      innerRadius={50}
-                      outerRadius={90}
+                      cy="45%"
+                      innerRadius="40%"
+                      outerRadius="75%"
                       paddingAngle={3}
                       dataKey="value"
                     >
@@ -710,7 +710,11 @@ export default function ReportsClient({
                         borderRadius: "8px",
                       }}
                     />
-                    <Legend />
+                    <Legend
+                      verticalAlign="bottom"
+                      height={32}
+                      wrapperStyle={{ fontSize: "12px", paddingTop: "8px" }}
+                    />
                   </PieChart>
                 </ResponsiveContainer>
               </div>
@@ -718,20 +722,21 @@ export default function ReportsClient({
           </div>
 
           {/* Best Hours Chart */}
-          <div className="bg-white border border-gray-100 rounded-xl p-6 mb-6">
-            <h3 className="text-lg font-bold text-gray-900 mb-1">
+          <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
+            <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
               أفضل أوقات الإعلان
             </h3>
-            <p className="text-sm text-gray-500 mb-6">
+            <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
               توزيع الإيرادات على ساعات اليوم
             </p>
-            <div className="h-56">
+            <div className="h-52 sm:h-56">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={bestHoursData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
                   <XAxis dataKey="hour" stroke="#9ca3af" fontSize={11} />
                   <YAxis stroke="#9ca3af" fontSize={11} />
                   <Tooltip
+                    cursor={{ fill: "rgba(0,0,0,0.04)" }}
                     contentStyle={{
                       backgroundColor: "white",
                       border: "1px solid #e5e7eb",
@@ -745,13 +750,13 @@ export default function ReportsClient({
           </div>
 
           {/* Detailed Campaigns Table */}
-          <div className="bg-white border border-gray-100 rounded-xl p-6 mb-6">
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
+          <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 sm:gap-4 mb-4 sm:mb-6">
               <div>
-                <h3 className="text-lg font-bold text-gray-900 mb-1">
+                <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
                   جميع الحملات الإعلانية
                 </h3>
-                <p className="text-sm text-gray-500">
+                <p className="text-xs sm:text-sm text-gray-500">
                   {filteredCampaigns.length} حملة
                 </p>
               </div>
@@ -778,7 +783,68 @@ export default function ReportsClient({
               </div>
             </div>
 
-            <div className="overflow-x-auto">
+            {/* Mobile: Cards view */}
+            <div className="lg:hidden space-y-3">
+              {filteredCampaigns.length === 0 ? (
+                <p className="py-8 text-center text-gray-500 text-sm">
+                  لا توجد حملات تطابق البحث
+                </p>
+              ) : (
+                filteredCampaigns.map((campaign) => (
+                  <div
+                    key={campaign.id}
+                    className="border border-gray-100 rounded-lg p-4 hover:bg-gray-50 transition"
+                  >
+                    <div className="flex items-start justify-between gap-2 mb-2">
+                      <h4 className="font-semibold text-gray-900 text-sm leading-snug flex-1">
+                        {campaign.name}
+                      </h4>
+                      {campaign.status === "active" ? (
+                        <span className="bg-green-100 text-green-700 text-xs font-semibold px-2 py-1 rounded flex-shrink-0">
+                          نشطة
+                        </span>
+                      ) : (
+                        <span className="bg-gray-100 text-gray-600 text-xs font-semibold px-2 py-1 rounded flex-shrink-0">
+                          متوقفة
+                        </span>
+                      )}
+                    </div>
+                    <span className="bg-indigo-50 text-indigo-700 text-xs font-medium px-2 py-0.5 rounded inline-block mb-3">
+                      {campaign.platform}
+                    </span>
+                    <div className="grid grid-cols-2 gap-2 pt-3 border-t border-gray-100">
+                      <div>
+                        <p className="text-xs text-gray-500 mb-0.5">الإنفاق</p>
+                        <p className="text-sm font-semibold text-gray-900">
+                          {formatCurrency(campaign.spend)} ر.س
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-500 mb-0.5">الإيرادات</p>
+                        <p className="text-sm font-semibold text-gray-900">
+                          {formatCurrency(campaign.revenue)} ر.س
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-500 mb-0.5">ROAS</p>
+                        <p className="text-sm font-semibold text-green-600">
+                          {campaign.roas.toFixed(2)}x
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-500 mb-0.5">التحويلات</p>
+                        <p className="text-sm font-semibold text-gray-900">
+                          {campaign.conversions}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* Desktop: Table view */}
+            <div className="hidden lg:block overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="text-xs text-gray-500 border-b border-gray-100">
                   <tr>
