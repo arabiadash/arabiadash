@@ -51,6 +51,7 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [oauthLoading, setOauthLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [invalidCredentials, setInvalidCredentials] = useState(false);
 
   // Form data
   const [formData, setFormData] = useState({
@@ -58,13 +59,18 @@ export default function LoginPage() {
     password: "",
   });
 
-  // Surface OAuth errors that the callback redirected us back with
+  // Surface OAuth errors and pre-fill the email from URL params (e.g. when
+  // redirected here from /signup after detecting an existing account).
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get("error") === "oauth_failed") {
       setError(
         "تعذّر تسجيل الدخول بحساب Google. يرجى المحاولة مرة أخرى."
       );
+    }
+    const emailParam = params.get("email");
+    if (emailParam) {
+      setFormData((prev) => ({ ...prev, email: emailParam }));
     }
   }, []);
 
@@ -102,6 +108,7 @@ export default function LoginPage() {
       [e.target.name]: e.target.value,
     });
     setError(null);
+    setInvalidCredentials(false);
   };
 
   // Handle form submission
@@ -120,7 +127,8 @@ export default function LoginPage() {
       if (signInError) {
         // Translate common errors to Arabic
         if (signInError.message.includes("Invalid login credentials")) {
-          setError("الإيميل أو كلمة السر غير صحيحة");
+          setError("البريد الإلكتروني أو كلمة السر غير صحيحة");
+          setInvalidCredentials(true);
         } else if (signInError.message.includes("Email not confirmed")) {
           setError(
             "لم تقم بتأكيد إيميلك بعد. يرجى فتح إيميلك والضغط على رابط التأكيد."
@@ -172,9 +180,19 @@ export default function LoginPage() {
 
           {/* Error Alert */}
           {error && (
-            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-6 flex items-start gap-2">
-              <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
-              <span className="text-sm">{error}</span>
+            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-6 flex flex-col gap-2">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                <span className="text-sm">{error}</span>
+              </div>
+              {invalidCredentials && (
+                <Link
+                  href="/signup"
+                  className="text-sm font-semibold text-indigo-600 hover:text-indigo-700 underline mr-7"
+                >
+                  ليس لديك حساب؟ إنشاء حساب جديد ←
+                </Link>
+              )}
             </div>
           )}
 

@@ -55,6 +55,7 @@ export default function SignUpPage() {
   const [oauthLoading, setOauthLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const [emailExists, setEmailExists] = useState(false);
 
   // Surface OAuth errors that the callback redirected us back with
   useEffect(() => {
@@ -108,6 +109,7 @@ export default function SignUpPage() {
       [e.target.name]: e.target.value,
     });
     setError(null);
+    setEmailExists(false);
   };
 
   // Handle form submission
@@ -141,11 +143,29 @@ export default function SignUpPage() {
         // Translate common errors to Arabic
         if (signUpError.message.includes("already registered")) {
           setError("هذا الإيميل مسجل بالفعل. حاول تسجيل الدخول بدلاً من ذلك.");
+          setEmailExists(true);
         } else if (signUpError.message.includes("invalid email")) {
           setError("الإيميل غير صحيح");
         } else {
           setError("حدث خطأ. يرجى المحاولة مرة أخرى.");
         }
+        setLoading(false);
+        return;
+      }
+
+      // Supabase anti-enumeration: when an email is already registered with a
+      // confirmed account, signUp returns a fake user object with an empty
+      // identities array (no error). Detect that and surface a clear message
+      // instead of pretending the signup worked.
+      if (
+        data.user &&
+        Array.isArray(data.user.identities) &&
+        data.user.identities.length === 0
+      ) {
+        setError(
+          "هذا الإيميل مسجّل بالفعل. سجّل دخول من صفحة تسجيل الدخول."
+        );
+        setEmailExists(true);
         setLoading(false);
         return;
       }
@@ -223,9 +243,19 @@ export default function SignUpPage() {
 
           {/* Error Alert */}
           {error && (
-            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-6 flex items-start gap-2">
-              <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
-              <span className="text-sm">{error}</span>
+            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg mb-6 flex flex-col gap-2">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                <span className="text-sm">{error}</span>
+              </div>
+              {emailExists && (
+                <Link
+                  href={`/login?email=${encodeURIComponent(formData.email)}`}
+                  className="text-sm font-semibold text-indigo-600 hover:text-indigo-700 underline mr-7"
+                >
+                  تسجيل الدخول بدلاً من ذلك ←
+                </Link>
+              )}
             </div>
           )}
 
