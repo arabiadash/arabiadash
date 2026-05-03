@@ -506,9 +506,9 @@ export default function LandingPage() {
             <div>
               <h4 className="text-white font-bold mb-4">الشركة</h4>
               <ul className="space-y-2 text-sm">
-                <li><a href="#" className="hover:text-white transition">من نحن</a></li>
-                <li><a href="#" className="hover:text-white transition">المدونة</a></li>
-                <li><a href="#" className="hover:text-white transition">تواصل معنا</a></li>
+                <li><Link href="/about" className="hover:text-white transition">من نحن</Link></li>
+                <li><Link href="/blog" className="hover:text-white transition">المدونة</Link></li>
+                <li><Link href="/contact" className="hover:text-white transition">تواصل معنا</Link></li>
               </ul>
             </div>
 
