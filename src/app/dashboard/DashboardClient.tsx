@@ -407,7 +407,7 @@ export default function DashboardClient({
                     </p>
                   </div>
                 </div>
-                <div className="h-56 sm:h-72">
+                <div dir="ltr" className="h-56 sm:h-72">
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart data={mockChartData}>
                       <defs>
@@ -462,7 +462,7 @@ export default function DashboardClient({
                   <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
                     توزيع الإيرادات على المنصات
                   </p>
-                  <div className="h-52 sm:h-64">
+                  <div dir="ltr" className="h-52 sm:h-64">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={mockPlatformPerformance}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
@@ -489,7 +489,7 @@ export default function DashboardClient({
                   <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
                     العائد على الإنفاق الإعلاني
                   </p>
-                  <div className="h-52 sm:h-64">
+                  <div dir="ltr" className="h-52 sm:h-64">
                     <ResponsiveContainer width="100%" height="100%">
                       <AreaChart data={mockChartData}>
                         <defs>

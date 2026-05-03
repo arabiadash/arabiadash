@@ -605,7 +605,7 @@ export default function ReportsClient({
                 </p>
               </div>
             </div>
-            <div className="h-56 sm:h-80">
+            <div dir="ltr" className="h-56 sm:h-80">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={chartData}>
                   <defs>
@@ -660,7 +660,7 @@ export default function ReportsClient({
               <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
                 ترتيب الأيام حسب الإيرادات
               </p>
-              <div className="h-52 sm:h-64">
+              <div dir="ltr" className="h-52 sm:h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={topDaysData} layout="vertical">
                     <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
@@ -687,7 +687,7 @@ export default function ReportsClient({
               <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
                 النسبة المئوية لكل منصة
               </p>
-              <div className="h-56 sm:h-64 w-full">
+              <div dir="ltr" className="h-56 sm:h-64 w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
                     <Pie
@@ -729,7 +729,7 @@ export default function ReportsClient({
             <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
               توزيع الإيرادات على ساعات اليوم
             </p>
-            <div className="h-52 sm:h-56">
+            <div dir="ltr" className="h-52 sm:h-56">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={bestHoursData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
