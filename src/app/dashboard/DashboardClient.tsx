@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -34,6 +34,9 @@ import {
   mockTopCampaigns,
   formatCurrency,
   formatPercent,
+  AD_PLATFORM_IDS,
+  platformNameToId,
+  getConnectedAdPlatforms,
 } from "@/lib/mock-data";
 import {
   AreaChart,
@@ -52,33 +55,70 @@ interface DashboardClientProps {
   fullName: string;
   companyName: string;
   email: string;
+  connectedPlatforms: string[];
 }
 
 export default function DashboardClient({
   fullName,
   companyName,
   email,
+  connectedPlatforms,
 }: DashboardClientProps) {
   const router = useRouter();
   const supabase = createClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
-  const [connectedPlatforms, setConnectedPlatforms] = useState<string[]>([]);
-
-  // Load connected platforms from localStorage
-  useEffect(() => {
-    const saved = localStorage.getItem("arabiadash_connections");
-    if (saved) {
-      try {
-        setConnectedPlatforms(JSON.parse(saved));
-      } catch (e) {
-        console.error("Error loading connections:", e);
-      }
-    }
-  }, []);
 
   // Check if user has any connections
   const hasConnections = connectedPlatforms.length > 0;
+
+  // Filter mock data by connected ad platforms
+  const connectedAdPlatforms = useMemo(
+    () => getConnectedAdPlatforms(connectedPlatforms),
+    [connectedPlatforms]
+  );
+
+  // Scaling factor: ratio of connected ad platforms to total ad platforms.
+  // Used for aggregate metrics (KPIs, daily totals) that aren't tagged per-platform.
+  const scaleFactor = connectedAdPlatforms.length / AD_PLATFORM_IDS.length;
+
+  const filteredTopCampaigns = useMemo(
+    () =>
+      mockTopCampaigns.filter((c) =>
+        connectedAdPlatforms.includes(platformNameToId(c.platform))
+      ),
+    [connectedAdPlatforms]
+  );
+
+  const filteredPlatformPerformance = useMemo(
+    () =>
+      mockPlatformPerformance.filter((p) =>
+        connectedAdPlatforms.includes(platformNameToId(p.name))
+      ),
+    [connectedAdPlatforms]
+  );
+
+  const scaledChartData = useMemo(
+    () =>
+      mockChartData.map((d) => ({
+        ...d,
+        spend: Math.round(d.spend * scaleFactor),
+        revenue: Math.round(d.revenue * scaleFactor),
+        // ROAS is a ratio, not an aggregate — keep as-is when there's data, else 0
+        roas: scaleFactor > 0 ? d.roas : 0,
+      })),
+    [scaleFactor]
+  );
+
+  const scaledStats = useMemo(
+    () => ({
+      totalSpend: Math.round(mockStats.totalSpend * scaleFactor),
+      totalRevenue: Math.round(mockStats.totalRevenue * scaleFactor),
+      roas: scaleFactor > 0 ? mockStats.roas : 0,
+      customers: Math.round(mockStats.customers * scaleFactor),
+    }),
+    [scaleFactor]
+  );
 
   // Handle sign out
   const handleSignOut = async () => {
@@ -90,12 +130,13 @@ export default function DashboardClient({
 
   const initial = fullName.charAt(0).toUpperCase();
 
-  // Stats with real or empty values based on connections
-  const stats = hasConnections
+  // Stats: scaled by connected ad platforms (or 0 across the board if none connected)
+  const hasAdData = connectedAdPlatforms.length > 0;
+  const stats = hasAdData
     ? [
         {
           label: "إجمالي الإنفاق الإعلاني",
-          value: formatCurrency(mockStats.totalSpend),
+          value: formatCurrency(scaledStats.totalSpend),
           currency: "ريال",
           change: formatPercent(mockStats.spendChange),
           changeType: mockStats.spendChange >= 0 ? "up" : "down",
@@ -104,7 +145,7 @@ export default function DashboardClient({
         },
         {
           label: "إجمالي المبيعات",
-          value: formatCurrency(mockStats.totalRevenue),
+          value: formatCurrency(scaledStats.totalRevenue),
           currency: "ريال",
           change: formatPercent(mockStats.revenueChange),
           changeType: mockStats.revenueChange >= 0 ? "up" : "down",
@@ -113,7 +154,7 @@ export default function DashboardClient({
         },
         {
           label: "العائد على الإعلان (ROAS)",
-          value: mockStats.roas.toFixed(2),
+          value: scaledStats.roas.toFixed(2),
           currency: "x",
           change: formatPercent(mockStats.roasChange),
           changeType: mockStats.roasChange >= 0 ? "up" : "down",
@@ -122,7 +163,7 @@ export default function DashboardClient({
         },
         {
           label: "عدد العملاء",
-          value: formatCurrency(mockStats.customers),
+          value: formatCurrency(scaledStats.customers),
           currency: "",
           change: formatPercent(mockStats.customersChange),
           changeType: mockStats.customersChange >= 0 ? "up" : "down",
@@ -409,7 +450,7 @@ export default function DashboardClient({
                 </div>
                 <div dir="ltr" className="h-56 sm:h-72">
                   <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={mockChartData}>
+                    <AreaChart data={scaledChartData}>
                       <defs>
                         <linearGradient id="colorRevenue" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
@@ -464,7 +505,7 @@ export default function DashboardClient({
                   </p>
                   <div dir="ltr" className="h-52 sm:h-64">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={mockPlatformPerformance}>
+                      <BarChart data={filteredPlatformPerformance}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
                         <XAxis dataKey="name" stroke="#9ca3af" fontSize={12} />
                         <YAxis stroke="#9ca3af" fontSize={12} />
@@ -491,7 +532,7 @@ export default function DashboardClient({
                   </p>
                   <div dir="ltr" className="h-52 sm:h-64">
                     <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={mockChartData}>
+                      <AreaChart data={scaledChartData}>
                         <defs>
                           <linearGradient id="colorRoas" x1="0" y1="0" x2="0" y2="1">
                             <stop offset="5%" stopColor="#a855f7" stopOpacity={0.4} />
@@ -537,7 +578,12 @@ export default function DashboardClient({
 
                 {/* Mobile: Cards view */}
                 <div className="lg:hidden space-y-3">
-                  {mockTopCampaigns.map((campaign) => (
+                  {filteredTopCampaigns.length === 0 ? (
+                    <p className="py-8 text-center text-gray-500 text-sm">
+                      لا توجد حملات من المنصات المتصلة بعد
+                    </p>
+                  ) : (
+                    filteredTopCampaigns.map((campaign) => (
                     <div
                       key={campaign.id}
                       className="border border-gray-100 rounded-lg p-4 hover:bg-gray-50 transition"
@@ -580,7 +626,8 @@ export default function DashboardClient({
                         </div>
                       </div>
                     </div>
-                  ))}
+                  ))
+                  )}
                 </div>
 
                 {/* Desktop: Table view */}
@@ -597,7 +644,14 @@ export default function DashboardClient({
                       </tr>
                     </thead>
                     <tbody>
-                      {mockTopCampaigns.map((campaign) => (
+                      {filteredTopCampaigns.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="py-8 text-center text-gray-500">
+                            لا توجد حملات من المنصات المتصلة بعد
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredTopCampaigns.map((campaign) => (
                         <tr
                           key={campaign.id}
                           className="border-b border-gray-50 hover:bg-gray-50 transition"
@@ -631,7 +685,8 @@ export default function DashboardClient({
                             )}
                           </td>
                         </tr>
-                      ))}
+                        ))
+                      )}
                     </tbody>
                   </table>
                 </div>

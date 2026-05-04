@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -34,7 +34,13 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
-import { formatCurrency, formatPercent } from "@/lib/mock-data";
+import {
+  formatCurrency,
+  formatPercent,
+  AD_PLATFORM_IDS,
+  platformNameToId,
+  getConnectedAdPlatforms,
+} from "@/lib/mock-data";
 import {
   AreaChart,
   Area,
@@ -55,6 +61,7 @@ interface ReportsClientProps {
   fullName: string;
   companyName: string;
   email: string;
+  connectedPlatforms: string[];
 }
 
 // Date range options
@@ -74,8 +81,9 @@ const platformsFilter = [
   { id: "snapchat", label: "Snapchat Ads", color: "#fffc00" },
 ];
 
-// Generate mock data based on filters
-const generateChartData = (days: number, platform: string) => {
+// Generate mock data based on filters. scaleFactor reduces aggregate values to
+// match how many ad platforms the user has connected (0 → 1 across the range).
+const generateChartData = (days: number, platform: string, scaleFactor: number) => {
   const data = [];
   const dayNames = ["السبت", "الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة"];
   const baseSpend = platform === "all" ? 6500 : platform === "meta" ? 2500 : 1500;
@@ -84,19 +92,21 @@ const generateChartData = (days: number, platform: string) => {
   const pointsToShow = Math.min(days, 30);
   for (let i = 0; i < pointsToShow; i++) {
     const variance = 0.7 + Math.random() * 0.6;
+    const spend = Math.round(baseSpend * variance * scaleFactor);
+    const revenue = Math.round(baseRevenue * variance * scaleFactor);
     data.push({
       day: days <= 7 ? dayNames[i % 7] : `يوم ${i + 1}`,
-      spend: Math.round(baseSpend * variance),
-      revenue: Math.round(baseRevenue * variance),
-      profit: Math.round(baseRevenue * variance - baseSpend * variance),
-      roas: Number((baseRevenue / baseSpend * variance / variance).toFixed(2)),
+      spend,
+      revenue,
+      profit: revenue - spend,
+      roas: scaleFactor > 0 ? Number((baseRevenue / baseSpend).toFixed(2)) : 0,
     });
   }
   return data;
 };
 
-// Top days data
-const topDaysData = [
+// Top days data (raw — gets scaled via useMemo at usage site)
+const rawTopDaysData = [
   { day: "الجمعة", revenue: 31200 },
   { day: "السبت", revenue: 28400 },
   { day: "الخميس", revenue: 26800 },
@@ -106,16 +116,16 @@ const topDaysData = [
   { day: "الثلاثاء", revenue: 19500 },
 ];
 
-// Platform share data
-const platformShareData = [
+// Platform share data (raw — filtered to connected ad platforms at usage site)
+const rawPlatformShareData = [
   { name: "Meta", value: 58000, color: "#6366f1" },
   { name: "Google", value: 42500, color: "#a855f7" },
   { name: "TikTok", value: 24800, color: "#ec4899" },
   { name: "Snapchat", value: 17200, color: "#facc15" },
 ];
 
-// Best hours data
-const bestHoursData = [
+// Best hours data (raw — gets scaled via useMemo at usage site)
+const rawBestHoursData = [
   { hour: "9 ص", revenue: 4200 },
   { hour: "12 م", revenue: 7800 },
   { hour: "3 م", revenue: 8900 },
@@ -140,12 +150,12 @@ export default function ReportsClient({
   fullName,
   companyName,
   email,
+  connectedPlatforms,
 }: ReportsClientProps) {
   const router = useRouter();
   const supabase = createClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
-  const [connectedPlatforms, setConnectedPlatforms] = useState<string[]>([]);
 
   // Filters
   const [selectedRange, setSelectedRange] = useState("30d");
@@ -153,25 +163,50 @@ export default function ReportsClient({
   const [campaignSearch, setCampaignSearch] = useState("");
   const [campaignStatusFilter, setCampaignStatusFilter] = useState("all");
 
-  // Load connected platforms from localStorage
-  useEffect(() => {
-    const saved = localStorage.getItem("arabiadash_connections");
-    if (saved) {
-      try {
-        setConnectedPlatforms(JSON.parse(saved));
-      } catch (e) {
-        console.error("Error loading connections:", e);
-      }
-    }
-  }, []);
-
   const hasConnections = connectedPlatforms.length > 0;
+
+  // Subset of connected platforms that are ad platforms (excludes salla/zid)
+  const connectedAdPlatforms = useMemo(
+    () => getConnectedAdPlatforms(connectedPlatforms),
+    [connectedPlatforms]
+  );
+
+  // Scaling factor for aggregate metrics not tagged per-platform
+  const scaleFactor = connectedAdPlatforms.length / AD_PLATFORM_IDS.length;
 
   // Computed data based on filters
   const currentRange = dateRanges.find((r) => r.id === selectedRange) || dateRanges[1];
   const chartData = useMemo(
-    () => generateChartData(currentRange.days, selectedPlatform),
-    [currentRange.days, selectedPlatform]
+    () => generateChartData(currentRange.days, selectedPlatform, scaleFactor),
+    [currentRange.days, selectedPlatform, scaleFactor]
+  );
+
+  // Top days / best hours scaled to connected ad platforms
+  const topDaysData = useMemo(
+    () =>
+      rawTopDaysData.map((d) => ({
+        ...d,
+        revenue: Math.round(d.revenue * scaleFactor),
+      })),
+    [scaleFactor]
+  );
+
+  const bestHoursData = useMemo(
+    () =>
+      rawBestHoursData.map((d) => ({
+        ...d,
+        revenue: Math.round(d.revenue * scaleFactor),
+      })),
+    [scaleFactor]
+  );
+
+  // Platform share filtered to connected ad platforms only
+  const platformShareData = useMemo(
+    () =>
+      rawPlatformShareData.filter((p) =>
+        connectedAdPlatforms.includes(platformNameToId(p.name))
+      ),
+    [connectedAdPlatforms]
   );
 
   // Compute KPIs from chart data
@@ -180,7 +215,8 @@ export default function ReportsClient({
     const totalRevenue = chartData.reduce((sum, d) => sum + d.revenue, 0);
     const profit = totalRevenue - totalSpend;
     const avgRoas = totalSpend > 0 ? totalRevenue / totalSpend : 0;
-    const conversions = Math.round(chartData.length * 18);
+    const conversions =
+      scaleFactor > 0 ? Math.round(chartData.length * 18 * scaleFactor) : 0;
     const aov = conversions > 0 ? totalRevenue / conversions : 0;
 
     return {
@@ -191,19 +227,20 @@ export default function ReportsClient({
       conversions,
       aov,
     };
-  }, [chartData]);
+  }, [chartData, scaleFactor]);
 
-  // Filter campaigns
+  // Filter campaigns: search + status + platform-filter UI + connected ad platforms
   const filteredCampaigns = useMemo(() => {
     return allCampaigns.filter((c) => {
+      const platformId = platformNameToId(c.platform);
       const matchesSearch = c.name.toLowerCase().includes(campaignSearch.toLowerCase());
       const matchesStatus = campaignStatusFilter === "all" || c.status === campaignStatusFilter;
-      const matchesPlatform =
-        selectedPlatform === "all" ||
-        c.platform.toLowerCase() === selectedPlatform.toLowerCase();
-      return matchesSearch && matchesStatus && matchesPlatform;
+      const matchesPlatformFilter =
+        selectedPlatform === "all" || platformId === selectedPlatform.toLowerCase();
+      const matchesConnected = connectedAdPlatforms.includes(platformId);
+      return matchesSearch && matchesStatus && matchesPlatformFilter && matchesConnected;
     });
-  }, [campaignSearch, campaignStatusFilter, selectedPlatform]);
+  }, [campaignSearch, campaignStatusFilter, selectedPlatform, connectedAdPlatforms]);
 
   // Handle sign out
   const handleSignOut = async () => {

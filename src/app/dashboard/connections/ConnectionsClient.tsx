@@ -22,6 +22,7 @@ import {
   Sparkles,
   ShoppingBag,
   Megaphone,
+  AlertCircle,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { platforms } from "@/lib/mock-data";
@@ -30,12 +31,14 @@ interface ConnectionsClientProps {
   fullName: string;
   companyName: string;
   email: string;
+  initialConnections: string[];
 }
 
 export default function ConnectionsClient({
   fullName,
   companyName,
   email,
+  initialConnections,
 }: ConnectionsClientProps) {
   const router = useRouter();
   const supabase = createClient();
@@ -44,49 +47,89 @@ export default function ConnectionsClient({
 
   // Connection states
   const [connecting, setConnecting] = useState<string | null>(null);
-  const [connectedPlatforms, setConnectedPlatforms] = useState<string[]>([]);
+  const [disconnecting, setDisconnecting] = useState<string | null>(null);
+  const [connectedPlatforms, setConnectedPlatforms] =
+    useState<string[]>(initialConnections);
   const [showSuccess, setShowSuccess] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Load connected platforms from localStorage on mount
+  // Keep local state in sync if Server re-renders with fresh data
   useEffect(() => {
-    const saved = localStorage.getItem("arabiadash_connections");
-    if (saved) {
-      try {
-        setConnectedPlatforms(JSON.parse(saved));
-      } catch (e) {
-        console.error("Error loading connections:", e);
-      }
-    }
-  }, []);
+    setConnectedPlatforms(initialConnections);
+  }, [initialConnections]);
 
-  // Save connected platforms to localStorage
-  const saveConnections = (platforms: string[]) => {
-    localStorage.setItem("arabiadash_connections", JSON.stringify(platforms));
-    setConnectedPlatforms(platforms);
+  const showError = (message: string) => {
+    setErrorMessage(message);
+    setTimeout(() => setErrorMessage(null), 4000);
   };
 
-  // Handle platform connection (demo mode)
+  // Handle platform connection
   const handleConnect = async (platformId: string) => {
     setConnecting(platformId);
+    setErrorMessage(null);
 
-    // Simulate API connection delay
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
 
-    // Add to connected platforms
-    const newConnections = [...connectedPlatforms, platformId];
-    saveConnections(newConnections);
+    if (!user) {
+      setConnecting(null);
+      showError("انتهت الجلسة. الرجاء تسجيل الدخول مجدداً.");
+      router.push("/login");
+      return;
+    }
+
+    const { error } = await supabase.from("connections").insert({
+      user_id: user.id,
+      platform: platformId,
+      status: "connected",
+    });
 
     setConnecting(null);
-    setShowSuccess(platformId);
 
-    // Hide success message after 3 seconds
+    if (error) {
+      showError("تعذّر ربط المنصة. حاول مرة أخرى.");
+      return;
+    }
+
+    // Optimistic UI update + refresh from server
+    setConnectedPlatforms((prev) => [...prev, platformId]);
+    setShowSuccess(platformId);
     setTimeout(() => setShowSuccess(null), 3000);
+    router.refresh();
   };
 
   // Handle disconnect
-  const handleDisconnect = (platformId: string) => {
-    const newConnections = connectedPlatforms.filter((p) => p !== platformId);
-    saveConnections(newConnections);
+  const handleDisconnect = async (platformId: string) => {
+    setDisconnecting(platformId);
+    setErrorMessage(null);
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      setDisconnecting(null);
+      showError("انتهت الجلسة. الرجاء تسجيل الدخول مجدداً.");
+      router.push("/login");
+      return;
+    }
+
+    const { error } = await supabase
+      .from("connections")
+      .delete()
+      .eq("user_id", user.id)
+      .eq("platform", platformId);
+
+    setDisconnecting(null);
+
+    if (error) {
+      showError("تعذّر فصل المنصة. حاول مرة أخرى.");
+      return;
+    }
+
+    setConnectedPlatforms((prev) => prev.filter((p) => p !== platformId));
+    router.refresh();
   };
 
   // Handle sign out
@@ -248,6 +291,14 @@ export default function ConnectionsClient({
             </div>
           )}
 
+          {/* Error Toast */}
+          {errorMessage && (
+            <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-red-50 border border-red-200 text-red-700 px-6 py-3 rounded-lg shadow-lg flex items-center gap-2">
+              <AlertCircle className="w-5 h-5" />
+              <span className="font-medium">{errorMessage}</span>
+            </div>
+          )}
+
           {/* Connection Status */}
           {connectedPlatforms.length > 0 && (
             <div className="bg-gradient-to-br from-green-50 to-emerald-50 border border-green-100 rounded-2xl p-4 sm:p-6 mb-4 sm:mb-8">
@@ -340,9 +391,17 @@ export default function ConnectionsClient({
                         </button>
                         <button
                           onClick={() => handleDisconnect(platform.id)}
-                          className="w-full text-gray-500 hover:text-red-600 py-1.5 text-xs transition"
+                          disabled={disconnecting === platform.id}
+                          className="w-full text-gray-500 hover:text-red-600 py-1.5 text-xs transition disabled:opacity-50 inline-flex items-center justify-center gap-1"
                         >
-                          إلغاء الربط
+                          {disconnecting === platform.id ? (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              جاري الفصل...
+                            </>
+                          ) : (
+                            "إلغاء الربط"
+                          )}
                         </button>
                       </div>
                     ) : (
@@ -433,9 +492,17 @@ export default function ConnectionsClient({
                         </button>
                         <button
                           onClick={() => handleDisconnect(platform.id)}
-                          className="w-full text-gray-500 hover:text-red-600 py-1.5 text-xs transition"
+                          disabled={disconnecting === platform.id}
+                          className="w-full text-gray-500 hover:text-red-600 py-1.5 text-xs transition disabled:opacity-50 inline-flex items-center justify-center gap-1"
                         >
-                          إلغاء الربط
+                          {disconnecting === platform.id ? (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              جاري الفصل...
+                            </>
+                          ) : (
+                            "إلغاء الربط"
+                          )}
                         </button>
                       </div>
                     ) : (

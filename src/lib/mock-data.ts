@@ -163,3 +163,18 @@ export function formatPercent(value: number): string {
   const sign = value >= 0 ? "+" : "";
   return `${sign}${value.toFixed(1)}%`;
 }
+
+// Ad platform IDs (excludes ecommerce platforms like salla/zid)
+export const AD_PLATFORM_IDS = ["meta", "google", "tiktok", "snapchat"] as const;
+
+// Maps mock-data display names ("Meta", "Google"...) to platform IDs ("meta", "google"...)
+export function platformNameToId(displayName: string): string {
+  return displayName.toLowerCase();
+}
+
+// Returns the subset of connectedPlatforms that are ad platforms
+export function getConnectedAdPlatforms(connectedPlatforms: string[]): string[] {
+  return connectedPlatforms.filter((p) =>
+    (AD_PLATFORM_IDS as readonly string[]).includes(p)
+  );
+}

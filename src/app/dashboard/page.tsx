@@ -20,11 +20,19 @@ export default async function DashboardPage() {
   const companyName = user.user_metadata?.company_name || "";
   const email = user.email || "";
 
+  const { data: connectionsData } = await supabase
+    .from("connections")
+    .select("platform")
+    .eq("status", "connected");
+
+  const connectedPlatforms = (connectionsData ?? []).map((c) => c.platform);
+
   return (
     <DashboardClient
       fullName={fullName}
       companyName={companyName}
       email={email}
+      connectedPlatforms={connectedPlatforms}
     />
   );
 }
