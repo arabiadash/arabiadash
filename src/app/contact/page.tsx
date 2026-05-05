@@ -135,8 +135,8 @@ export default function ContactPage() {
     {
       icon: Globe,
       label: "الموقع",
-      value: "arabiadash.vercel.app",
-      href: "https://arabiadash.vercel.app",
+      value: "arabiadash.com",
+      href: "https://arabiadash.com",
       ltr: true,
     },
     {
