@@ -23,7 +23,7 @@ export default async function DashboardPage() {
   const { data: connectionsData } = await supabase
     .from("connections")
     .select("platform")
-    .eq("status", "connected");
+    .eq("status", "active");
 
   const connectedPlatforms = (connectionsData ?? []).map((c) => c.platform);
 

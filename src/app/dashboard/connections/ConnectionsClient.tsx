@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   BarChart3,
   Settings,
@@ -34,6 +34,17 @@ interface ConnectionsClientProps {
   initialConnections: string[];
 }
 
+const META_ERROR_MESSAGES: Record<string, string> = {
+  meta_oauth_denied: "تم رفض الربط مع Meta. يمكنك المحاولة مرة أخرى.",
+  meta_callback_invalid: "حدث خطأ في عملية الربط. حاول مرة أخرى.",
+  meta_state_mismatch: "انتهت صلاحية جلسة الربط. حاول مرة أخرى.",
+  meta_no_ad_accounts:
+    "لم يتم العثور على حسابات إعلانية مرتبطة بحسابك على Meta.",
+  meta_db_error: "تعذّر حفظ بيانات الربط. حاول مرة أخرى.",
+  meta_init_failed: "تعذّر بدء عملية الربط. حاول مرة أخرى.",
+  meta_callback_failed: "حدث خطأ غير متوقع أثناء الربط. حاول مرة أخرى.",
+};
+
 export default function ConnectionsClient({
   fullName,
   companyName,
@@ -41,6 +52,7 @@ export default function ConnectionsClient({
   initialConnections,
 }: ConnectionsClientProps) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const supabase = createClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
@@ -57,6 +69,27 @@ export default function ConnectionsClient({
   useEffect(() => {
     setConnectedPlatforms(initialConnections);
   }, [initialConnections]);
+
+  // Handle OAuth callback redirect (?success=... or ?error=...)
+  useEffect(() => {
+    const success = searchParams.get("success");
+    const errorCode = searchParams.get("error");
+
+    if (!success && !errorCode) return;
+
+    if (success === "meta_connected") {
+      setShowSuccess("meta");
+      setTimeout(() => setShowSuccess(null), 3000);
+      router.refresh();
+    } else if (errorCode) {
+      const msg =
+        META_ERROR_MESSAGES[errorCode] ?? "حدث خطأ. حاول مرة أخرى.";
+      setErrorMessage(msg);
+      setTimeout(() => setErrorMessage(null), 4000);
+    }
+
+    router.replace("/dashboard/connections", { scroll: false });
+  }, [searchParams, router]);
 
   const showError = (message: string) => {
     setErrorMessage(message);
@@ -79,10 +112,17 @@ export default function ConnectionsClient({
       return;
     }
 
+    // Meta uses real OAuth flow — redirect to init route, which sets state
+    // cookie and redirects to Facebook's OAuth dialog.
+    if (platformId === "meta") {
+      window.location.href = "/api/auth/meta/init";
+      return;
+    }
+
     const { error } = await supabase.from("connections").insert({
       user_id: user.id,
       platform: platformId,
-      status: "connected",
+      status: "active",
     });
 
     setConnecting(null);
@@ -413,7 +453,9 @@ export default function ConnectionsClient({
                         {isConnecting ? (
                           <>
                             <Loader2 className="w-4 h-4 animate-spin" />
-                            جاري الربط...
+                            {platform.id === "meta"
+                              ? "جاري التوجيه إلى Meta..."
+                              : "جاري الربط..."}
                           </>
                         ) : (
                           "ربط الحساب"
