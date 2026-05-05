@@ -37,14 +37,34 @@ export async function updateSession(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
-  // Protect dashboard routes - redirect to login if not authenticated
-  if (
-    !user &&
-    request.nextUrl.pathname.startsWith("/dashboard")
-  ) {
+  const path = request.nextUrl.pathname;
+  const isOnboarding = path === "/onboarding";
+  const isDashboard = path.startsWith("/dashboard");
+  const isProtected = isDashboard || isOnboarding;
+
+  // Rule 1: Protected page without authenticated user → /login
+  if (!user && isProtected) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);
+  }
+
+  if (user) {
+    const onboardingCompleted = !!user.user_metadata?.onboarding_completed;
+
+    // Rule 2: Completed onboarding but visiting /onboarding → /dashboard
+    if (isOnboarding && onboardingCompleted) {
+      const url = request.nextUrl.clone();
+      url.pathname = "/dashboard";
+      return NextResponse.redirect(url);
+    }
+
+    // Rule 3: Visiting /dashboard without finishing onboarding → /onboarding
+    if (isDashboard && !onboardingCompleted) {
+      const url = request.nextUrl.clone();
+      url.pathname = "/onboarding";
+      return NextResponse.redirect(url);
+    }
   }
 
   return supabaseResponse;

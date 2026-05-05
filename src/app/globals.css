@@ -21,3 +21,18 @@ a {
   color: inherit;
   text-decoration: none;
 }
+
+@keyframes fade-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-slide {
+  animation: fade-slide-in 350ms ease-out;
+}
