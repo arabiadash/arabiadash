@@ -85,20 +85,6 @@ function getDayCount(range: DateRangeValue): number {
   return Math.ceil(ms / (1000 * 60 * 60 * 24)) + 1;
 }
 
-const PRESET_RANGE_LABELS: Record<string, string> = {
-  "7d": "آخر 7 أيام",
-  "14d": "آخر 14 يوم",
-  "30d": "آخر 30 يوم",
-  "90d": "آخر 90 يوم",
-  lifetime: "مدى الحياة",
-};
-
-function getRangeLabel(range: DateRangeValue): string {
-  if (range.type === "preset") {
-    return PRESET_RANGE_LABELS[range.preset] ?? "";
-  }
-  return `${range.since} - ${range.until}`;
-}
 
 export default function DashboardClient({
   fullName,
@@ -157,26 +143,42 @@ export default function DashboardClient({
     };
   }, [insights]);
 
-  // Smart time_increment: daily breakdown for ranges ≤ 90 days, aggregate otherwise
+  // Smart time_increment: daily breakdown for ranges ≤ 90 days, aggregate otherwise.
+  // Used for KPI subtitle/messaging (reflects the selected dateRange).
   const dayCount = getDayCount(dateRange);
   const shouldShowDailyBreakdown =
     dateRange.type === "custom"
       ? dayCount <= 90
       : ["7d", "14d", "30d", "90d"].includes(dateRange.preset);
 
-  // Chart insights — same range as KPIs, but with daily breakdown when applicable
+  // Lifetime can't be shown as a meaningful chart (one big aggregate row).
+  // Fallback: chart shows last 90 days while KPIs still aggregate the full lifetime.
+  const isLifetime =
+    dateRange.type === "preset" && dateRange.preset === "lifetime";
+
+  const chartDateRange: DateRangeValue = isLifetime
+    ? { type: "preset", preset: "90d" }
+    : dateRange;
+
+  const chartDayCount = getDayCount(chartDateRange);
+  const chartShouldShowDaily =
+    chartDateRange.type === "custom"
+      ? chartDayCount <= 90
+      : ["7d", "14d", "30d", "90d"].includes(chartDateRange.preset);
+
+  // Chart insights — uses chartDateRange so lifetime falls back to 90d
   const { insights: chartInsights, loading: chartLoading } = useInsights({
-    ...dateRangeValueToOptions(dateRange),
+    ...dateRangeValueToOptions(chartDateRange),
     level: "account",
-    timeIncrement: shouldShowDailyBreakdown ? 1 : undefined,
+    timeIncrement: chartShouldShowDaily ? 1 : undefined,
   });
 
   const displayChartData = useMemo(
     () =>
       chartInsights.map((insight) => ({
         date: insight.dateStart,
-        dayLabel: shouldShowDailyBreakdown
-          ? formatChartDayLabel(insight.dateStart, dayCount)
+        dayLabel: chartShouldShowDaily
+          ? formatChartDayLabel(insight.dateStart, chartDayCount)
           : insight.dateStart,
         tooltipLabel: formatChartTooltipLabel(insight.dateStart),
         roas: insight.roas,
@@ -193,8 +195,8 @@ export default function DashboardClient({
       })),
     [
       chartInsights,
-      shouldShowDailyBreakdown,
-      dayCount,
+      chartShouldShowDaily,
+      chartDayCount,
       accountCurrency,
       currency,
     ]
@@ -519,14 +521,12 @@ export default function DashboardClient({
                       أداء الفترة
                     </h3>
                     <p className="text-xs sm:text-sm text-gray-500">
-                      {shouldShowDailyBreakdown
-                        ? `توزيع يومي (${getRangeLabel(dateRange)}) بـ ${CURRENCY_LABELS[currency].nameAr}`
-                        : `إجمالي الفترة (${getRangeLabel(dateRange)}) بـ ${CURRENCY_LABELS[currency].nameAr}`}
+                      {`توزيع يومي بـ ${CURRENCY_LABELS[currency].nameAr}`}
                     </p>
                   </div>
                 </div>
                 <div dir="ltr" className="h-56 sm:h-72">
-                  {!shouldShowDailyBreakdown ? (
+                  {!chartShouldShowDaily ? (
                     <div className="h-full flex items-center justify-center text-center px-4">
                       <p className="text-sm text-gray-500">
                         التوزيع اليومي متاح للفترات حتى 90 يوم
@@ -634,6 +634,18 @@ export default function DashboardClient({
                     </ResponsiveContainer>
                   )}
                 </div>
+
+                {/* Lifetime disclaimer */}
+                {isLifetime && (
+                  <div className="mt-3 p-3 bg-blue-50/50 border border-blue-100 rounded-lg flex items-start gap-2">
+                    <span className="text-blue-600 flex-shrink-0">ℹ️</span>
+                    <p className="text-xs sm:text-sm text-blue-900 leading-relaxed">
+                      <strong>ملاحظة:</strong> الرسم البياني يعرض آخر 90 يوم
+                      فقط للتفاصيل الدقيقة. البطاقات أعلاه تعرض الإجمالي لكل
+                      الفترة منذ بداية الحساب.
+                    </p>
+                  </div>
+                )}
               </div>
 
               {/* Secondary Charts: Platform Performance (multi-platform only) + ROAS Trend */}
@@ -691,10 +703,10 @@ export default function DashboardClient({
                     اتجاه ROAS
                   </h3>
                   <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
-                    العائد على الإنفاق الإعلاني ({getRangeLabel(dateRange)})
+                    العائد على الإنفاق الإعلاني
                   </p>
                   <div dir="ltr" className="h-52 sm:h-64">
-                    {!shouldShowDailyBreakdown ? (
+                    {!chartShouldShowDaily ? (
                       <div className="h-full flex items-center justify-center text-center px-4">
                         <p className="text-sm text-gray-500">
                           التوزيع اليومي متاح للفترات حتى 90 يوم

@@ -94,14 +94,6 @@ import {
 export type { DateRange, TimeIncrement, CustomDateRange, DateRangeInput };
 export { isCustomRange };
 
-const DATE_PRESETS: Record<DateRange, string> = {
-  "7d": "last_7d",
-  "14d": "last_14d",
-  "30d": "last_30d",
-  "90d": "last_90d",
-  lifetime: "maximum",
-};
-
 interface CampaignsResponse {
   data: MetaCampaign[];
   paging?: {
@@ -143,20 +135,157 @@ export async function getCampaigns(
   return result.data;
 }
 
-// Apply either date_preset (for preset DateRange) or time_range (for CustomDateRange)
-// to the given URLSearchParams, in the format Meta's Marketing API expects.
-function applyRangeToParams(
-  params: URLSearchParams,
-  range: DateRangeInput
-): void {
-  if (isCustomRange(range)) {
-    params.set(
-      "time_range",
-      JSON.stringify({ since: range.since, until: range.until })
-    );
-  } else {
-    params.set("date_preset", DATE_PRESETS[range]);
+const INSIGHTS_FIELDS =
+  "spend,impressions,clicks,ctr,cpc,cpm,reach,frequency,actions,action_values,date_start,date_stop,campaign_id,campaign_name";
+
+function formatLocalISO(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
+
+/**
+ * Splits a date range into chunks of `chunkDays` (max 30 by default).
+ * Meta's Insights endpoint silently truncates daily breakdowns over long
+ * ranges, so we issue one request per chunk and merge the results.
+ */
+function chunkDateRange(
+  since: string,
+  until: string,
+  chunkDays: number = 30
+): Array<{ since: string; until: string }> {
+  const chunks: Array<{ since: string; until: string }> = [];
+  const startDate = new Date(since);
+  const endDate = new Date(until);
+
+  let currentStart = new Date(startDate);
+
+  while (currentStart <= endDate) {
+    const currentEnd = new Date(currentStart);
+    currentEnd.setDate(currentStart.getDate() + chunkDays - 1);
+
+    const effectiveEnd = currentEnd > endDate ? endDate : currentEnd;
+
+    chunks.push({
+      since: formatLocalISO(currentStart),
+      until: formatLocalISO(effectiveEnd),
+    });
+
+    currentStart = new Date(effectiveEnd);
+    currentStart.setDate(currentStart.getDate() + 1);
   }
+
+  return chunks;
+}
+
+/**
+ * Resolve a DateRangeInput to an explicit since/until pair.
+ * Returns null for 'lifetime' (caller should use date_preset=maximum instead).
+ */
+function resolveRangeToDates(
+  range: DateRangeInput
+): { since: string; until: string } | null {
+  if (isCustomRange(range)) {
+    return { since: range.since, until: range.until };
+  }
+  if (range === "lifetime") return null;
+
+  const daysMap: Record<Exclude<DateRange, "lifetime">, number> = {
+    "7d": 7,
+    "14d": 14,
+    "30d": 30,
+    "90d": 90,
+  };
+  const days = daysMap[range];
+  const today = new Date();
+  const sinceDate = new Date(today);
+  sinceDate.setDate(today.getDate() - (days - 1));
+
+  return {
+    since: formatLocalISO(sinceDate),
+    until: formatLocalISO(today),
+  };
+}
+
+/**
+ * Internal fetcher used by both getAccountInsights and getCampaignInsights.
+ * Handles range resolution, lifetime fast-path, and chunked daily breakdown.
+ */
+async function fetchInsightsChunked(
+  accessToken: string,
+  accountId: string,
+  range: DateRangeInput,
+  timeIncrement: TimeIncrement | undefined,
+  level: "account" | "campaign"
+): Promise<MetaInsight[]> {
+  const baseUrl = `https://graph.facebook.com/${META_API_VERSION}/${accountId}/insights`;
+
+  // Lifetime: don't chunk — let Meta return its `maximum` aggregate.
+  if (!isCustomRange(range) && range === "lifetime") {
+    const params = new URLSearchParams({
+      fields: INSIGHTS_FIELDS,
+      access_token: accessToken,
+      date_preset: "maximum",
+      limit: "500",
+    });
+    if (level === "campaign") params.set("level", "campaign");
+    if (timeIncrement) params.set("time_increment", String(timeIncrement));
+
+    const response = await fetch(`${baseUrl}?${params.toString()}`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `Failed to fetch insights (lifetime): ${response.status} ${errorText}`
+      );
+    }
+    const result = (await response.json()) as InsightsResponse;
+    return result.data ?? [];
+  }
+
+  const dates = resolveRangeToDates(range);
+  if (!dates) {
+    // Should be unreachable (lifetime handled above), but be safe.
+    return [];
+  }
+
+  // Daily breakdown → chunk; aggregate → single request for the whole range.
+  const chunks =
+    timeIncrement === 1
+      ? chunkDateRange(dates.since, dates.until, 30)
+      : [{ since: dates.since, until: dates.until }];
+
+  const fetchPromises = chunks.map(async (chunk) => {
+    const params = new URLSearchParams({
+      fields: INSIGHTS_FIELDS,
+      access_token: accessToken,
+      time_range: JSON.stringify({
+        since: chunk.since,
+        until: chunk.until,
+      }),
+      limit: "500",
+    });
+    if (level === "campaign") params.set("level", "campaign");
+    if (timeIncrement) params.set("time_increment", String(timeIncrement));
+
+    const response = await fetch(`${baseUrl}?${params.toString()}`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `Failed to fetch insights chunk ${chunk.since}-${chunk.until}: ${response.status} ${errorText}`
+      );
+    }
+    const result = (await response.json()) as InsightsResponse;
+    return Array.isArray(result.data) ? result.data : [];
+  });
+
+  const results = await Promise.all(fetchPromises);
+  const allInsights = results.flat();
+  allInsights.sort((a, b) =>
+    (a.date_start || "").localeCompare(b.date_start || "")
+  );
+
+  return allInsights;
 }
 
 export async function getAccountInsights(
@@ -165,30 +294,13 @@ export async function getAccountInsights(
   range: DateRangeInput = "30d",
   timeIncrement?: TimeIncrement
 ): Promise<MetaInsight[]> {
-  const url = `https://graph.facebook.com/${META_API_VERSION}/${accountId}/insights`;
-  const params = new URLSearchParams({
-    fields:
-      "spend,impressions,clicks,ctr,cpc,cpm,reach,frequency,actions,action_values",
-    access_token: accessToken,
-  });
-
-  applyRangeToParams(params, range);
-
-  if (timeIncrement) {
-    params.set("time_increment", String(timeIncrement));
-  }
-
-  const response = await fetch(`${url}?${params.toString()}`);
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(
-      `Failed to fetch insights: ${response.status} ${errorText}`
-    );
-  }
-
-  const result = (await response.json()) as InsightsResponse;
-  return result.data;
+  return fetchInsightsChunked(
+    accessToken,
+    accountId,
+    range,
+    timeIncrement,
+    "account"
+  );
 }
 
 export async function getCampaignInsights(
@@ -197,29 +309,11 @@ export async function getCampaignInsights(
   range: DateRangeInput = "30d",
   timeIncrement?: TimeIncrement
 ): Promise<MetaInsight[]> {
-  const url = `https://graph.facebook.com/${META_API_VERSION}/${accountId}/insights`;
-  const params = new URLSearchParams({
-    fields:
-      "campaign_id,campaign_name,spend,impressions,clicks,ctr,cpc,cpm,reach,frequency,actions,action_values",
-    level: "campaign",
-    access_token: accessToken,
-  });
-
-  applyRangeToParams(params, range);
-
-  if (timeIncrement) {
-    params.set("time_increment", String(timeIncrement));
-  }
-
-  const response = await fetch(`${url}?${params.toString()}`);
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(
-      `Failed to fetch campaign insights: ${response.status} ${errorText}`
-    );
-  }
-
-  const result = (await response.json()) as InsightsResponse;
-  return result.data;
+  return fetchInsightsChunked(
+    accessToken,
+    accountId,
+    range,
+    timeIncrement,
+    "campaign"
+  );
 }

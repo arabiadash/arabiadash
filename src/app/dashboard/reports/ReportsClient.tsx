@@ -26,6 +26,9 @@ import {
   Users,
   Percent,
   AlertCircle,
+  ChevronUp,
+  ChevronDown,
+  ChevronsUpDown,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -48,6 +51,7 @@ import {
   formatChartTooltipLabel,
   type DateRangeValue,
   type UnifiedCampaign,
+  type UnifiedInsight,
 } from "@/lib/ads/types";
 import {
   AreaChart,
@@ -122,6 +126,55 @@ const STATUS_CONFIG: Record<string, { label: string; classes: string }> = {
   ARCHIVED: { label: "مؤرشفة", classes: "bg-blue-100 text-blue-700" },
 };
 
+type SortableColumn =
+  | "campaignName"
+  | "status"
+  | "spend"
+  | "revenue"
+  | "roas"
+  | "purchases"
+  | "cpc"
+  | "ctr";
+
+type StatusFilter = "all" | "ACTIVE" | "PAUSED" | "DELETED";
+
+interface SortableHeaderProps {
+  column: SortableColumn;
+  label: string;
+  sortBy: SortableColumn | null;
+  sortDir: "asc" | "desc";
+  onSort: (column: SortableColumn) => void;
+}
+
+function SortableHeader({
+  column,
+  label,
+  sortBy,
+  sortDir,
+  onSort,
+}: SortableHeaderProps) {
+  const isActive = sortBy === column;
+  return (
+    <th
+      className="text-right py-3 px-2 font-medium cursor-pointer select-none hover:text-gray-700 transition whitespace-nowrap"
+      onClick={() => onSort(column)}
+    >
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {isActive ? (
+          sortDir === "asc" ? (
+            <ChevronUp className="w-3 h-3" />
+          ) : (
+            <ChevronDown className="w-3 h-3" />
+          )
+        ) : (
+          <ChevronsUpDown className="w-3 h-3 opacity-30" />
+        )}
+      </span>
+    </th>
+  );
+}
+
 function StatusBadge({ status }: { status?: string }) {
   if (!status) {
     return (
@@ -159,6 +212,14 @@ export default function ReportsClient({
   const [accountCurrency, setAccountCurrency] = useState<Currency>("USD");
   const [campaigns, setCampaigns] = useState<UnifiedCampaign[]>([]);
 
+  // Filtering, sorting, pagination — applied to the campaigns table only
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [sortBy, setSortBy] = useState<SortableColumn | null>("spend");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [perPage, setPerPage] = useState<10 | 20 | 50>(20);
+
   // Fetch account currency
   useEffect(() => {
     fetch("/api/ads/account?provider=meta")
@@ -190,14 +251,30 @@ export default function ReportsClient({
     [campaigns]
   );
 
-  // Smart time_increment: daily for ranges ≤ 90 days, aggregate otherwise
+  // Smart time_increment: daily for ranges ≤ 90 days, aggregate otherwise.
+  // Used for KPI subtitle/messaging (reflects the selected dateRange).
   const dayCount = getDayCount(dateRange);
   const shouldShowDailyBreakdown =
     dateRange.type === "custom"
       ? dayCount <= 90
       : ["7d", "14d", "30d", "90d"].includes(dateRange.preset);
 
-  // Insights for table (campaign level — one row per campaign)
+  // Lifetime can't be shown as a meaningful chart (it would be one big aggregate row).
+  // Fallback: chart shows last 90 days while KPIs still aggregate the full lifetime.
+  const isLifetime =
+    dateRange.type === "preset" && dateRange.preset === "lifetime";
+
+  const chartDateRange: DateRangeValue = isLifetime
+    ? { type: "preset", preset: "90d" }
+    : dateRange;
+
+  const chartDayCount = getDayCount(chartDateRange);
+  const chartShouldShowDaily =
+    chartDateRange.type === "custom"
+      ? chartDayCount <= 90
+      : ["7d", "14d", "30d", "90d"].includes(chartDateRange.preset);
+
+  // Insights for table (campaign level — one row per campaign, follows dateRange)
   const {
     insights,
     loading: insightsLoading,
@@ -208,12 +285,110 @@ export default function ReportsClient({
     level: "campaign",
   });
 
-  // Insights for chart (account level + daily breakdown when applicable)
+  // Insights for chart (account level + daily breakdown when applicable,
+  // uses chartDateRange so lifetime falls back to 90d)
   const { insights: chartInsights, loading: chartLoading } = useInsights({
-    ...dateRangeValueToOptions(dateRange),
+    ...dateRangeValueToOptions(chartDateRange),
     level: "account",
-    timeIncrement: shouldShowDailyBreakdown ? 1 : undefined,
+    timeIncrement: chartShouldShowDaily ? 1 : undefined,
   });
+
+  // Apply search → status filter → sort
+  const processedInsights = useMemo(() => {
+    let result = [...insights];
+
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      result = result.filter((insight) => {
+        const meta = insight.campaignId
+          ? statusMap.get(insight.campaignId)
+          : undefined;
+        const name = (
+          insight.campaignName ??
+          meta?.name ??
+          ""
+        ).toLowerCase();
+        return name.includes(q);
+      });
+    }
+
+    if (statusFilter !== "all") {
+      result = result.filter((insight) => {
+        const meta = insight.campaignId
+          ? statusMap.get(insight.campaignId)
+          : undefined;
+        return meta?.status === statusFilter;
+      });
+    }
+
+    if (sortBy) {
+      result.sort((a, b) => {
+        let aVal: string | number;
+        let bVal: string | number;
+
+        if (sortBy === "status") {
+          // Status lives on the campaigns side, not on the insight row.
+          const aMeta = a.campaignId
+            ? statusMap.get(a.campaignId)
+            : undefined;
+          const bMeta = b.campaignId
+            ? statusMap.get(b.campaignId)
+            : undefined;
+          aVal = aMeta?.status ?? "";
+          bVal = bMeta?.status ?? "";
+        } else if (sortBy === "campaignName") {
+          // Sort by displayed name (matches what the user sees).
+          const aMeta = a.campaignId
+            ? statusMap.get(a.campaignId)
+            : undefined;
+          const bMeta = b.campaignId
+            ? statusMap.get(b.campaignId)
+            : undefined;
+          aVal = a.campaignName ?? aMeta?.name ?? "";
+          bVal = b.campaignName ?? bMeta?.name ?? "";
+        } else {
+          aVal = (a[sortBy] as number) ?? 0;
+          bVal = (b[sortBy] as number) ?? 0;
+        }
+
+        if (typeof aVal === "string" && typeof bVal === "string") {
+          return sortDir === "asc"
+            ? aVal.localeCompare(bVal)
+            : bVal.localeCompare(aVal);
+        }
+        const numA = typeof aVal === "number" ? aVal : 0;
+        const numB = typeof bVal === "number" ? bVal : 0;
+        return sortDir === "asc" ? numA - numB : numB - numA;
+      });
+    }
+
+    return result;
+  }, [insights, searchQuery, statusFilter, sortBy, sortDir, statusMap]);
+
+  const totalPages = Math.max(
+    1,
+    Math.ceil(processedInsights.length / perPage)
+  );
+  const paginatedInsights = useMemo(() => {
+    const start = (currentPage - 1) * perPage;
+    return processedInsights.slice(start, start + perPage);
+  }, [processedInsights, currentPage, perPage]);
+
+  // Reset to page 1 when filters / page size change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, statusFilter, perPage]);
+
+  const handleSort = (column: SortableColumn) => {
+    if (sortBy === column) {
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
+    } else {
+      setSortBy(column);
+      setSortDir("desc");
+    }
+  };
+
+  const hasActiveFilters = searchQuery !== "" || statusFilter !== "all";
 
   const summary = useMemo(() => {
     const totals = insights.reduce(
@@ -240,8 +415,8 @@ export default function ReportsClient({
     () =>
       chartInsights.map((i) => ({
         date: i.dateStart,
-        dayLabel: shouldShowDailyBreakdown
-          ? formatChartDayLabel(i.dateStart, dayCount)
+        dayLabel: chartShouldShowDaily
+          ? formatChartDayLabel(i.dateStart, chartDayCount)
           : i.dateStart,
         tooltipLabel: formatChartTooltipLabel(i.dateStart),
         displaySpend: convertCurrency(i.spend, accountCurrency, currency),
@@ -253,8 +428,8 @@ export default function ReportsClient({
       })),
     [
       chartInsights,
-      shouldShowDailyBreakdown,
-      dayCount,
+      chartShouldShowDaily,
+      chartDayCount,
       accountCurrency,
       currency,
     ]
@@ -659,14 +834,12 @@ export default function ReportsClient({
                       الإنفاق مقابل الإيرادات
                     </h3>
                     <p className="text-xs sm:text-sm text-gray-500">
-                      {shouldShowDailyBreakdown
-                        ? `توزيع يومي بـ ${CURRENCY_LABELS[currency].nameAr}`
-                        : `إجمالي الفترة بـ ${CURRENCY_LABELS[currency].nameAr}`}
+                      {`توزيع يومي بـ ${CURRENCY_LABELS[currency].nameAr}`}
                     </p>
                   </div>
                 </div>
                 <div dir="ltr" className="h-56 sm:h-80">
-                  {!shouldShowDailyBreakdown ? (
+                  {!chartShouldShowDaily ? (
                     <div className="h-full flex items-center justify-center text-center px-4">
                       <p className="text-sm text-gray-500">
                         التوزيع اليومي متاح للفترات حتى 90 يوم. استخدم النظرة
@@ -775,6 +948,18 @@ export default function ReportsClient({
                     </ResponsiveContainer>
                   )}
                 </div>
+
+                {/* Lifetime disclaimer */}
+                {isLifetime && (
+                  <div className="mt-3 p-3 bg-blue-50/50 border border-blue-100 rounded-lg flex items-start gap-2">
+                    <span className="text-blue-600 flex-shrink-0">ℹ️</span>
+                    <p className="text-xs sm:text-sm text-blue-900 leading-relaxed">
+                      <strong>ملاحظة:</strong> الرسم البياني يعرض آخر 90 يوم
+                      فقط للتفاصيل الدقيقة. البطاقات أعلاه تعرض الإجمالي لكل
+                      الفترة منذ بداية الحساب.
+                    </p>
+                  </div>
+                )}
               </div>
 
               {/* Campaigns Table */}
@@ -807,9 +992,63 @@ export default function ReportsClient({
                   </div>
                 ) : (
                   <>
+                    {/* Filters Bar */}
+                    <div className="flex flex-col sm:flex-row gap-3 mb-4 pb-4 border-b border-gray-100">
+                      <div className="flex-1 relative">
+                        <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                        <input
+                          type="text"
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          placeholder="بحث باسم الحملة..."
+                          className="w-full pr-9 pl-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+                      </div>
+
+                      <select
+                        value={statusFilter}
+                        onChange={(e) =>
+                          setStatusFilter(e.target.value as StatusFilter)
+                        }
+                        className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      >
+                        <option value="all">الكل</option>
+                        <option value="ACTIVE">نشطة</option>
+                        <option value="PAUSED">موقوفة</option>
+                        <option value="DELETED">محذوفة</option>
+                      </select>
+
+                      {hasActiveFilters && (
+                        <button
+                          onClick={() => {
+                            setSearchQuery("");
+                            setStatusFilter("all");
+                          }}
+                          className="px-3 py-2 text-sm text-gray-600 hover:text-gray-900 transition"
+                        >
+                          مسح الفلاتر
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Results count */}
+                    <p className="text-xs text-gray-500 mb-3">
+                      {processedInsights.length === insights.length
+                        ? `${insights.length} حملة`
+                        : `${processedInsights.length} من ${insights.length} حملة`}
+                    </p>
+
+                    {processedInsights.length === 0 ? (
+                      <div className="py-12 text-center">
+                        <p className="text-gray-500 text-sm">
+                          لا توجد نتائج مطابقة للفلاتر المختارة
+                        </p>
+                      </div>
+                    ) : (
+                      <>
                     {/* Mobile: Cards */}
                     <div className="lg:hidden space-y-3">
-                      {insights.map((insight) => {
+                      {paginatedInsights.map((insight) => {
                         const meta = insight.campaignId
                           ? statusMap.get(insight.campaignId)
                           : undefined;
@@ -902,34 +1141,66 @@ export default function ReportsClient({
                       <table className="w-full text-sm">
                         <thead className="text-xs text-gray-500 border-b border-gray-100">
                           <tr>
-                            <th className="text-right py-3 px-2 font-medium">
-                              الحملة
-                            </th>
-                            <th className="text-right py-3 px-2 font-medium">
-                              الحالة
-                            </th>
-                            <th className="text-right py-3 px-2 font-medium">
-                              الإنفاق
-                            </th>
-                            <th className="text-right py-3 px-2 font-medium">
-                              الإيرادات
-                            </th>
-                            <th className="text-right py-3 px-2 font-medium">
-                              ROAS
-                            </th>
-                            <th className="text-right py-3 px-2 font-medium">
-                              المبيعات
-                            </th>
-                            <th className="text-right py-3 px-2 font-medium">
-                              CPC
-                            </th>
-                            <th className="text-right py-3 px-2 font-medium">
-                              CTR
-                            </th>
+                            <SortableHeader
+                              column="campaignName"
+                              label="الحملة"
+                              sortBy={sortBy}
+                              sortDir={sortDir}
+                              onSort={handleSort}
+                            />
+                            <SortableHeader
+                              column="status"
+                              label="الحالة"
+                              sortBy={sortBy}
+                              sortDir={sortDir}
+                              onSort={handleSort}
+                            />
+                            <SortableHeader
+                              column="spend"
+                              label="الإنفاق"
+                              sortBy={sortBy}
+                              sortDir={sortDir}
+                              onSort={handleSort}
+                            />
+                            <SortableHeader
+                              column="revenue"
+                              label="الإيرادات"
+                              sortBy={sortBy}
+                              sortDir={sortDir}
+                              onSort={handleSort}
+                            />
+                            <SortableHeader
+                              column="roas"
+                              label="ROAS"
+                              sortBy={sortBy}
+                              sortDir={sortDir}
+                              onSort={handleSort}
+                            />
+                            <SortableHeader
+                              column="purchases"
+                              label="المبيعات"
+                              sortBy={sortBy}
+                              sortDir={sortDir}
+                              onSort={handleSort}
+                            />
+                            <SortableHeader
+                              column="cpc"
+                              label="CPC"
+                              sortBy={sortBy}
+                              sortDir={sortDir}
+                              onSort={handleSort}
+                            />
+                            <SortableHeader
+                              column="ctr"
+                              label="CTR"
+                              sortBy={sortBy}
+                              sortDir={sortDir}
+                              onSort={handleSort}
+                            />
                           </tr>
                         </thead>
                         <tbody>
-                          {insights.map((insight) => {
+                          {paginatedInsights.map((insight) => {
                             const meta = insight.campaignId
                               ? statusMap.get(insight.campaignId)
                               : undefined;
@@ -986,6 +1257,101 @@ export default function ReportsClient({
                         </tbody>
                       </table>
                     </div>
+                      </>
+                    )}
+
+                    {/* Pagination Controls */}
+                    {processedInsights.length > 0 && (
+                      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 mt-4 pt-4 border-t border-gray-100">
+                        <div className="flex items-center gap-3 text-sm text-gray-600">
+                          <div className="flex items-center gap-2">
+                            <span>عرض</span>
+                            <select
+                              value={perPage}
+                              onChange={(e) =>
+                                setPerPage(
+                                  Number(e.target.value) as 10 | 20 | 50
+                                )
+                              }
+                              className="border border-gray-200 rounded px-2 py-1 text-sm bg-white"
+                            >
+                              <option value={10}>10</option>
+                              <option value={20}>20</option>
+                              <option value={50}>50</option>
+                            </select>
+                          </div>
+                          <span className="text-gray-400">|</span>
+                          <span>
+                            {`${(currentPage - 1) * perPage + 1}-${Math.min(
+                              currentPage * perPage,
+                              processedInsights.length
+                            )} من ${processedInsights.length}`}
+                          </span>
+                        </div>
+
+                        {totalPages > 1 && (
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() =>
+                                setCurrentPage(currentPage - 1)
+                              }
+                              disabled={currentPage === 1}
+                              className="px-3 py-1.5 border border-gray-200 rounded text-sm hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                            >
+                              السابق
+                            </button>
+
+                            {Array.from(
+                              { length: totalPages },
+                              (_, i) => i + 1
+                            )
+                              .filter(
+                                (p) =>
+                                  p === 1 ||
+                                  p === totalPages ||
+                                  Math.abs(p - currentPage) <= 1
+                              )
+                              .map((p, idx, arr) => {
+                                const prev = arr[idx - 1];
+                                const showEllipsis =
+                                  prev !== undefined && p - prev > 1;
+                                return (
+                                  <span
+                                    key={p}
+                                    className="flex items-center gap-1"
+                                  >
+                                    {showEllipsis && (
+                                      <span className="text-gray-400">
+                                        ...
+                                      </span>
+                                    )}
+                                    <button
+                                      onClick={() => setCurrentPage(p)}
+                                      className={`min-w-[32px] px-2 py-1.5 border rounded text-sm transition ${
+                                        p === currentPage
+                                          ? "bg-indigo-600 text-white border-indigo-600"
+                                          : "border-gray-200 hover:bg-gray-50"
+                                      }`}
+                                    >
+                                      {p}
+                                    </button>
+                                  </span>
+                                );
+                              })}
+
+                            <button
+                              onClick={() =>
+                                setCurrentPage(currentPage + 1)
+                              }
+                              disabled={currentPage === totalPages}
+                              className="px-3 py-1.5 border border-gray-200 rounded text-sm hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                            >
+                              التالي
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </>
                 )}
               </div>
