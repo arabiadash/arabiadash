@@ -5,6 +5,7 @@ import {
   getCampaignInsights,
   type DateRange,
   type MetaInsight,
+  type TimeIncrement,
 } from "@/lib/meta/api";
 import { getCachedData, setCachedData } from "@/lib/meta/cache";
 
@@ -22,6 +23,8 @@ export async function GET(request: NextRequest) {
   try {
     const rangeParam = request.nextUrl.searchParams.get("range");
     const levelParam = request.nextUrl.searchParams.get("level");
+    const timeIncrementParam =
+      request.nextUrl.searchParams.get("time_increment");
 
     const range: DateRange =
       rangeParam && VALID_RANGES.includes(rangeParam as DateRange)
@@ -30,6 +33,15 @@ export async function GET(request: NextRequest) {
 
     const level: InsightLevel =
       levelParam === "campaign" ? "campaign" : "account";
+
+    const timeIncrement: TimeIncrement | undefined =
+      timeIncrementParam === "1"
+        ? 1
+        : timeIncrementParam === "7"
+          ? 7
+          : timeIncrementParam === "all_days"
+            ? "all_days"
+            : undefined;
 
     const supabase = await createClient();
     const {
@@ -56,7 +68,9 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const cacheKey = `insights:${level}:${range}`;
+    const cacheKey = `insights:${level}:${range}${
+      timeIncrement ? `:t${timeIncrement}` : ""
+    }`;
 
     const cached = await getCachedData<MetaInsight[]>(connection.id, cacheKey);
     if (cached) {
@@ -65,6 +79,7 @@ export async function GET(request: NextRequest) {
         cached: true,
         range,
         level,
+        time_increment: timeIncrement ?? null,
       });
     }
 
@@ -73,12 +88,14 @@ export async function GET(request: NextRequest) {
         ? await getCampaignInsights(
             connection.access_token,
             connection.account_id,
-            range
+            range,
+            timeIncrement
           )
         : await getAccountInsights(
             connection.access_token,
             connection.account_id,
-            range
+            range,
+            timeIncrement
           );
 
     await setCachedData(connection.id, cacheKey, insights);
@@ -88,6 +105,7 @@ export async function GET(request: NextRequest) {
       cached: false,
       range,
       level,
+      time_increment: timeIncrement ?? null,
     });
   } catch (err) {
     console.error("[meta/insights] Error:", err);

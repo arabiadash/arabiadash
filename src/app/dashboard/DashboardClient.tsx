@@ -22,23 +22,25 @@ import {
   Loader2,
   Plus,
   ArrowLeft,
-  Sparkles,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import {
-  mockChartData,
   mockPlatformPerformance,
-  mockTopCampaigns,
-  formatCurrency,
-  AD_PLATFORM_IDS,
   platformNameToId,
   getConnectedAdPlatforms,
 } from "@/lib/mock-data";
 import { useInsights } from "@/lib/hooks/use-insights";
 import { useCurrency } from "@/lib/contexts/currency-context";
-import { aggregateInsights } from "@/lib/meta/metrics";
-import { formatAndConvert, type Currency } from "@/lib/currency";
+import { aggregateInsights, getSpend, getRevenue } from "@/lib/meta/metrics";
+import {
+  formatAndConvert,
+  formatCurrency as formatCurrencyWithSymbol,
+  convertCurrency,
+  CURRENCY_LABELS,
+  type Currency,
+} from "@/lib/currency";
 import { CurrencyToggle } from "@/components/CurrencyToggle";
+import type { MetaInsight } from "@/lib/meta/api";
 import {
   AreaChart,
   Area,
@@ -57,6 +59,29 @@ interface DashboardClientProps {
   companyName: string;
   email: string;
   connectedPlatforms: string[];
+}
+
+interface ChartDataPoint {
+  date: string;
+  dayLabel: string;
+  spend: number;
+  revenue: number;
+  roas: number;
+}
+
+const ARABIC_DAYS = [
+  "الأحد",
+  "الإثنين",
+  "الثلاثاء",
+  "الأربعاء",
+  "الخميس",
+  "الجمعة",
+  "السبت",
+];
+
+function formatDayLabel(dateStr: string): string {
+  const date = new Date(dateStr);
+  return ARABIC_DAYS[date.getDay()];
 }
 
 export default function DashboardClient({
@@ -97,23 +122,56 @@ export default function DashboardClient({
     [insights]
   );
 
+  // Daily insights for the Performance Chart (last 7 days)
+  const [chartData, setChartData] = useState<ChartDataPoint[]>([]);
+  const [chartLoading, setChartLoading] = useState(true);
+
+  useEffect(() => {
+    setChartLoading(true);
+    fetch("/api/meta/insights?range=7d&time_increment=1")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.data && Array.isArray(data.data)) {
+          const points = (data.data as MetaInsight[]).map((insight) => {
+            const spend = getSpend(insight);
+            const revenue = getRevenue(insight);
+            return {
+              date: insight.date_start,
+              dayLabel: formatDayLabel(insight.date_start),
+              spend,
+              revenue,
+              roas: spend > 0 ? revenue / spend : 0,
+            };
+          });
+          setChartData(points);
+        }
+      })
+      .catch((err) => console.error("[chart] Error:", err))
+      .finally(() => setChartLoading(false));
+  }, []);
+
+  const displayChartData = useMemo(
+    () =>
+      chartData.map((point) => ({
+        ...point,
+        displaySpend: convertCurrency(point.spend, accountCurrency, currency),
+        displayRevenue: convertCurrency(
+          point.revenue,
+          accountCurrency,
+          currency
+        ),
+      })),
+    [chartData, accountCurrency, currency]
+  );
+
   // Check if user has any connections
   const hasConnections = connectedPlatforms.length > 0;
 
-  // Filter mock data by connected ad platforms (charts/tables still use mock)
+  // Filter Platform Performance mock data by connected ad platforms.
+  // Only used when there are 2+ connected platforms (chart hidden otherwise).
   const connectedAdPlatforms = useMemo(
     () => getConnectedAdPlatforms(connectedPlatforms),
     [connectedPlatforms]
-  );
-
-  const scaleFactor = connectedAdPlatforms.length / AD_PLATFORM_IDS.length;
-
-  const filteredTopCampaigns = useMemo(
-    () =>
-      mockTopCampaigns.filter((c) =>
-        connectedAdPlatforms.includes(platformNameToId(c.platform))
-      ),
-    [connectedAdPlatforms]
   );
 
   const filteredPlatformPerformance = useMemo(
@@ -122,17 +180,6 @@ export default function DashboardClient({
         connectedAdPlatforms.includes(platformNameToId(p.name))
       ),
     [connectedAdPlatforms]
-  );
-
-  const scaledChartData = useMemo(
-    () =>
-      mockChartData.map((d) => ({
-        ...d,
-        spend: Math.round(d.spend * scaleFactor),
-        revenue: Math.round(d.revenue * scaleFactor),
-        roas: scaleFactor > 0 ? d.roas : 0,
-      })),
-    [scaleFactor]
   );
 
   // Real KPI cards from aggregated insights (Meta-only for now)
@@ -423,7 +470,7 @@ export default function DashboardClient({
           {/* Charts Section - Only show if has connections */}
           {hasConnections && (
             <>
-              {/* Performance Chart */}
+              {/* Performance Chart - Real Meta data */}
               <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
                 <div className="flex items-center justify-between mb-3 sm:mb-6">
                   <div>
@@ -431,70 +478,71 @@ export default function DashboardClient({
                       أداء آخر 7 أيام
                     </h3>
                     <p className="text-xs sm:text-sm text-gray-500">
-                      الإنفاق مقابل الإيرادات (بالريال السعودي)
+                      الإنفاق مقابل الإيرادات (بـ{" "}
+                      {CURRENCY_LABELS[currency].nameAr})
                     </p>
                   </div>
                 </div>
                 <div dir="ltr" className="h-56 sm:h-72">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={scaledChartData}>
-                      <defs>
-                        <linearGradient id="colorRevenue" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
-                          <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
-                        </linearGradient>
-                        <linearGradient id="colorSpend" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#6366f1" stopOpacity={0.3} />
-                          <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                      <XAxis dataKey="day" stroke="#9ca3af" fontSize={12} />
-                      <YAxis stroke="#9ca3af" fontSize={12} />
-                      <Tooltip
-                        contentStyle={{
-                          backgroundColor: "white",
-                          border: "1px solid #e5e7eb",
-                          borderRadius: "8px",
-                        }}
-                      />
-                      <Legend />
-                      <Area
-                        type="monotone"
-                        dataKey="revenue"
-                        name="الإيرادات"
-                        stroke="#10b981"
-                        fillOpacity={1}
-                        fill="url(#colorRevenue)"
-                      />
-                      <Area
-                        type="monotone"
-                        dataKey="spend"
-                        name="الإنفاق"
-                        stroke="#6366f1"
-                        fillOpacity={1}
-                        fill="url(#colorSpend)"
-                      />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Two Column Charts */}
-              <div className="grid lg:grid-cols-2 gap-3 sm:gap-6 mb-4 sm:mb-6">
-                {/* Platform Performance */}
-                <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6">
-                  <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
-                    الأداء حسب المنصة
-                  </h3>
-                  <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
-                    توزيع الإيرادات على المنصات
-                  </p>
-                  <div dir="ltr" className="h-52 sm:h-64">
+                  {chartLoading ? (
+                    <div className="h-full flex items-center justify-center">
+                      <div className="animate-pulse text-gray-400 text-sm">
+                        جاري تحميل البيانات...
+                      </div>
+                    </div>
+                  ) : displayChartData.length === 0 ? (
+                    <div className="h-full flex items-center justify-center">
+                      <p className="text-gray-500 text-sm">
+                        لا توجد بيانات لآخر 7 أيام
+                      </p>
+                    </div>
+                  ) : (
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={filteredPlatformPerformance}>
+                      <AreaChart data={displayChartData}>
+                        <defs>
+                          <linearGradient
+                            id="colorRevenue"
+                            x1="0"
+                            y1="0"
+                            x2="0"
+                            y2="1"
+                          >
+                            <stop
+                              offset="5%"
+                              stopColor="#10b981"
+                              stopOpacity={0.3}
+                            />
+                            <stop
+                              offset="95%"
+                              stopColor="#10b981"
+                              stopOpacity={0}
+                            />
+                          </linearGradient>
+                          <linearGradient
+                            id="colorSpend"
+                            x1="0"
+                            y1="0"
+                            x2="0"
+                            y2="1"
+                          >
+                            <stop
+                              offset="5%"
+                              stopColor="#6366f1"
+                              stopOpacity={0.3}
+                            />
+                            <stop
+                              offset="95%"
+                              stopColor="#6366f1"
+                              stopOpacity={0}
+                            />
+                          </linearGradient>
+                        </defs>
                         <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                        <XAxis dataKey="name" stroke="#9ca3af" fontSize={12} />
+                        <XAxis
+                          dataKey="dayLabel"
+                          stroke="#9ca3af"
+                          fontSize={12}
+                        />
                         <YAxis stroke="#9ca3af" fontSize={12} />
                         <Tooltip
                           contentStyle={{
@@ -502,191 +550,169 @@ export default function DashboardClient({
                             border: "1px solid #e5e7eb",
                             borderRadius: "8px",
                           }}
+                          formatter={(value, name) => {
+                            const num =
+                              typeof value === "number" ? value : 0;
+                            return [
+                              formatCurrencyWithSymbol(num, currency),
+                              name as string,
+                            ];
+                          }}
                         />
-                        <Bar dataKey="revenue" name="الإيرادات" fill="#6366f1" radius={[8, 8, 0, 0]} />
-                      </BarChart>
+                        <Legend />
+                        <Area
+                          type="monotone"
+                          dataKey="displayRevenue"
+                          name="الإيرادات"
+                          stroke="#10b981"
+                          fillOpacity={1}
+                          fill="url(#colorRevenue)"
+                        />
+                        <Area
+                          type="monotone"
+                          dataKey="displaySpend"
+                          name="الإنفاق"
+                          stroke="#6366f1"
+                          fillOpacity={1}
+                          fill="url(#colorSpend)"
+                        />
+                      </AreaChart>
                     </ResponsiveContainer>
-                  </div>
+                  )}
                 </div>
+              </div>
 
-                {/* ROAS Trend */}
+              {/* Secondary Charts: Platform Performance (multi-platform only) + ROAS Trend */}
+              <div
+                className={`grid gap-3 sm:gap-6 mb-4 sm:mb-6 ${
+                  connectedPlatforms.length > 1
+                    ? "lg:grid-cols-2"
+                    : "lg:grid-cols-1"
+                }`}
+              >
+                {/* Platform Performance — hidden when only 1 platform connected */}
+                {connectedPlatforms.length > 1 && (
+                  <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6">
+                    <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
+                      الأداء حسب المنصة
+                    </h3>
+                    <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
+                      توزيع الإيرادات على المنصات
+                    </p>
+                    <div dir="ltr" className="h-52 sm:h-64">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={filteredPlatformPerformance}>
+                          <CartesianGrid
+                            strokeDasharray="3 3"
+                            stroke="#f3f4f6"
+                          />
+                          <XAxis
+                            dataKey="name"
+                            stroke="#9ca3af"
+                            fontSize={12}
+                          />
+                          <YAxis stroke="#9ca3af" fontSize={12} />
+                          <Tooltip
+                            contentStyle={{
+                              backgroundColor: "white",
+                              border: "1px solid #e5e7eb",
+                              borderRadius: "8px",
+                            }}
+                          />
+                          <Bar
+                            dataKey="revenue"
+                            name="الإيرادات"
+                            fill="#6366f1"
+                            radius={[8, 8, 0, 0]}
+                          />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                )}
+
+                {/* ROAS Trend — Real Meta data, daily for last 7 days */}
                 <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6">
                   <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
                     اتجاه ROAS
                   </h3>
                   <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
-                    العائد على الإنفاق الإعلاني
+                    العائد على الإنفاق الإعلاني (آخر 7 أيام)
                   </p>
                   <div dir="ltr" className="h-52 sm:h-64">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={scaledChartData}>
-                        <defs>
-                          <linearGradient id="colorRoas" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#a855f7" stopOpacity={0.4} />
-                            <stop offset="95%" stopColor="#a855f7" stopOpacity={0} />
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                        <XAxis dataKey="day" stroke="#9ca3af" fontSize={12} />
-                        <YAxis stroke="#9ca3af" fontSize={12} />
-                        <Tooltip
-                          contentStyle={{
-                            backgroundColor: "white",
-                            border: "1px solid #e5e7eb",
-                            borderRadius: "8px",
-                          }}
-                        />
-                        <Area
-                          type="monotone"
-                          dataKey="roas"
-                          name="ROAS"
-                          stroke="#a855f7"
-                          fillOpacity={1}
-                          fill="url(#colorRoas)"
-                        />
-                      </AreaChart>
-                    </ResponsiveContainer>
+                    {chartLoading ? (
+                      <div className="h-full flex items-center justify-center">
+                        <div className="animate-pulse text-gray-400 text-sm">
+                          جاري تحميل البيانات...
+                        </div>
+                      </div>
+                    ) : displayChartData.length === 0 ? (
+                      <div className="h-full flex items-center justify-center">
+                        <p className="text-gray-500 text-sm">
+                          لا توجد بيانات لآخر 7 أيام
+                        </p>
+                      </div>
+                    ) : (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <AreaChart data={displayChartData}>
+                          <defs>
+                            <linearGradient
+                              id="colorRoas"
+                              x1="0"
+                              y1="0"
+                              x2="0"
+                              y2="1"
+                            >
+                              <stop
+                                offset="5%"
+                                stopColor="#a855f7"
+                                stopOpacity={0.4}
+                              />
+                              <stop
+                                offset="95%"
+                                stopColor="#a855f7"
+                                stopOpacity={0}
+                              />
+                            </linearGradient>
+                          </defs>
+                          <CartesianGrid
+                            strokeDasharray="3 3"
+                            stroke="#f3f4f6"
+                          />
+                          <XAxis
+                            dataKey="dayLabel"
+                            stroke="#9ca3af"
+                            fontSize={12}
+                          />
+                          <YAxis stroke="#9ca3af" fontSize={12} />
+                          <Tooltip
+                            contentStyle={{
+                              backgroundColor: "white",
+                              border: "1px solid #e5e7eb",
+                              borderRadius: "8px",
+                            }}
+                            formatter={(value, name) => {
+                              const num =
+                                typeof value === "number" ? value : 0;
+                              return [`${num.toFixed(2)}x`, name as string];
+                            }}
+                          />
+                          <Area
+                            type="monotone"
+                            dataKey="roas"
+                            name="ROAS"
+                            stroke="#a855f7"
+                            fillOpacity={1}
+                            fill="url(#colorRoas)"
+                          />
+                        </AreaChart>
+                      </ResponsiveContainer>
+                    )}
                   </div>
                 </div>
               </div>
 
-              {/* Top Campaigns */}
-              <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
-                <div className="flex items-center justify-between mb-4 sm:mb-6">
-                  <div>
-                    <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
-                      أفضل الحملات الإعلانية
-                    </h3>
-                    <p className="text-xs sm:text-sm text-gray-500">
-                      الحملات الأعلى أداءً هذا الأسبوع
-                    </p>
-                  </div>
-                </div>
-
-                {/* Mobile: Cards view */}
-                <div className="lg:hidden space-y-3">
-                  {filteredTopCampaigns.length === 0 ? (
-                    <p className="py-8 text-center text-gray-500 text-sm">
-                      لا توجد حملات من المنصات المتصلة بعد
-                    </p>
-                  ) : (
-                    filteredTopCampaigns.map((campaign) => (
-                    <div
-                      key={campaign.id}
-                      className="border border-gray-100 rounded-lg p-4 hover:bg-gray-50 transition"
-                    >
-                      <div className="flex items-start justify-between gap-2 mb-2">
-                        <h4 className="font-semibold text-gray-900 text-sm leading-snug flex-1">
-                          {campaign.name}
-                        </h4>
-                        {campaign.status === "active" ? (
-                          <span className="bg-green-100 text-green-700 text-xs font-semibold px-2 py-1 rounded flex-shrink-0">
-                            نشطة
-                          </span>
-                        ) : (
-                          <span className="bg-gray-100 text-gray-600 text-xs font-semibold px-2 py-1 rounded flex-shrink-0">
-                            متوقفة
-                          </span>
-                        )}
-                      </div>
-                      <span className="bg-indigo-50 text-indigo-700 text-xs font-medium px-2 py-0.5 rounded inline-block mb-3">
-                        {campaign.platform}
-                      </span>
-                      <div className="grid grid-cols-3 gap-2 pt-3 border-t border-gray-100">
-                        <div>
-                          <p className="text-xs text-gray-500 mb-0.5">الإنفاق</p>
-                          <p className="text-sm font-semibold text-gray-900">
-                            {formatCurrency(campaign.spend)}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-gray-500 mb-0.5">الإيرادات</p>
-                          <p className="text-sm font-semibold text-gray-900">
-                            {formatCurrency(campaign.revenue)}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-gray-500 mb-0.5">ROAS</p>
-                          <p className="text-sm font-semibold text-green-600">
-                            {campaign.roas.toFixed(2)}x
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  ))
-                  )}
-                </div>
-
-                {/* Desktop: Table view */}
-                <div className="hidden lg:block overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead className="text-xs text-gray-500 border-b border-gray-100">
-                      <tr>
-                        <th className="text-right py-3 px-2 font-medium">الحملة</th>
-                        <th className="text-right py-3 px-2 font-medium">المنصة</th>
-                        <th className="text-right py-3 px-2 font-medium">الإنفاق</th>
-                        <th className="text-right py-3 px-2 font-medium">الإيرادات</th>
-                        <th className="text-right py-3 px-2 font-medium">ROAS</th>
-                        <th className="text-right py-3 px-2 font-medium">الحالة</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredTopCampaigns.length === 0 ? (
-                        <tr>
-                          <td colSpan={6} className="py-8 text-center text-gray-500">
-                            لا توجد حملات من المنصات المتصلة بعد
-                          </td>
-                        </tr>
-                      ) : (
-                        filteredTopCampaigns.map((campaign) => (
-                        <tr
-                          key={campaign.id}
-                          className="border-b border-gray-50 hover:bg-gray-50 transition"
-                        >
-                          <td className="py-3 px-2 font-medium text-gray-900">
-                            {campaign.name}
-                          </td>
-                          <td className="py-3 px-2 text-gray-600">
-                            {campaign.platform}
-                          </td>
-                          <td className="py-3 px-2 text-gray-600">
-                            {formatCurrency(campaign.spend)} ر.س
-                          </td>
-                          <td className="py-3 px-2 text-gray-900 font-medium">
-                            {formatCurrency(campaign.revenue)} ر.س
-                          </td>
-                          <td className="py-3 px-2">
-                            <span className="text-green-600 font-semibold">
-                              {campaign.roas.toFixed(2)}x
-                            </span>
-                          </td>
-                          <td className="py-3 px-2">
-                            {campaign.status === "active" ? (
-                              <span className="bg-green-100 text-green-700 text-xs font-semibold px-2 py-1 rounded">
-                                نشطة
-                              </span>
-                            ) : (
-                              <span className="bg-gray-100 text-gray-600 text-xs font-semibold px-2 py-1 rounded">
-                                متوقفة
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Demo Mode Banner */}
-              <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center gap-3">
-                <Sparkles className="w-5 h-5 text-amber-600 flex-shrink-0" />
-                <p className="text-sm text-amber-800">
-                  <strong>وضع تجريبي:</strong> البيانات المعروضة افتراضية. التكامل
-                  الفعلي مع منصات الإعلانات قريباً.
-                </p>
-              </div>
+              {/* Top Campaigns table moved to /dashboard/reports */}
             </>
           )}
 

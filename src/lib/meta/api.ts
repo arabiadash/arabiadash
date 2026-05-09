@@ -133,10 +133,13 @@ export async function getCampaigns(
   return result.data;
 }
 
+export type TimeIncrement = 1 | 7 | "all_days";
+
 export async function getAccountInsights(
   accessToken: string,
   accountId: string,
-  dateRange: DateRange = "30d"
+  dateRange: DateRange = "30d",
+  timeIncrement?: TimeIncrement
 ): Promise<MetaInsight[]> {
   const url = `https://graph.facebook.com/${META_API_VERSION}/${accountId}/insights`;
   const params = new URLSearchParams({
@@ -145,6 +148,10 @@ export async function getAccountInsights(
     date_preset: DATE_PRESETS[dateRange],
     access_token: accessToken,
   });
+
+  if (timeIncrement) {
+    params.set("time_increment", String(timeIncrement));
+  }
 
   const response = await fetch(`${url}?${params.toString()}`);
 
@@ -162,7 +169,8 @@ export async function getAccountInsights(
 export async function getCampaignInsights(
   accessToken: string,
   accountId: string,
-  dateRange: DateRange = "30d"
+  dateRange: DateRange = "30d",
+  timeIncrement?: TimeIncrement
 ): Promise<MetaInsight[]> {
   const url = `https://graph.facebook.com/${META_API_VERSION}/${accountId}/insights`;
   const params = new URLSearchParams({
@@ -172,6 +180,10 @@ export async function getCampaignInsights(
     level: "campaign",
     access_token: accessToken,
   });
+
+  if (timeIncrement) {
+    params.set("time_increment", String(timeIncrement));
+  }
 
   const response = await fetch(`${url}?${params.toString()}`);
 
