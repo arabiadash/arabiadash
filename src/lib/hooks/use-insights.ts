@@ -1,10 +1,11 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import type { MetaInsight, DateRange } from "@/lib/meta/api";
+import type { UnifiedInsight, DateRange } from "@/lib/ads/types";
+import type { AdProvider } from "@/lib/ads/cache";
 
 interface UseInsightsReturn {
-  insights: MetaInsight[];
+  insights: UnifiedInsight[];
   loading: boolean;
   error: string | null;
   cached: boolean;
@@ -13,9 +14,10 @@ interface UseInsightsReturn {
 
 export function useInsights(
   range: DateRange = "30d",
-  level: "account" | "campaign" = "account"
+  level: "account" | "campaign" = "account",
+  provider: AdProvider = "meta"
 ): UseInsightsReturn {
-  const [insights, setInsights] = useState<MetaInsight[]>([]);
+  const [insights, setInsights] = useState<UnifiedInsight[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cached, setCached] = useState(false);
@@ -28,12 +30,14 @@ export function useInsights(
     setError(null);
     setNoConnection(false);
 
-    fetch(`/api/meta/insights?range=${range}&level=${level}`)
+    fetch(
+      `/api/ads/insights?provider=${provider}&range=${range}&level=${level}`
+    )
       .then(async (response) => {
         const data = await response.json();
 
         if (!response.ok) {
-          if (data.error === "no_meta_connection") {
+          if (data.error === "no_connection") {
             if (!cancelled) {
               setNoConnection(true);
               setInsights([]);
@@ -63,7 +67,7 @@ export function useInsights(
     return () => {
       cancelled = true;
     };
-  }, [range, level]);
+  }, [range, level, provider]);
 
   return { insights, loading, error, cached, noConnection };
 }

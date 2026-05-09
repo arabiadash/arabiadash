@@ -82,7 +82,10 @@ export interface MetaInsight {
   date_stop: string;
 }
 
-export type DateRange = "7d" | "14d" | "30d" | "90d" | "lifetime";
+// DateRange and TimeIncrement are now defined in @/lib/ads/types.
+// Re-exported here for backward compatibility with existing imports.
+import type { DateRange, TimeIncrement } from "@/lib/ads/types";
+export type { DateRange, TimeIncrement };
 
 const DATE_PRESETS: Record<DateRange, string> = {
   "7d": "last_7d",
@@ -132,8 +135,6 @@ export async function getCampaigns(
   const result = (await response.json()) as CampaignsResponse;
   return result.data;
 }
-
-export type TimeIncrement = 1 | 7 | "all_days";
 
 export async function getAccountInsights(
   accessToken: string,

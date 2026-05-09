@@ -31,7 +31,6 @@ import {
 } from "@/lib/mock-data";
 import { useInsights } from "@/lib/hooks/use-insights";
 import { useCurrency } from "@/lib/contexts/currency-context";
-import { aggregateInsights, getSpend, getRevenue } from "@/lib/meta/metrics";
 import {
   formatAndConvert,
   formatCurrency as formatCurrencyWithSymbol,
@@ -40,7 +39,7 @@ import {
   type Currency,
 } from "@/lib/currency";
 import { CurrencyToggle } from "@/components/CurrencyToggle";
-import type { MetaInsight } from "@/lib/meta/api";
+import type { UnifiedInsight } from "@/lib/ads/types";
 import {
   AreaChart,
   Area,
@@ -106,7 +105,7 @@ export default function DashboardClient({
   const [accountCurrency, setAccountCurrency] = useState<Currency>("USD");
 
   useEffect(() => {
-    fetch("/api/meta/account")
+    fetch("/api/ads/account?provider=meta")
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         const c = data?.currency;
@@ -117,10 +116,23 @@ export default function DashboardClient({
       .catch(() => {});
   }, []);
 
-  const aggregated = useMemo(
-    () => (insights.length === 0 ? null : aggregateInsights(insights)),
-    [insights]
-  );
+  // Aggregate UnifiedInsight[] into totals + recalculated ROAS.
+  // Range='30d' typically returns one row, but reduce handles N rows safely.
+  const aggregated = useMemo(() => {
+    if (insights.length === 0) return null;
+    const totals = insights.reduce(
+      (acc, ins) => ({
+        spend: acc.spend + ins.spend,
+        revenue: acc.revenue + ins.revenue,
+        purchases: acc.purchases + ins.purchases,
+      }),
+      { spend: 0, revenue: 0, purchases: 0 }
+    );
+    return {
+      ...totals,
+      roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
+    };
+  }, [insights]);
 
   // Daily insights for the Performance Chart (last 7 days)
   const [chartData, setChartData] = useState<ChartDataPoint[]>([]);
@@ -128,21 +140,17 @@ export default function DashboardClient({
 
   useEffect(() => {
     setChartLoading(true);
-    fetch("/api/meta/insights?range=7d&time_increment=1")
+    fetch("/api/ads/insights?provider=meta&range=7d&time_increment=1")
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.data && Array.isArray(data.data)) {
-          const points = (data.data as MetaInsight[]).map((insight) => {
-            const spend = getSpend(insight);
-            const revenue = getRevenue(insight);
-            return {
-              date: insight.date_start,
-              dayLabel: formatDayLabel(insight.date_start),
-              spend,
-              revenue,
-              roas: spend > 0 ? revenue / spend : 0,
-            };
-          });
+          const points = (data.data as UnifiedInsight[]).map((insight) => ({
+            date: insight.dateStart,
+            dayLabel: formatDayLabel(insight.dateStart),
+            spend: insight.spend,
+            revenue: insight.revenue,
+            roas: insight.roas,
+          }));
           setChartData(points);
         }
       })
