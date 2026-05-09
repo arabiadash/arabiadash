@@ -29,6 +29,8 @@ import {
   ChevronUp,
   ChevronDown,
   ChevronsUpDown,
+  ArrowUp,
+  ArrowDown,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -36,6 +38,10 @@ import {
   dateRangeValueToOptions,
 } from "@/lib/hooks/use-insights";
 import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
+import {
+  computePreviousPeriod,
+  computeDelta,
+} from "@/lib/period-comparison";
 import { useCurrency } from "@/lib/contexts/currency-context";
 import { CurrencyToggle } from "@/components/CurrencyToggle";
 import { DateRangePicker } from "@/components/DateRangePicker";
@@ -390,6 +396,22 @@ export default function ReportsClient({
 
   const hasActiveFilters = searchQuery !== "" || statusFilter !== "all";
 
+  // Previous period for KPI delta comparison (null when lifetime)
+  const previousPeriod = useMemo(
+    () => computePreviousPeriod(dateRange),
+    [dateRange]
+  );
+
+  // Fetch previous period insights for KPI deltas. When previousPeriod is null
+  // we still need a valid options object (useInsights doesn't support skip
+  // natively); previousSummary below guards on previousPeriod and returns null,
+  // so the deltas are hidden in lifetime mode.
+  const { insights: previousInsights } = useInsights(
+    previousPeriod
+      ? { customRange: previousPeriod, level: "campaign" }
+      : { range: "30d", level: "campaign" }
+  );
+
   const summary = useMemo(() => {
     const totals = insights.reduce(
       (acc, i) => ({
@@ -410,6 +432,29 @@ export default function ReportsClient({
         totals.purchases > 0 ? totals.revenue / totals.purchases : 0,
     };
   }, [insights]);
+
+  // Previous period totals (for KPI deltas). Null when previousPeriod is null
+  // (lifetime) — KPI cards will hide their delta indicators.
+  const previousSummary = useMemo(() => {
+    if (!previousPeriod) return null;
+    const totals = previousInsights.reduce(
+      (acc, i) => ({
+        spend: acc.spend + i.spend,
+        revenue: acc.revenue + i.revenue,
+        purchases: acc.purchases + i.purchases,
+      }),
+      { spend: 0, revenue: 0, purchases: 0 }
+    );
+    return {
+      spend: totals.spend,
+      revenue: totals.revenue,
+      profit: totals.revenue - totals.spend,
+      roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
+      purchases: totals.purchases,
+      aov:
+        totals.purchases > 0 ? totals.revenue / totals.purchases : 0,
+    };
+  }, [previousInsights, previousPeriod]);
 
   const displayChartData = useMemo(
     () =>
@@ -548,30 +593,50 @@ export default function ReportsClient({
       value: formatAndConvert(summary.spend, accountCurrency, currency),
       icon: DollarSign,
       color: "indigo",
+      delta: previousSummary
+        ? computeDelta(summary.spend, previousSummary.spend)
+        : null,
+      deltaInverse: false,
     },
     {
       label: "إجمالي الإيرادات",
       value: formatAndConvert(summary.revenue, accountCurrency, currency),
       icon: ShoppingCart,
       color: "green",
+      delta: previousSummary
+        ? computeDelta(summary.revenue, previousSummary.revenue)
+        : null,
+      deltaInverse: false,
     },
     {
       label: "صافي الربح",
       value: formatAndConvert(summary.profit, accountCurrency, currency),
       icon: TrendingUp,
       color: "emerald",
+      delta: previousSummary
+        ? computeDelta(summary.profit, previousSummary.profit)
+        : null,
+      deltaInverse: false,
     },
     {
       label: "متوسط ROAS",
       value: `${summary.roas.toFixed(2)}x`,
       icon: Target,
       color: "purple",
+      delta: previousSummary
+        ? computeDelta(summary.roas, previousSummary.roas)
+        : null,
+      deltaInverse: false,
     },
     {
       label: "عدد المبيعات",
       value: summary.purchases.toLocaleString("en-US"),
       icon: Users,
       color: "blue",
+      delta: previousSummary
+        ? computeDelta(summary.purchases, previousSummary.purchases)
+        : null,
+      deltaInverse: false,
     },
     {
       label: "متوسط قيمة الطلب",
@@ -581,6 +646,10 @@ export default function ReportsClient({
           : "—",
       icon: Percent,
       color: "pink",
+      delta: previousSummary
+        ? computeDelta(summary.aov, previousSummary.aov)
+        : null,
+      deltaInverse: false,
     },
   ];
 
@@ -796,6 +865,28 @@ export default function ReportsClient({
                         blue: "bg-blue-50 text-blue-600",
                         pink: "bg-pink-50 text-pink-600",
                       };
+
+                      const showDelta = stat.delta && stat.delta.isFinite;
+                      const deltaValue = stat.delta?.value ?? 0;
+                      const isNegligible =
+                        showDelta && Math.abs(deltaValue) < 0.1;
+                      const deltaIsPositive = stat.deltaInverse
+                        ? deltaValue < 0
+                        : deltaValue > 0;
+                      const deltaColor = !showDelta
+                        ? "text-gray-400"
+                        : isNegligible
+                          ? "text-gray-500"
+                          : deltaIsPositive
+                            ? "text-green-600"
+                            : "text-red-600";
+                      const DeltaIcon =
+                        !showDelta || isNegligible
+                          ? null
+                          : deltaValue > 0
+                            ? ArrowUp
+                            : ArrowDown;
+
                       return (
                         <div
                           key={i}
@@ -814,13 +905,34 @@ export default function ReportsClient({
                             {stat.label}
                           </p>
                           <div
-                            className="flex items-baseline gap-1 flex-wrap"
+                            className="flex items-baseline gap-1 flex-wrap mb-1"
                             dir="ltr"
                           >
                             <span className="text-base sm:text-lg font-bold text-gray-900">
                               {stat.value}
                             </span>
                           </div>
+
+                          {showDelta ? (
+                            <div
+                              className={`flex items-center gap-0.5 text-[10px] sm:text-xs ${deltaColor}`}
+                              dir="ltr"
+                            >
+                              {DeltaIcon && (
+                                <DeltaIcon className="w-3 h-3" />
+                              )}
+                              <span className="font-semibold">
+                                {Math.abs(deltaValue).toFixed(1)}%
+                              </span>
+                              <span className="text-gray-400 mr-1">
+                                vs السابقة
+                              </span>
+                            </div>
+                          ) : previousPeriod ? (
+                            <div className="text-[10px] sm:text-xs text-gray-400">
+                              — vs السابقة
+                            </div>
+                          ) : null}
                         </div>
                       );
                     })}
@@ -961,6 +1073,7 @@ export default function ReportsClient({
                   </div>
                 )}
               </div>
+
 
               {/* Campaigns Table */}
               <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">

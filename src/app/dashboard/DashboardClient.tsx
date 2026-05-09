@@ -22,6 +22,8 @@ import {
   Loader2,
   Plus,
   ArrowLeft,
+  ArrowUp,
+  ArrowDown,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -35,6 +37,10 @@ import {
 } from "@/lib/hooks/use-insights";
 import { useCurrency } from "@/lib/contexts/currency-context";
 import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
+import {
+  computePreviousPeriod,
+  computeDelta,
+} from "@/lib/period-comparison";
 import {
   formatAndConvert,
   formatCurrency as formatCurrencyWithSymbol,
@@ -143,6 +149,39 @@ export default function DashboardClient({
     };
   }, [insights]);
 
+  // Previous period for KPI delta comparison (null when lifetime)
+  const previousPeriod = useMemo(
+    () => computePreviousPeriod(dateRange),
+    [dateRange]
+  );
+
+  // Fetch previous period insights. When previousPeriod is null we still need
+  // a valid options object (useInsights doesn't support skip natively); the
+  // previousSummary guard below returns null so deltas are hidden in lifetime.
+  const { insights: previousInsights } = useInsights(
+    previousPeriod
+      ? { customRange: previousPeriod, level: "account" }
+      : { range: "30d", level: "account" }
+  );
+
+  const previousSummary = useMemo(() => {
+    if (!previousPeriod) return null;
+    const totals = previousInsights.reduce(
+      (acc, i) => ({
+        spend: acc.spend + i.spend,
+        revenue: acc.revenue + i.revenue,
+        purchases: acc.purchases + i.purchases,
+      }),
+      { spend: 0, revenue: 0, purchases: 0 }
+    );
+    return {
+      spend: totals.spend,
+      revenue: totals.revenue,
+      purchases: totals.purchases,
+      roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
+    };
+  }, [previousInsights, previousPeriod]);
+
   // Smart time_increment: daily breakdown for ranges ≤ 90 days, aggregate otherwise.
   // Used for KPI subtitle/messaging (reflects the selected dateRange).
   const dayCount = getDayCount(dateRange);
@@ -229,27 +268,39 @@ export default function DashboardClient({
         value: formatAndConvert(aggregated.spend, accountCurrency, currency),
         icon: DollarSign,
         color: "indigo",
+        delta: previousSummary
+          ? computeDelta(aggregated.spend, previousSummary.spend)
+          : null,
       },
       {
         label: "إجمالي الإيرادات",
         value: formatAndConvert(aggregated.revenue, accountCurrency, currency),
         icon: ShoppingCart,
         color: "green",
+        delta: previousSummary
+          ? computeDelta(aggregated.revenue, previousSummary.revenue)
+          : null,
       },
       {
         label: "العائد على الإعلان (ROAS)",
         value: `${aggregated.roas.toFixed(2)}x`,
         icon: TrendingUp,
         color: "purple",
+        delta: previousSummary
+          ? computeDelta(aggregated.roas, previousSummary.roas)
+          : null,
       },
       {
         label: "عدد المبيعات",
         value: aggregated.purchases.toLocaleString("en-US"),
         icon: Users,
         color: "blue",
+        delta: previousSummary
+          ? computeDelta(aggregated.purchases, previousSummary.purchases)
+          : null,
       },
     ];
-  }, [aggregated, accountCurrency, currency]);
+  }, [aggregated, accountCurrency, currency, previousSummary]);
 
   // Handle sign out
   const handleSignOut = async () => {
@@ -479,6 +530,24 @@ export default function DashboardClient({
                   blue: "bg-blue-50 text-blue-600",
                 };
 
+                const showDelta = stat.delta && stat.delta.isFinite;
+                const deltaValue = stat.delta?.value ?? 0;
+                const isNegligible =
+                  showDelta && Math.abs(deltaValue) < 0.1;
+                const deltaColor = !showDelta
+                  ? "text-gray-400"
+                  : isNegligible
+                    ? "text-gray-500"
+                    : deltaValue > 0
+                      ? "text-green-600"
+                      : "text-red-600";
+                const DeltaIcon =
+                  !showDelta || isNegligible
+                    ? null
+                    : deltaValue > 0
+                      ? ArrowUp
+                      : ArrowDown;
+
                 return (
                   <div
                     key={i}
@@ -504,6 +573,25 @@ export default function DashboardClient({
                         {stat.value}
                       </span>
                     </div>
+
+                    {showDelta ? (
+                      <div
+                        className={`flex items-center gap-0.5 text-[10px] sm:text-xs mt-1 ${deltaColor}`}
+                        dir="ltr"
+                      >
+                        {DeltaIcon && <DeltaIcon className="w-3 h-3" />}
+                        <span className="font-semibold">
+                          {Math.abs(deltaValue).toFixed(1)}%
+                        </span>
+                        <span className="text-gray-400 mr-1">
+                          vs السابقة
+                        </span>
+                      </div>
+                    ) : previousPeriod ? (
+                      <div className="text-[10px] sm:text-xs text-gray-400 mt-1">
+                        — vs السابقة
+                      </div>
+                    ) : null}
                   </div>
                 );
               })
