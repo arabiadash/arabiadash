@@ -8,6 +8,7 @@ import {
 } from "@/lib/ads/cache";
 import type {
   DateRange,
+  DateRangeInput,
   TimeIncrement,
   InsightLevel,
   UnifiedInsight,
@@ -36,6 +37,8 @@ export async function GET(request: NextRequest) {
     const levelParam = request.nextUrl.searchParams.get("level");
     const timeIncrementParam =
       request.nextUrl.searchParams.get("time_increment");
+    const sinceParam = request.nextUrl.searchParams.get("since");
+    const untilParam = request.nextUrl.searchParams.get("until");
 
     if (!VALID_PROVIDERS.includes(provider)) {
       return NextResponse.json(
@@ -44,10 +47,50 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const range: DateRange =
-      rangeParam && VALID_RANGES.includes(rangeParam as DateRange)
-        ? (rangeParam as DateRange)
-        : "30d";
+    // Parse range: custom (since/until) takes precedence over preset (range)
+    const isValidISODate = (s: string): boolean =>
+      /^\d{4}-\d{2}-\d{2}$/.test(s);
+
+    let range: DateRangeInput;
+    let cacheKeyRangePart: string;
+
+    if (sinceParam && untilParam) {
+      if (!isValidISODate(sinceParam) || !isValidISODate(untilParam)) {
+        return NextResponse.json(
+          { error: "invalid_date_format", message: "Use YYYY-MM-DD" },
+          { status: 400 }
+        );
+      }
+
+      if (sinceParam > untilParam) {
+        return NextResponse.json(
+          { error: "invalid_date_range", message: "since must be <= until" },
+          { status: 400 }
+        );
+      }
+
+      const sinceDate = new Date(sinceParam);
+      const untilDate = new Date(untilParam);
+      const monthsDiff =
+        (untilDate.getTime() - sinceDate.getTime()) /
+        (1000 * 60 * 60 * 24 * 30);
+      if (monthsDiff > 37) {
+        return NextResponse.json(
+          { error: "date_range_too_long", message: "Max range is 37 months" },
+          { status: 400 }
+        );
+      }
+
+      range = { since: sinceParam, until: untilParam };
+      cacheKeyRangePart = `custom:${sinceParam}:${untilParam}`;
+    } else {
+      const presetRange: DateRange =
+        rangeParam && VALID_RANGES.includes(rangeParam as DateRange)
+          ? (rangeParam as DateRange)
+          : "30d";
+      range = presetRange;
+      cacheKeyRangePart = presetRange;
+    }
 
     const level: InsightLevel =
       levelParam === "campaign"
@@ -96,7 +139,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "no_connection" }, { status: 404 });
     }
 
-    const cacheKey = `insights:${level}:${range}${
+    const cacheKey = `insights:${level}:${cacheKeyRangePart}${
       timeIncrement ? `:t${timeIncrement}` : ""
     }`;
 

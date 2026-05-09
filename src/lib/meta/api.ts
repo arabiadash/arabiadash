@@ -82,10 +82,17 @@ export interface MetaInsight {
   date_stop: string;
 }
 
-// DateRange and TimeIncrement are now defined in @/lib/ads/types.
-// Re-exported here for backward compatibility with existing imports.
-import type { DateRange, TimeIncrement } from "@/lib/ads/types";
-export type { DateRange, TimeIncrement };
+// DateRange, TimeIncrement, CustomDateRange, DateRangeInput are defined in
+// @/lib/ads/types. Re-exported here for backward compatibility.
+import {
+  type DateRange,
+  type TimeIncrement,
+  type CustomDateRange,
+  type DateRangeInput,
+  isCustomRange,
+} from "@/lib/ads/types";
+export type { DateRange, TimeIncrement, CustomDateRange, DateRangeInput };
+export { isCustomRange };
 
 const DATE_PRESETS: Record<DateRange, string> = {
   "7d": "last_7d",
@@ -136,19 +143,36 @@ export async function getCampaigns(
   return result.data;
 }
 
+// Apply either date_preset (for preset DateRange) or time_range (for CustomDateRange)
+// to the given URLSearchParams, in the format Meta's Marketing API expects.
+function applyRangeToParams(
+  params: URLSearchParams,
+  range: DateRangeInput
+): void {
+  if (isCustomRange(range)) {
+    params.set(
+      "time_range",
+      JSON.stringify({ since: range.since, until: range.until })
+    );
+  } else {
+    params.set("date_preset", DATE_PRESETS[range]);
+  }
+}
+
 export async function getAccountInsights(
   accessToken: string,
   accountId: string,
-  dateRange: DateRange = "30d",
+  range: DateRangeInput = "30d",
   timeIncrement?: TimeIncrement
 ): Promise<MetaInsight[]> {
   const url = `https://graph.facebook.com/${META_API_VERSION}/${accountId}/insights`;
   const params = new URLSearchParams({
     fields:
       "spend,impressions,clicks,ctr,cpc,cpm,reach,frequency,actions,action_values",
-    date_preset: DATE_PRESETS[dateRange],
     access_token: accessToken,
   });
+
+  applyRangeToParams(params, range);
 
   if (timeIncrement) {
     params.set("time_increment", String(timeIncrement));
@@ -170,17 +194,18 @@ export async function getAccountInsights(
 export async function getCampaignInsights(
   accessToken: string,
   accountId: string,
-  dateRange: DateRange = "30d",
+  range: DateRangeInput = "30d",
   timeIncrement?: TimeIncrement
 ): Promise<MetaInsight[]> {
   const url = `https://graph.facebook.com/${META_API_VERSION}/${accountId}/insights`;
   const params = new URLSearchParams({
     fields:
       "campaign_id,campaign_name,spend,impressions,clicks,ctr,cpc,cpm,reach,frequency,actions,action_values",
-    date_preset: DATE_PRESETS[dateRange],
     level: "campaign",
     access_token: accessToken,
   });
+
+  applyRangeToParams(params, range);
 
   if (timeIncrement) {
     params.set("time_increment", String(timeIncrement));

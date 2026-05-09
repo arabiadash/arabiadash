@@ -1,7 +1,14 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import type { UnifiedInsight, DateRange } from "@/lib/ads/types";
+import {
+  presetToCustomRange,
+  type UnifiedInsight,
+  type DateRange,
+  type CustomDateRange,
+  type DateRangeValue,
+  type TimeIncrement,
+} from "@/lib/ads/types";
 import type { AdProvider } from "@/lib/ads/cache";
 
 interface UseInsightsReturn {
@@ -12,16 +19,54 @@ interface UseInsightsReturn {
   noConnection: boolean;
 }
 
+export interface UseInsightsOptions {
+  range?: DateRange;
+  customRange?: CustomDateRange; // takes precedence over `range` if provided
+  level?: "account" | "campaign";
+  provider?: AdProvider;
+  timeIncrement?: TimeIncrement;
+}
+
+/**
+ * Convert a DateRangePicker `DateRangeValue` to the slice of UseInsightsOptions
+ * that controls the date range. Spread the result into useInsights options.
+ *
+ * Example:
+ *   const [picked, setPicked] = useState<DateRangeValue>({ type: 'preset', preset: '30d' });
+ *   const insights = useInsights({ ...dateRangeValueToOptions(picked), level: 'account' });
+ */
+export function dateRangeValueToOptions(
+  value: DateRangeValue
+): Pick<UseInsightsOptions, "range" | "customRange"> {
+  if (value.type === "preset") {
+    return { range: value.preset };
+  }
+  return {
+    customRange: { since: value.since, until: value.until },
+  };
+}
+
 export function useInsights(
-  range: DateRange = "30d",
-  level: "account" | "campaign" = "account",
-  provider: AdProvider = "meta"
+  options: UseInsightsOptions = {}
 ): UseInsightsReturn {
+  const {
+    range = "30d",
+    customRange,
+    level = "account",
+    provider = "meta",
+    timeIncrement,
+  } = options;
+
   const [insights, setInsights] = useState<UnifiedInsight[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cached, setCached] = useState(false);
   const [noConnection, setNoConnection] = useState(false);
+
+  // Stable primitives for dep array (avoid re-fetch when caller passes a new
+  // customRange object reference with the same values).
+  const customSince = customRange?.since;
+  const customUntil = customRange?.until;
 
   useEffect(() => {
     let cancelled = false;
@@ -30,9 +75,35 @@ export function useInsights(
     setError(null);
     setNoConnection(false);
 
-    fetch(
-      `/api/ads/insights?provider=${provider}&range=${range}&level=${level}`
-    )
+    const params = new URLSearchParams({ provider, level });
+
+    // Resolve effective dates. Order:
+    //   1. explicit customRange from caller → use as-is
+    //   2. preset (except 'lifetime') → convert to since/until ending today
+    //   3. 'lifetime' preset → pass through to backend (uses Meta's `maximum`)
+    let effectiveSince = customSince;
+    let effectiveUntil = customUntil;
+
+    if ((!effectiveSince || !effectiveUntil) && range !== "lifetime") {
+      const converted = presetToCustomRange(range);
+      if (converted) {
+        effectiveSince = converted.since;
+        effectiveUntil = converted.until;
+      }
+    }
+
+    if (effectiveSince && effectiveUntil) {
+      params.set("since", effectiveSince);
+      params.set("until", effectiveUntil);
+    } else {
+      params.set("range", range);
+    }
+
+    if (timeIncrement) {
+      params.set("time_increment", String(timeIncrement));
+    }
+
+    fetch(`/api/ads/insights?${params.toString()}`)
       .then(async (response) => {
         const data = await response.json();
 
@@ -67,7 +138,7 @@ export function useInsights(
     return () => {
       cancelled = true;
     };
-  }, [range, level, provider]);
+  }, [range, customSince, customUntil, level, provider, timeIncrement]);
 
   return { insights, loading, error, cached, noConnection };
 }

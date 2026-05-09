@@ -29,8 +29,12 @@ import {
   platformNameToId,
   getConnectedAdPlatforms,
 } from "@/lib/mock-data";
-import { useInsights } from "@/lib/hooks/use-insights";
+import {
+  useInsights,
+  dateRangeValueToOptions,
+} from "@/lib/hooks/use-insights";
 import { useCurrency } from "@/lib/contexts/currency-context";
+import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
 import {
   formatAndConvert,
   formatCurrency as formatCurrencyWithSymbol,
@@ -39,7 +43,12 @@ import {
   type Currency,
 } from "@/lib/currency";
 import { CurrencyToggle } from "@/components/CurrencyToggle";
-import type { UnifiedInsight } from "@/lib/ads/types";
+import { DateRangePicker } from "@/components/DateRangePicker";
+import {
+  formatChartDayLabel,
+  formatChartTooltipLabel,
+  type DateRangeValue,
+} from "@/lib/ads/types";
 import {
   AreaChart,
   Area,
@@ -60,27 +69,35 @@ interface DashboardClientProps {
   connectedPlatforms: string[];
 }
 
-interface ChartDataPoint {
-  date: string;
-  dayLabel: string;
-  spend: number;
-  revenue: number;
-  roas: number;
+function getDayCount(range: DateRangeValue): number {
+  if (range.type === "preset") {
+    const map: Record<string, number> = {
+      "7d": 7,
+      "14d": 14,
+      "30d": 30,
+      "90d": 90,
+      lifetime: 0,
+    };
+    return map[range.preset] ?? 0;
+  }
+  const ms =
+    new Date(range.until).getTime() - new Date(range.since).getTime();
+  return Math.ceil(ms / (1000 * 60 * 60 * 24)) + 1;
 }
 
-const ARABIC_DAYS = [
-  "الأحد",
-  "الإثنين",
-  "الثلاثاء",
-  "الأربعاء",
-  "الخميس",
-  "الجمعة",
-  "السبت",
-];
+const PRESET_RANGE_LABELS: Record<string, string> = {
+  "7d": "آخر 7 أيام",
+  "14d": "آخر 14 يوم",
+  "30d": "آخر 30 يوم",
+  "90d": "آخر 90 يوم",
+  lifetime: "مدى الحياة",
+};
 
-function formatDayLabel(dateStr: string): string {
-  const date = new Date(dateStr);
-  return ARABIC_DAYS[date.getDay()];
+function getRangeLabel(range: DateRangeValue): string {
+  if (range.type === "preset") {
+    return PRESET_RANGE_LABELS[range.preset] ?? "";
+  }
+  return `${range.since} - ${range.until}`;
 }
 
 export default function DashboardClient({
@@ -94,13 +111,19 @@ export default function DashboardClient({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
 
-  // Real Meta data hooks
+  // Date range (persisted to localStorage, synced cross-tab)
+  const [dateRange, setDateRange] = useDateRangeStorage();
+
+  // KPI insights — single aggregate row for the selected range
   const {
     insights,
     loading: insightsLoading,
     error: insightsError,
     noConnection,
-  } = useInsights("30d", "account");
+  } = useInsights({
+    ...dateRangeValueToOptions(dateRange),
+    level: "account",
+  });
   const { currency } = useCurrency();
   const [accountCurrency, setAccountCurrency] = useState<Currency>("USD");
 
@@ -134,42 +157,47 @@ export default function DashboardClient({
     };
   }, [insights]);
 
-  // Daily insights for the Performance Chart (last 7 days)
-  const [chartData, setChartData] = useState<ChartDataPoint[]>([]);
-  const [chartLoading, setChartLoading] = useState(true);
+  // Smart time_increment: daily breakdown for ranges ≤ 90 days, aggregate otherwise
+  const dayCount = getDayCount(dateRange);
+  const shouldShowDailyBreakdown =
+    dateRange.type === "custom"
+      ? dayCount <= 90
+      : ["7d", "14d", "30d", "90d"].includes(dateRange.preset);
 
-  useEffect(() => {
-    setChartLoading(true);
-    fetch("/api/ads/insights?provider=meta&range=7d&time_increment=1")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data?.data && Array.isArray(data.data)) {
-          const points = (data.data as UnifiedInsight[]).map((insight) => ({
-            date: insight.dateStart,
-            dayLabel: formatDayLabel(insight.dateStart),
-            spend: insight.spend,
-            revenue: insight.revenue,
-            roas: insight.roas,
-          }));
-          setChartData(points);
-        }
-      })
-      .catch((err) => console.error("[chart] Error:", err))
-      .finally(() => setChartLoading(false));
-  }, []);
+  // Chart insights — same range as KPIs, but with daily breakdown when applicable
+  const { insights: chartInsights, loading: chartLoading } = useInsights({
+    ...dateRangeValueToOptions(dateRange),
+    level: "account",
+    timeIncrement: shouldShowDailyBreakdown ? 1 : undefined,
+  });
 
   const displayChartData = useMemo(
     () =>
-      chartData.map((point) => ({
-        ...point,
-        displaySpend: convertCurrency(point.spend, accountCurrency, currency),
+      chartInsights.map((insight) => ({
+        date: insight.dateStart,
+        dayLabel: shouldShowDailyBreakdown
+          ? formatChartDayLabel(insight.dateStart, dayCount)
+          : insight.dateStart,
+        tooltipLabel: formatChartTooltipLabel(insight.dateStart),
+        roas: insight.roas,
+        displaySpend: convertCurrency(
+          insight.spend,
+          accountCurrency,
+          currency
+        ),
         displayRevenue: convertCurrency(
-          point.revenue,
+          insight.revenue,
           accountCurrency,
           currency
         ),
       })),
-    [chartData, accountCurrency, currency]
+    [
+      chartInsights,
+      shouldShowDailyBreakdown,
+      dayCount,
+      accountCurrency,
+      currency,
+    ]
   );
 
   // Check if user has any connections
@@ -363,11 +391,16 @@ export default function DashboardClient({
                   : "إليك نظرة عامة على أداء حساباتك"}
               </p>
             </div>
-            {hasConnections && (
-              <div className="bg-green-50 text-green-700 px-3 py-1.5 rounded-lg text-sm font-medium border border-green-100">
-                {connectedPlatforms.length} منصة متصلة
-              </div>
-            )}
+            <div className="flex items-center gap-3 flex-wrap">
+              {hasConnections && (
+                <DateRangePicker value={dateRange} onChange={setDateRange} />
+              )}
+              {hasConnections && (
+                <div className="bg-green-50 text-green-700 px-3 py-1.5 rounded-lg text-sm font-medium border border-green-100">
+                  {connectedPlatforms.length} منصة متصلة
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Empty State (only if no connections) */}
@@ -483,16 +516,23 @@ export default function DashboardClient({
                 <div className="flex items-center justify-between mb-3 sm:mb-6">
                   <div>
                     <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
-                      أداء آخر 7 أيام
+                      أداء الفترة
                     </h3>
                     <p className="text-xs sm:text-sm text-gray-500">
-                      الإنفاق مقابل الإيرادات (بـ{" "}
-                      {CURRENCY_LABELS[currency].nameAr})
+                      {shouldShowDailyBreakdown
+                        ? `توزيع يومي (${getRangeLabel(dateRange)}) بـ ${CURRENCY_LABELS[currency].nameAr}`
+                        : `إجمالي الفترة (${getRangeLabel(dateRange)}) بـ ${CURRENCY_LABELS[currency].nameAr}`}
                     </p>
                   </div>
                 </div>
                 <div dir="ltr" className="h-56 sm:h-72">
-                  {chartLoading ? (
+                  {!shouldShowDailyBreakdown ? (
+                    <div className="h-full flex items-center justify-center text-center px-4">
+                      <p className="text-sm text-gray-500">
+                        التوزيع اليومي متاح للفترات حتى 90 يوم
+                      </p>
+                    </div>
+                  ) : chartLoading ? (
                     <div className="h-full flex items-center justify-center">
                       <div className="animate-pulse text-gray-400 text-sm">
                         جاري تحميل البيانات...
@@ -501,7 +541,7 @@ export default function DashboardClient({
                   ) : displayChartData.length === 0 ? (
                     <div className="h-full flex items-center justify-center">
                       <p className="text-gray-500 text-sm">
-                        لا توجد بيانات لآخر 7 أيام
+                        لا توجد بيانات لهذه الفترة
                       </p>
                     </div>
                   ) : (
@@ -557,6 +597,12 @@ export default function DashboardClient({
                             backgroundColor: "white",
                             border: "1px solid #e5e7eb",
                             borderRadius: "8px",
+                          }}
+                          labelFormatter={(label, payload) => {
+                            const data = payload?.[0]?.payload as
+                              | { tooltipLabel?: string }
+                              | undefined;
+                            return data?.tooltipLabel ?? label;
                           }}
                           formatter={(value, name) => {
                             const num =
@@ -639,16 +685,22 @@ export default function DashboardClient({
                   </div>
                 )}
 
-                {/* ROAS Trend — Real Meta data, daily for last 7 days */}
+                {/* ROAS Trend — Real Meta data, daily for ranges ≤ 90 days */}
                 <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6">
                   <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
                     اتجاه ROAS
                   </h3>
                   <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
-                    العائد على الإنفاق الإعلاني (آخر 7 أيام)
+                    العائد على الإنفاق الإعلاني ({getRangeLabel(dateRange)})
                   </p>
                   <div dir="ltr" className="h-52 sm:h-64">
-                    {chartLoading ? (
+                    {!shouldShowDailyBreakdown ? (
+                      <div className="h-full flex items-center justify-center text-center px-4">
+                        <p className="text-sm text-gray-500">
+                          التوزيع اليومي متاح للفترات حتى 90 يوم
+                        </p>
+                      </div>
+                    ) : chartLoading ? (
                       <div className="h-full flex items-center justify-center">
                         <div className="animate-pulse text-gray-400 text-sm">
                           جاري تحميل البيانات...
@@ -657,7 +709,7 @@ export default function DashboardClient({
                     ) : displayChartData.length === 0 ? (
                       <div className="h-full flex items-center justify-center">
                         <p className="text-gray-500 text-sm">
-                          لا توجد بيانات لآخر 7 أيام
+                          لا توجد بيانات لهذه الفترة
                         </p>
                       </div>
                     ) : (
@@ -698,6 +750,12 @@ export default function DashboardClient({
                               backgroundColor: "white",
                               border: "1px solid #e5e7eb",
                               borderRadius: "8px",
+                            }}
+                            labelFormatter={(label, payload) => {
+                              const data = payload?.[0]?.payload as
+                                | { tooltipLabel?: string }
+                                | undefined;
+                              return data?.tooltipLabel ?? label;
                             }}
                             formatter={(value, name) => {
                               const num =

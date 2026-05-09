@@ -1,14 +1,10 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   BarChart3,
-  TrendingUp,
-  DollarSign,
-  ShoppingCart,
-  Users,
   Settings,
   LogOut,
   Bell,
@@ -20,35 +16,42 @@ import {
   FileText,
   HelpCircle,
   Loader2,
-  Calendar,
-  Globe,
   Download,
   Mail,
   FileSpreadsheet,
-  ArrowUp,
-  ArrowDown,
-  Filter,
+  DollarSign,
+  ShoppingCart,
+  TrendingUp,
   Target,
+  Users,
   Percent,
-  ShoppingBag,
-  ChevronDown,
+  AlertCircle,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import {
-  formatCurrency,
-  formatPercent,
-  AD_PLATFORM_IDS,
-  platformNameToId,
-  getConnectedAdPlatforms,
-} from "@/lib/mock-data";
+  useInsights,
+  dateRangeValueToOptions,
+} from "@/lib/hooks/use-insights";
+import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
+import { useCurrency } from "@/lib/contexts/currency-context";
+import { CurrencyToggle } from "@/components/CurrencyToggle";
+import { DateRangePicker } from "@/components/DateRangePicker";
+import {
+  formatAndConvert,
+  formatCurrency as formatCurrencyWithSymbol,
+  convertCurrency,
+  CURRENCY_LABELS,
+  type Currency,
+} from "@/lib/currency";
+import {
+  formatChartDayLabel,
+  formatChartTooltipLabel,
+  type DateRangeValue,
+  type UnifiedCampaign,
+} from "@/lib/ads/types";
 import {
   AreaChart,
   Area,
-  BarChart,
-  Bar,
-  PieChart,
-  Pie,
-  Cell,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -64,91 +67,84 @@ interface ReportsClientProps {
   connectedPlatforms: string[];
 }
 
-// Date range options
-const dateRanges = [
-  { id: "7d", label: "آخر 7 أيام", days: 7 },
-  { id: "30d", label: "آخر 30 يوم", days: 30 },
-  { id: "90d", label: "آخر 3 شهور", days: 90 },
-  { id: "all", label: "كل الفترة", days: 365 },
+const ARABIC_MONTHS = [
+  "يناير",
+  "فبراير",
+  "مارس",
+  "أبريل",
+  "مايو",
+  "يونيو",
+  "يوليو",
+  "أغسطس",
+  "سبتمبر",
+  "أكتوبر",
+  "نوفمبر",
+  "ديسمبر",
 ];
 
-// Platforms filter options
-const platformsFilter = [
-  { id: "all", label: "كل المنصات", color: "#6366f1" },
-  { id: "meta", label: "Meta Ads", color: "#1877f2" },
-  { id: "google", label: "Google Ads", color: "#ea4335" },
-  { id: "tiktok", label: "TikTok Ads", color: "#000000" },
-  { id: "snapchat", label: "Snapchat Ads", color: "#fffc00" },
-];
-
-// Generate mock data based on filters. scaleFactor reduces aggregate values to
-// match how many ad platforms the user has connected (0 → 1 across the range).
-const generateChartData = (days: number, platform: string, scaleFactor: number) => {
-  const data = [];
-  const dayNames = ["السبت", "الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة"];
-  const baseSpend = platform === "all" ? 6500 : platform === "meta" ? 2500 : 1500;
-  const baseRevenue = platform === "all" ? 19500 : platform === "meta" ? 7800 : 4500;
-
-  const pointsToShow = Math.min(days, 30);
-  for (let i = 0; i < pointsToShow; i++) {
-    const variance = 0.7 + Math.random() * 0.6;
-    const spend = Math.round(baseSpend * variance * scaleFactor);
-    const revenue = Math.round(baseRevenue * variance * scaleFactor);
-    data.push({
-      day: days <= 7 ? dayNames[i % 7] : `يوم ${i + 1}`,
-      spend,
-      revenue,
-      profit: revenue - spend,
-      roas: scaleFactor > 0 ? Number((baseRevenue / baseSpend).toFixed(2)) : 0,
-    });
+function getDayCount(range: DateRangeValue): number {
+  if (range.type === "preset") {
+    const map: Record<string, number> = {
+      "7d": 7,
+      "14d": 14,
+      "30d": 30,
+      "90d": 90,
+      lifetime: 0,
+    };
+    return map[range.preset] ?? 0;
   }
-  return data;
+  const ms =
+    new Date(range.until).getTime() - new Date(range.since).getTime();
+  return Math.ceil(ms / (1000 * 60 * 60 * 24)) + 1;
+}
+
+function formatCustomRangeLabel(range: DateRangeValue): string | null {
+  if (range.type !== "custom") return null;
+  const formatDate = (s: string) => {
+    const [y, m, d] = s.split("-");
+    return `${parseInt(d)} ${ARABIC_MONTHS[parseInt(m) - 1]} ${y}`;
+  };
+  return `الفترة المختارة: ${formatDate(range.since)} - ${formatDate(
+    range.until
+  )} (${getDayCount(range)} يوم)`;
+}
+
+function getROASColor(roas: number): string {
+  if (roas >= 3) return "text-green-600";
+  if (roas >= 1) return "text-yellow-600";
+  return "text-red-600";
+}
+
+const STATUS_CONFIG: Record<string, { label: string; classes: string }> = {
+  ACTIVE: { label: "نشطة", classes: "bg-green-100 text-green-700" },
+  PAUSED: { label: "موقوفة", classes: "bg-gray-100 text-gray-700" },
+  DELETED: { label: "محذوفة", classes: "bg-red-100 text-red-700" },
+  ARCHIVED: { label: "مؤرشفة", classes: "bg-blue-100 text-blue-700" },
 };
 
-// Top days data (raw — gets scaled via useMemo at usage site)
-const rawTopDaysData = [
-  { day: "الجمعة", revenue: 31200 },
-  { day: "السبت", revenue: 28400 },
-  { day: "الخميس", revenue: 26800 },
-  { day: "الأحد", revenue: 24500 },
-  { day: "الإثنين", revenue: 22300 },
-  { day: "الأربعاء", revenue: 21800 },
-  { day: "الثلاثاء", revenue: 19500 },
-];
-
-// Platform share data (raw — filtered to connected ad platforms at usage site)
-const rawPlatformShareData = [
-  { name: "Meta", value: 58000, color: "#6366f1" },
-  { name: "Google", value: 42500, color: "#a855f7" },
-  { name: "TikTok", value: 24800, color: "#ec4899" },
-  { name: "Snapchat", value: 17200, color: "#facc15" },
-];
-
-// Best hours data (raw — gets scaled via useMemo at usage site)
-const rawBestHoursData = [
-  { hour: "9 ص", revenue: 4200 },
-  { hour: "12 م", revenue: 7800 },
-  { hour: "3 م", revenue: 8900 },
-  { hour: "6 م", revenue: 12400 },
-  { hour: "9 م", revenue: 14800 },
-  { hour: "12 ص", revenue: 6200 },
-];
-
-// All campaigns data
-const allCampaigns = [
-  { id: 1, name: "حملة العيد - منتجات الأطفال", platform: "Meta", spend: 4200, revenue: 15800, roas: 3.76, conversions: 142, status: "active" },
-  { id: 2, name: "Google Search - الأحذية الرياضية", platform: "Google", spend: 3800, revenue: 12400, roas: 3.26, conversions: 98, status: "active" },
-  { id: 3, name: "TikTok - مجموعة الصيف", platform: "TikTok", spend: 2900, revenue: 8700, roas: 3.0, conversions: 76, status: "active" },
-  { id: 4, name: "Snap - عروض رمضان", platform: "Snapchat", spend: 2150, revenue: 6450, roas: 3.0, conversions: 54, status: "paused" },
-  { id: 5, name: "Meta - إعادة الاستهداف", platform: "Meta", spend: 1850, revenue: 5550, roas: 3.0, conversions: 47, status: "active" },
-  { id: 6, name: "Google Display - منتجات جديدة", platform: "Google", spend: 1650, revenue: 4200, roas: 2.55, conversions: 38, status: "active" },
-  { id: 7, name: "Meta - عرض المخزون", platform: "Meta", spend: 1450, revenue: 3800, roas: 2.62, conversions: 32, status: "paused" },
-  { id: 8, name: "TikTok - مؤثرين", platform: "TikTok", spend: 1200, revenue: 2900, roas: 2.42, conversions: 24, status: "active" },
-];
+function StatusBadge({ status }: { status?: string }) {
+  if (!status) {
+    return (
+      <span className="px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-500">
+        —
+      </span>
+    );
+  }
+  const c = STATUS_CONFIG[status] || {
+    label: status,
+    classes: "bg-gray-100 text-gray-700",
+  };
+  return (
+    <span
+      className={`px-2 py-1 rounded text-xs font-medium ${c.classes}`}
+    >
+      {c.label}
+    </span>
+  );
+}
 
 export default function ReportsClient({
   fullName,
-  companyName,
   email,
   connectedPlatforms,
 }: ReportsClientProps) {
@@ -157,92 +153,113 @@ export default function ReportsClient({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
 
-  // Filters
-  const [selectedRange, setSelectedRange] = useState("30d");
-  const [selectedPlatform, setSelectedPlatform] = useState("all");
-  const [campaignSearch, setCampaignSearch] = useState("");
-  const [campaignStatusFilter, setCampaignStatusFilter] = useState("all");
+  const [dateRange, setDateRange] = useDateRangeStorage();
 
-  const hasConnections = connectedPlatforms.length > 0;
+  const { currency } = useCurrency();
+  const [accountCurrency, setAccountCurrency] = useState<Currency>("USD");
+  const [campaigns, setCampaigns] = useState<UnifiedCampaign[]>([]);
 
-  // Subset of connected platforms that are ad platforms (excludes salla/zid)
-  const connectedAdPlatforms = useMemo(
-    () => getConnectedAdPlatforms(connectedPlatforms),
-    [connectedPlatforms]
-  );
+  // Fetch account currency
+  useEffect(() => {
+    fetch("/api/ads/account?provider=meta")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const c = data?.currency;
+        if (c === "USD" || c === "SAR") setAccountCurrency(c);
+      })
+      .catch(() => {});
+  }, []);
 
-  // Scaling factor for aggregate metrics not tagged per-platform
-  const scaleFactor = connectedAdPlatforms.length / AD_PLATFORM_IDS.length;
+  // Fetch campaigns (for status JOIN)
+  useEffect(() => {
+    fetch("/api/ads/campaigns?provider=meta")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data?.data && Array.isArray(data.data)) {
+          setCampaigns(data.data);
+        }
+      })
+      .catch((err) => console.error("[reports/campaigns] Error:", err));
+  }, []);
 
-  // Computed data based on filters
-  const currentRange = dateRanges.find((r) => r.id === selectedRange) || dateRanges[1];
-  const chartData = useMemo(
-    () => generateChartData(currentRange.days, selectedPlatform, scaleFactor),
-    [currentRange.days, selectedPlatform, scaleFactor]
-  );
-
-  // Top days / best hours scaled to connected ad platforms
-  const topDaysData = useMemo(
+  const statusMap = useMemo(
     () =>
-      rawTopDaysData.map((d) => ({
-        ...d,
-        revenue: Math.round(d.revenue * scaleFactor),
-      })),
-    [scaleFactor]
-  );
-
-  const bestHoursData = useMemo(
-    () =>
-      rawBestHoursData.map((d) => ({
-        ...d,
-        revenue: Math.round(d.revenue * scaleFactor),
-      })),
-    [scaleFactor]
-  );
-
-  // Platform share filtered to connected ad platforms only
-  const platformShareData = useMemo(
-    () =>
-      rawPlatformShareData.filter((p) =>
-        connectedAdPlatforms.includes(platformNameToId(p.name))
+      new Map(
+        campaigns.map((c) => [c.id, { status: c.status, name: c.name }])
       ),
-    [connectedAdPlatforms]
+    [campaigns]
   );
 
-  // Compute KPIs from chart data
-  const kpis = useMemo(() => {
-    const totalSpend = chartData.reduce((sum, d) => sum + d.spend, 0);
-    const totalRevenue = chartData.reduce((sum, d) => sum + d.revenue, 0);
-    const profit = totalRevenue - totalSpend;
-    const avgRoas = totalSpend > 0 ? totalRevenue / totalSpend : 0;
-    const conversions =
-      scaleFactor > 0 ? Math.round(chartData.length * 18 * scaleFactor) : 0;
-    const aov = conversions > 0 ? totalRevenue / conversions : 0;
+  // Smart time_increment: daily for ranges ≤ 90 days, aggregate otherwise
+  const dayCount = getDayCount(dateRange);
+  const shouldShowDailyBreakdown =
+    dateRange.type === "custom"
+      ? dayCount <= 90
+      : ["7d", "14d", "30d", "90d"].includes(dateRange.preset);
 
+  // Insights for table (campaign level — one row per campaign)
+  const {
+    insights,
+    loading: insightsLoading,
+    error,
+    noConnection,
+  } = useInsights({
+    ...dateRangeValueToOptions(dateRange),
+    level: "campaign",
+  });
+
+  // Insights for chart (account level + daily breakdown when applicable)
+  const { insights: chartInsights, loading: chartLoading } = useInsights({
+    ...dateRangeValueToOptions(dateRange),
+    level: "account",
+    timeIncrement: shouldShowDailyBreakdown ? 1 : undefined,
+  });
+
+  const summary = useMemo(() => {
+    const totals = insights.reduce(
+      (acc, i) => ({
+        spend: acc.spend + i.spend,
+        revenue: acc.revenue + i.revenue,
+        purchases: acc.purchases + i.purchases,
+      }),
+      { spend: 0, revenue: 0, purchases: 0 }
+    );
     return {
-      spend: totalSpend,
-      revenue: totalRevenue,
-      profit,
-      roas: avgRoas,
-      conversions,
-      aov,
+      campaignsCount: insights.length,
+      spend: totals.spend,
+      revenue: totals.revenue,
+      profit: totals.revenue - totals.spend,
+      roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
+      purchases: totals.purchases,
+      aov:
+        totals.purchases > 0 ? totals.revenue / totals.purchases : 0,
     };
-  }, [chartData, scaleFactor]);
+  }, [insights]);
 
-  // Filter campaigns: search + status + platform-filter UI + connected ad platforms
-  const filteredCampaigns = useMemo(() => {
-    return allCampaigns.filter((c) => {
-      const platformId = platformNameToId(c.platform);
-      const matchesSearch = c.name.toLowerCase().includes(campaignSearch.toLowerCase());
-      const matchesStatus = campaignStatusFilter === "all" || c.status === campaignStatusFilter;
-      const matchesPlatformFilter =
-        selectedPlatform === "all" || platformId === selectedPlatform.toLowerCase();
-      const matchesConnected = connectedAdPlatforms.includes(platformId);
-      return matchesSearch && matchesStatus && matchesPlatformFilter && matchesConnected;
-    });
-  }, [campaignSearch, campaignStatusFilter, selectedPlatform, connectedAdPlatforms]);
+  const displayChartData = useMemo(
+    () =>
+      chartInsights.map((i) => ({
+        date: i.dateStart,
+        dayLabel: shouldShowDailyBreakdown
+          ? formatChartDayLabel(i.dateStart, dayCount)
+          : i.dateStart,
+        tooltipLabel: formatChartTooltipLabel(i.dateStart),
+        displaySpend: convertCurrency(i.spend, accountCurrency, currency),
+        displayRevenue: convertCurrency(
+          i.revenue,
+          accountCurrency,
+          currency
+        ),
+      })),
+    [
+      chartInsights,
+      shouldShowDailyBreakdown,
+      dayCount,
+      accountCurrency,
+      currency,
+    ]
+  );
 
-  // Handle sign out
   const handleSignOut = async () => {
     setSigningOut(true);
     await supabase.auth.signOut();
@@ -250,98 +267,58 @@ export default function ReportsClient({
     router.refresh();
   };
 
-  // Handle export
   const handleExport = (format: "pdf" | "excel" | "email") => {
     alert(
       format === "pdf"
-        ? "📄 جاري تجهيز ملف PDF... (ميزة تجريبية)"
+        ? "📄 تصدير PDF قريباً"
         : format === "excel"
-        ? "📊 جاري تجهيز ملف Excel... (ميزة تجريبية)"
-        : "📧 جاري إرسال التقرير على إيميلك... (ميزة تجريبية)"
+          ? "📊 تصدير Excel قريباً"
+          : "📧 إرسال بريد قريباً"
     );
   };
 
   const initial = fullName.charAt(0).toUpperCase();
+  const hasConnections = connectedPlatforms.length > 0;
+  const customRangeLabel = formatCustomRangeLabel(dateRange);
 
-  // KPI Cards data
-  const kpiCards = [
-    {
-      label: "إجمالي الإنفاق",
-      value: formatCurrency(Math.round(kpis.spend)),
-      currency: "ريال",
-      icon: DollarSign,
-      color: "indigo",
-      change: "+12.5%",
-      changeType: "up" as const,
-    },
-    {
-      label: "إجمالي الإيرادات",
-      value: formatCurrency(Math.round(kpis.revenue)),
-      currency: "ريال",
-      icon: ShoppingCart,
-      color: "green",
-      change: "+18.3%",
-      changeType: "up" as const,
-    },
-    {
-      label: "صافي الربح",
-      value: formatCurrency(Math.round(kpis.profit)),
-      currency: "ريال",
-      icon: TrendingUp,
-      color: "emerald",
-      change: "+22.1%",
-      changeType: "up" as const,
-    },
-    {
-      label: "متوسط ROAS",
-      value: kpis.roas.toFixed(2),
-      currency: "x",
-      icon: Target,
-      color: "purple",
-      change: "+5.2%",
-      changeType: "up" as const,
-    },
-    {
-      label: "عدد التحويلات",
-      value: formatCurrency(kpis.conversions),
-      currency: "",
-      icon: Users,
-      color: "blue",
-      change: "+15.7%",
-      changeType: "up" as const,
-    },
-    {
-      label: "متوسط قيمة الطلب",
-      value: formatCurrency(Math.round(kpis.aov)),
-      currency: "ريال",
-      icon: Percent,
-      color: "pink",
-      change: "+3.8%",
-      changeType: "up" as const,
-    },
-  ];
-
-  // Sidebar menu
   const menuItems = [
     { label: "الرئيسية", icon: Home, href: "/dashboard", active: false },
-    { label: "ربط المنصات", icon: Link2, href: "/dashboard/connections", active: false },
-    { label: "التقارير", icon: FileText, href: "/dashboard/reports", active: true },
-    { label: "الإعدادات", icon: Settings, href: "/dashboard/settings", active: false },
+    {
+      label: "ربط المنصات",
+      icon: Link2,
+      href: "/dashboard/connections",
+      active: false,
+    },
+    {
+      label: "التقارير",
+      icon: FileText,
+      href: "/dashboard/reports",
+      active: true,
+    },
+    {
+      label: "الإعدادات",
+      icon: Settings,
+      href: "/dashboard/settings",
+      active: false,
+    },
     { label: "المساعدة", icon: HelpCircle, href: "#", active: false },
   ];
 
-  // Empty state if no connections
+  // ============================================================
+  // Empty state — no connections at all
+  // ============================================================
   if (!hasConnections) {
     return (
       <div className="min-h-screen bg-gray-50" dir="rtl">
-        {/* Sidebar (collapsed empty state version) */}
         <aside className="fixed top-0 right-0 h-full w-64 bg-white border-l border-gray-200 z-50 hidden lg:block">
           <div className="h-16 flex items-center px-6 border-b border-gray-100">
             <Link href="/dashboard" className="flex items-center gap-2">
               <div className="w-8 h-8 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-lg flex items-center justify-center">
                 <BarChart3 className="w-5 h-5 text-white" />
               </div>
-              <span className="text-lg font-bold text-gray-900">ArabiaDash</span>
+              <span className="text-lg font-bold text-gray-900">
+                ArabiaDash
+              </span>
             </Link>
           </div>
           <nav className="p-4 space-y-1">
@@ -386,6 +363,51 @@ export default function ReportsClient({
       </div>
     );
   }
+
+  // ============================================================
+  // KPI cards data
+  // ============================================================
+  const kpiCards = [
+    {
+      label: "إجمالي الإنفاق",
+      value: formatAndConvert(summary.spend, accountCurrency, currency),
+      icon: DollarSign,
+      color: "indigo",
+    },
+    {
+      label: "إجمالي الإيرادات",
+      value: formatAndConvert(summary.revenue, accountCurrency, currency),
+      icon: ShoppingCart,
+      color: "green",
+    },
+    {
+      label: "صافي الربح",
+      value: formatAndConvert(summary.profit, accountCurrency, currency),
+      icon: TrendingUp,
+      color: "emerald",
+    },
+    {
+      label: "متوسط ROAS",
+      value: `${summary.roas.toFixed(2)}x`,
+      icon: Target,
+      color: "purple",
+    },
+    {
+      label: "عدد المبيعات",
+      value: summary.purchases.toLocaleString("en-US"),
+      icon: Users,
+      color: "blue",
+    },
+    {
+      label: "متوسط قيمة الطلب",
+      value:
+        summary.aov > 0
+          ? formatAndConvert(summary.aov, accountCurrency, currency)
+          : "—",
+      icon: Percent,
+      color: "pink",
+    },
+  ];
 
   return (
     <div className="min-h-screen bg-gray-50" dir="rtl">
@@ -462,13 +484,16 @@ export default function ReportsClient({
         </div>
       </aside>
 
-      {/* Main Content */}
+      {/* Main */}
       <div className="lg:mr-64">
         {/* Top Bar */}
         <header className="bg-white border-b border-gray-200 sticky top-0 z-30">
           <div className="flex items-center justify-between h-16 px-4 sm:px-6 lg:px-8">
             <div className="flex items-center gap-4">
-              <button onClick={() => setSidebarOpen(true)} className="lg:hidden">
+              <button
+                onClick={() => setSidebarOpen(true)}
+                className="lg:hidden"
+              >
                 <Menu className="w-6 h-6" />
               </button>
               <div className="hidden md:flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2 w-64">
@@ -481,6 +506,7 @@ export default function ReportsClient({
               </div>
             </div>
             <div className="flex items-center gap-3">
+              <CurrencyToggle />
               <button className="relative p-2 hover:bg-gray-50 rounded-lg transition">
                 <Bell className="w-5 h-5 text-gray-600" />
                 <span className="absolute top-1.5 left-1.5 w-2 h-2 bg-red-500 rounded-full"></span>
@@ -492,7 +518,7 @@ export default function ReportsClient({
           </div>
         </header>
 
-        {/* Page Content */}
+        {/* Content */}
         <main className="p-3 sm:p-6 lg:p-8">
           {/* Header */}
           <div className="mb-4 sm:mb-8 flex flex-col md:flex-row md:items-center md:justify-between gap-3 sm:gap-4">
@@ -529,431 +555,442 @@ export default function ReportsClient({
             </div>
           </div>
 
-          {/* Filters */}
+          {/* Filters Bar */}
           <div className="bg-white border border-gray-100 rounded-xl p-3 sm:p-4 mb-4 sm:mb-6">
-            <div className="flex flex-col md:flex-row gap-3 sm:gap-4">
-              {/* Date Range Filter */}
-              <div className="flex-1">
-                <label className="block text-xs font-medium text-gray-500 mb-2 flex items-center gap-1">
-                  <Calendar className="w-3.5 h-3.5" />
-                  الفترة الزمنية
-                </label>
-                <div className="flex flex-wrap gap-2">
-                  {dateRanges.map((range) => (
-                    <button
-                      key={range.id}
-                      onClick={() => setSelectedRange(range.id)}
-                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${
-                        selectedRange === range.id
-                          ? "bg-indigo-600 text-white"
-                          : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                      }`}
-                    >
-                      {range.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Platform Filter */}
-              <div className="flex-1">
-                <label className="block text-xs font-medium text-gray-500 mb-2 flex items-center gap-1">
-                  <Globe className="w-3.5 h-3.5" />
-                  المنصة
-                </label>
-                <div className="flex flex-wrap gap-2">
-                  {platformsFilter.map((platform) => (
-                    <button
-                      key={platform.id}
-                      onClick={() => setSelectedPlatform(platform.id)}
-                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${
-                        selectedPlatform === platform.id
-                          ? "bg-indigo-600 text-white"
-                          : "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                      }`}
-                    >
-                      {platform.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* KPI Cards Grid */}
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4 mb-4 sm:mb-6">
-            {kpiCards.map((stat, i) => {
-              const colorClasses: Record<string, string> = {
-                indigo: "bg-indigo-50 text-indigo-600",
-                green: "bg-green-50 text-green-600",
-                emerald: "bg-emerald-50 text-emerald-600",
-                purple: "bg-purple-50 text-purple-600",
-                blue: "bg-blue-50 text-blue-600",
-                pink: "bg-pink-50 text-pink-600",
-              };
-
-              return (
-                <div
-                  key={i}
-                  className="bg-white border border-gray-100 rounded-xl p-3 sm:p-4 hover:shadow-md transition"
-                >
-                  <div className="flex items-center justify-between mb-2 sm:mb-3">
-                    <div
-                      className={`w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center ${colorClasses[stat.color]}`}
-                    >
-                      <stat.icon className="w-4 h-4" />
-                    </div>
-                    <span
-                      className={`text-xs font-semibold flex items-center gap-0.5 sm:gap-1 ${
-                        stat.changeType === "up" ? "text-green-600" : "text-red-600"
-                      }`}
-                    >
-                      {stat.changeType === "up" ? (
-                        <ArrowUp className="w-3 h-3" />
-                      ) : (
-                        <ArrowDown className="w-3 h-3" />
-                      )}
-                      {stat.change}
-                    </span>
-                  </div>
-                  <p className="text-xs text-gray-600 mb-1 truncate">{stat.label}</p>
-                  <div className="flex items-baseline gap-1 flex-wrap">
-                    <span className="text-base sm:text-lg font-bold text-gray-900">
-                      {stat.value}
-                    </span>
-                    {stat.currency && (
-                      <span className="text-xs text-gray-500">{stat.currency}</span>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Main Chart - Spend vs Revenue */}
-          <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
-            <div className="flex items-center justify-between mb-3 sm:mb-6">
-              <div>
-                <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
-                  الإنفاق مقابل الإيرادات
-                </h3>
-                <p className="text-xs sm:text-sm text-gray-500">
-                  تطور الأرقام خلال الفترة المحددة
-                </p>
-              </div>
-            </div>
-            <div dir="ltr" className="h-56 sm:h-80">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chartData}>
-                  <defs>
-                    <linearGradient id="colorRev" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
-                      <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
-                    </linearGradient>
-                    <linearGradient id="colorSpd" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#6366f1" stopOpacity={0.4} />
-                      <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                  <XAxis dataKey="day" stroke="#9ca3af" fontSize={11} />
-                  <YAxis stroke="#9ca3af" fontSize={11} />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "white",
-                      border: "1px solid #e5e7eb",
-                      borderRadius: "8px",
-                    }}
-                  />
-                  <Legend />
-                  <Area
-                    type="monotone"
-                    dataKey="revenue"
-                    name="الإيرادات"
-                    stroke="#10b981"
-                    fillOpacity={1}
-                    fill="url(#colorRev)"
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="spend"
-                    name="الإنفاق"
-                    stroke="#6366f1"
-                    fillOpacity={1}
-                    fill="url(#colorSpd)"
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Two Column Charts */}
-          <div className="grid lg:grid-cols-2 gap-3 sm:gap-6 mb-4 sm:mb-6">
-            {/* Top Days */}
-            <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6">
-              <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
-                أفضل الأيام أداءً
-              </h3>
-              <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
-                ترتيب الأيام حسب الإيرادات
-              </p>
-              <div dir="ltr" className="h-52 sm:h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={topDaysData} layout="vertical">
-                    <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                    <XAxis type="number" stroke="#9ca3af" fontSize={11} />
-                    <YAxis type="category" dataKey="day" stroke="#9ca3af" fontSize={11} width={60} />
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "white",
-                        border: "1px solid #e5e7eb",
-                        borderRadius: "8px",
-                      }}
-                    />
-                    <Bar dataKey="revenue" name="الإيرادات" fill="#a855f7" radius={[0, 8, 8, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-
-            {/* Platform Share */}
-            <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 overflow-hidden">
-              <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
-                توزيع الإيرادات على المنصات
-              </h3>
-              <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
-                النسبة المئوية لكل منصة
-              </p>
-              <div dir="ltr" className="h-56 sm:h-64 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
-                    <Pie
-                      data={platformShareData}
-                      cx="50%"
-                      cy="45%"
-                      innerRadius="40%"
-                      outerRadius="75%"
-                      paddingAngle={3}
-                      dataKey="value"
-                    >
-                      {platformShareData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={entry.color} />
-                      ))}
-                    </Pie>
-                    <Tooltip
-                      contentStyle={{
-                        backgroundColor: "white",
-                        border: "1px solid #e5e7eb",
-                        borderRadius: "8px",
-                      }}
-                    />
-                    <Legend
-                      verticalAlign="bottom"
-                      height={32}
-                      wrapperStyle={{ fontSize: "12px", paddingTop: "8px" }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          </div>
-
-          {/* Best Hours Chart */}
-          <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
-            <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
-              أفضل أوقات الإعلان
-            </h3>
-            <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
-              توزيع الإيرادات على ساعات اليوم
-            </p>
-            <div dir="ltr" className="h-52 sm:h-56">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={bestHoursData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
-                  <XAxis dataKey="hour" stroke="#9ca3af" fontSize={11} />
-                  <YAxis stroke="#9ca3af" fontSize={11} />
-                  <Tooltip
-                    cursor={{ fill: "rgba(0,0,0,0.04)" }}
-                    contentStyle={{
-                      backgroundColor: "white",
-                      border: "1px solid #e5e7eb",
-                      borderRadius: "8px",
-                    }}
-                  />
-                  <Bar dataKey="revenue" name="الإيرادات" fill="#ec4899" radius={[8, 8, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Detailed Campaigns Table */}
-          <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 sm:gap-4 mb-4 sm:mb-6">
-              <div>
-                <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
-                  جميع الحملات الإعلانية
-                </h3>
-                <p className="text-xs sm:text-sm text-gray-500">
-                  {filteredCampaigns.length} حملة
-                </p>
-              </div>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <div className="relative">
-                  <Search className="w-4 h-4 text-gray-400 absolute right-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    value={campaignSearch}
-                    onChange={(e) => setCampaignSearch(e.target.value)}
-                    placeholder="بحث في الحملات..."
-                    className="bg-gray-50 border border-gray-200 rounded-lg pr-9 pl-3 py-2 text-sm w-full sm:w-56"
-                  />
-                </div>
-                <select
-                  value={campaignStatusFilter}
-                  onChange={(e) => setCampaignStatusFilter(e.target.value)}
-                  className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm"
-                >
-                  <option value="all">كل الحالات</option>
-                  <option value="active">نشطة</option>
-                  <option value="paused">متوقفة</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Mobile: Cards view */}
-            <div className="lg:hidden space-y-3">
-              {filteredCampaigns.length === 0 ? (
-                <p className="py-8 text-center text-gray-500 text-sm">
-                  لا توجد حملات تطابق البحث
-                </p>
-              ) : (
-                filteredCampaigns.map((campaign) => (
-                  <div
-                    key={campaign.id}
-                    className="border border-gray-100 rounded-lg p-4 hover:bg-gray-50 transition"
-                  >
-                    <div className="flex items-start justify-between gap-2 mb-2">
-                      <h4 className="font-semibold text-gray-900 text-sm leading-snug flex-1">
-                        {campaign.name}
-                      </h4>
-                      {campaign.status === "active" ? (
-                        <span className="bg-green-100 text-green-700 text-xs font-semibold px-2 py-1 rounded flex-shrink-0">
-                          نشطة
-                        </span>
-                      ) : (
-                        <span className="bg-gray-100 text-gray-600 text-xs font-semibold px-2 py-1 rounded flex-shrink-0">
-                          متوقفة
-                        </span>
-                      )}
-                    </div>
-                    <span className="bg-indigo-50 text-indigo-700 text-xs font-medium px-2 py-0.5 rounded inline-block mb-3">
-                      {campaign.platform}
-                    </span>
-                    <div className="grid grid-cols-2 gap-2 pt-3 border-t border-gray-100">
-                      <div>
-                        <p className="text-xs text-gray-500 mb-0.5">الإنفاق</p>
-                        <p className="text-sm font-semibold text-gray-900">
-                          {formatCurrency(campaign.spend)} ر.س
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-gray-500 mb-0.5">الإيرادات</p>
-                        <p className="text-sm font-semibold text-gray-900">
-                          {formatCurrency(campaign.revenue)} ر.س
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-gray-500 mb-0.5">ROAS</p>
-                        <p className="text-sm font-semibold text-green-600">
-                          {campaign.roas.toFixed(2)}x
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-gray-500 mb-0.5">التحويلات</p>
-                        <p className="text-sm font-semibold text-gray-900">
-                          {campaign.conversions}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                ))
+            <div className="flex items-center gap-3 flex-wrap">
+              <DateRangePicker value={dateRange} onChange={setDateRange} />
+              {customRangeLabel && (
+                <span className="text-xs text-gray-500">
+                  {customRangeLabel}
+                </span>
               )}
             </div>
+          </div>
 
-            {/* Desktop: Table view */}
-            <div className="hidden lg:block overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="text-xs text-gray-500 border-b border-gray-100">
-                  <tr>
-                    <th className="text-right py-3 px-2 font-medium">الحملة</th>
-                    <th className="text-right py-3 px-2 font-medium">المنصة</th>
-                    <th className="text-right py-3 px-2 font-medium">الإنفاق</th>
-                    <th className="text-right py-3 px-2 font-medium">الإيرادات</th>
-                    <th className="text-right py-3 px-2 font-medium">ROAS</th>
-                    <th className="text-right py-3 px-2 font-medium">التحويلات</th>
-                    <th className="text-right py-3 px-2 font-medium">الحالة</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredCampaigns.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="py-8 text-center text-gray-500">
-                        لا توجد حملات تطابق البحث
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredCampaigns.map((campaign) => (
-                      <tr
-                        key={campaign.id}
-                        className="border-b border-gray-50 hover:bg-gray-50 transition"
-                      >
-                        <td className="py-3 px-2 font-medium text-gray-900">
-                          {campaign.name}
-                        </td>
-                        <td className="py-3 px-2 text-gray-600">
-                          {campaign.platform}
-                        </td>
-                        <td className="py-3 px-2 text-gray-600">
-                          {formatCurrency(campaign.spend)} ر.س
-                        </td>
-                        <td className="py-3 px-2 text-gray-900 font-medium">
-                          {formatCurrency(campaign.revenue)} ر.س
-                        </td>
-                        <td className="py-3 px-2">
-                          <span className="text-green-600 font-semibold">
-                            {campaign.roas.toFixed(2)}x
-                          </span>
-                        </td>
-                        <td className="py-3 px-2 text-gray-600">
-                          {campaign.conversions}
-                        </td>
-                        <td className="py-3 px-2">
-                          {campaign.status === "active" ? (
-                            <span className="bg-green-100 text-green-700 text-xs font-semibold px-2 py-1 rounded">
-                              نشطة
-                            </span>
-                          ) : (
-                            <span className="bg-gray-100 text-gray-600 text-xs font-semibold px-2 py-1 rounded">
-                              متوقفة
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+          {/* Error banner */}
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4 sm:mb-6 flex items-center gap-3">
+              <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
+              <p className="text-sm text-red-700">
+                تعذّر جلب البيانات. حاول تحديث الصفحة.
+              </p>
             </div>
-          </div>
+          )}
 
-          {/* Demo Mode Banner */}
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center gap-3">
-            <Filter className="w-5 h-5 text-amber-600 flex-shrink-0" />
-            <p className="text-sm text-amber-800">
-              <strong>وضع تجريبي:</strong> البيانات والفلاتر تجريبية لعرض كيفية
-              عمل التقارير. التكامل الفعلي مع منصات الإعلانات قريباً.
-            </p>
-          </div>
+          {/* No-Meta empty state */}
+          {noConnection ? (
+            <div className="bg-white border border-gray-100 rounded-xl p-6 sm:p-8 text-center">
+              <div className="w-12 h-12 mx-auto bg-indigo-50 rounded-xl flex items-center justify-center mb-3">
+                <Link2 className="w-6 h-6 text-indigo-600" />
+              </div>
+              <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-2">
+                اربط حساب Meta لعرض التقارير
+              </h3>
+              <p className="text-sm text-gray-600 mb-4">
+                ستظهر هنا بيانات حملات Meta الإعلانية بالتفصيل
+              </p>
+              <Link
+                href="/dashboard/connections"
+                className="inline-flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-5 py-2.5 rounded-lg font-semibold hover:shadow-lg transition"
+              >
+                <Link2 className="w-5 h-5" />
+                ربط Meta
+              </Link>
+            </div>
+          ) : (
+            <>
+              {/* 6 KPI Cards */}
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 sm:gap-4 mb-4 sm:mb-6">
+                {insightsLoading
+                  ? [0, 1, 2, 3, 4, 5].map((i) => (
+                      <div
+                        key={i}
+                        className="bg-white border border-gray-100 rounded-xl p-3 sm:p-4 animate-pulse"
+                      >
+                        <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg bg-gray-200 mb-2 sm:mb-3"></div>
+                        <div className="h-3 bg-gray-200 rounded mb-2 w-3/4"></div>
+                        <div className="h-5 bg-gray-200 rounded w-1/2"></div>
+                      </div>
+                    ))
+                  : kpiCards.map((stat, i) => {
+                      const colorClasses: Record<string, string> = {
+                        indigo: "bg-indigo-50 text-indigo-600",
+                        green: "bg-green-50 text-green-600",
+                        emerald: "bg-emerald-50 text-emerald-600",
+                        purple: "bg-purple-50 text-purple-600",
+                        blue: "bg-blue-50 text-blue-600",
+                        pink: "bg-pink-50 text-pink-600",
+                      };
+                      return (
+                        <div
+                          key={i}
+                          className="bg-white border border-gray-100 rounded-xl p-3 sm:p-4 hover:shadow-md transition"
+                        >
+                          <div className="flex items-center justify-between mb-2 sm:mb-3">
+                            <div
+                              className={`w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center ${
+                                colorClasses[stat.color]
+                              }`}
+                            >
+                              <stat.icon className="w-4 h-4" />
+                            </div>
+                          </div>
+                          <p className="text-xs text-gray-600 mb-1 truncate">
+                            {stat.label}
+                          </p>
+                          <div
+                            className="flex items-baseline gap-1 flex-wrap"
+                            dir="ltr"
+                          >
+                            <span className="text-base sm:text-lg font-bold text-gray-900">
+                              {stat.value}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+              </div>
+
+              {/* Main Chart - Spend vs Revenue */}
+              <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
+                <div className="flex items-center justify-between mb-3 sm:mb-6">
+                  <div>
+                    <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
+                      الإنفاق مقابل الإيرادات
+                    </h3>
+                    <p className="text-xs sm:text-sm text-gray-500">
+                      {shouldShowDailyBreakdown
+                        ? `توزيع يومي بـ ${CURRENCY_LABELS[currency].nameAr}`
+                        : `إجمالي الفترة بـ ${CURRENCY_LABELS[currency].nameAr}`}
+                    </p>
+                  </div>
+                </div>
+                <div dir="ltr" className="h-56 sm:h-80">
+                  {!shouldShowDailyBreakdown ? (
+                    <div className="h-full flex items-center justify-center text-center px-4">
+                      <p className="text-sm text-gray-500">
+                        التوزيع اليومي متاح للفترات حتى 90 يوم. استخدم النظرة
+                        الشاملة من البطاقات أعلاه.
+                      </p>
+                    </div>
+                  ) : chartLoading ? (
+                    <div className="h-full flex items-center justify-center">
+                      <div className="animate-pulse text-gray-400 text-sm">
+                        جاري تحميل البيانات...
+                      </div>
+                    </div>
+                  ) : displayChartData.length < 2 ? (
+                    <div className="h-full flex items-center justify-center">
+                      <p className="text-gray-500 text-sm">
+                        لا توجد بيانات كافية للرسم البياني
+                      </p>
+                    </div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={displayChartData}>
+                        <defs>
+                          <linearGradient
+                            id="colorRev"
+                            x1="0"
+                            y1="0"
+                            x2="0"
+                            y2="1"
+                          >
+                            <stop
+                              offset="5%"
+                              stopColor="#10b981"
+                              stopOpacity={0.4}
+                            />
+                            <stop
+                              offset="95%"
+                              stopColor="#10b981"
+                              stopOpacity={0}
+                            />
+                          </linearGradient>
+                          <linearGradient
+                            id="colorSpd"
+                            x1="0"
+                            y1="0"
+                            x2="0"
+                            y2="1"
+                          >
+                            <stop
+                              offset="5%"
+                              stopColor="#6366f1"
+                              stopOpacity={0.4}
+                            />
+                            <stop
+                              offset="95%"
+                              stopColor="#6366f1"
+                              stopOpacity={0}
+                            />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+                        <XAxis
+                          dataKey="dayLabel"
+                          stroke="#9ca3af"
+                          fontSize={11}
+                        />
+                        <YAxis stroke="#9ca3af" fontSize={11} />
+                        <Tooltip
+                          contentStyle={{
+                            backgroundColor: "white",
+                            border: "1px solid #e5e7eb",
+                            borderRadius: "8px",
+                          }}
+                          labelFormatter={(label, payload) => {
+                            const data = payload?.[0]?.payload as
+                              | { tooltipLabel?: string }
+                              | undefined;
+                            return data?.tooltipLabel ?? label;
+                          }}
+                          formatter={(value, name) => {
+                            const num =
+                              typeof value === "number" ? value : 0;
+                            return [
+                              formatCurrencyWithSymbol(num, currency),
+                              name as string,
+                            ];
+                          }}
+                        />
+                        <Legend />
+                        <Area
+                          type="monotone"
+                          dataKey="displayRevenue"
+                          name="الإيرادات"
+                          stroke="#10b981"
+                          fillOpacity={1}
+                          fill="url(#colorRev)"
+                        />
+                        <Area
+                          type="monotone"
+                          dataKey="displaySpend"
+                          name="الإنفاق"
+                          stroke="#6366f1"
+                          fillOpacity={1}
+                          fill="url(#colorSpd)"
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+              </div>
+
+              {/* Campaigns Table */}
+              <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
+                <div className="flex items-center justify-between mb-4 sm:mb-6">
+                  <div>
+                    <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
+                      الحملات الإعلانية
+                    </h3>
+                    <p className="text-xs sm:text-sm text-gray-500">
+                      {summary.campaignsCount} حملة في الفترة المختارة
+                    </p>
+                  </div>
+                </div>
+
+                {insightsLoading ? (
+                  <div className="space-y-2">
+                    {[0, 1, 2, 3, 4].map((i) => (
+                      <div
+                        key={i}
+                        className="h-12 bg-gray-100 rounded animate-pulse"
+                      />
+                    ))}
+                  </div>
+                ) : insights.length === 0 ? (
+                  <div className="py-12 text-center">
+                    <p className="text-gray-500 text-sm">
+                      لا توجد بيانات لهذه الفترة
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    {/* Mobile: Cards */}
+                    <div className="lg:hidden space-y-3">
+                      {insights.map((insight) => {
+                        const meta = insight.campaignId
+                          ? statusMap.get(insight.campaignId)
+                          : undefined;
+                        const name =
+                          insight.campaignName ?? meta?.name ?? "—";
+                        return (
+                          <div
+                            key={insight.campaignId ?? name}
+                            className="border border-gray-100 rounded-lg p-4 hover:bg-gray-50 transition"
+                          >
+                            <div className="flex items-start justify-between gap-2 mb-3">
+                              <h4 className="font-semibold text-gray-900 text-sm leading-snug flex-1">
+                                {name}
+                              </h4>
+                              <StatusBadge status={meta?.status} />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3 pt-3 border-t border-gray-100">
+                              <div>
+                                <p className="text-xs text-gray-500 mb-0.5">
+                                  الإنفاق
+                                </p>
+                                <p className="text-sm font-semibold text-gray-900">
+                                  {formatAndConvert(
+                                    insight.spend,
+                                    accountCurrency,
+                                    currency
+                                  )}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-xs text-gray-500 mb-0.5">
+                                  الإيرادات
+                                </p>
+                                <p className="text-sm font-semibold text-gray-900">
+                                  {formatAndConvert(
+                                    insight.revenue,
+                                    accountCurrency,
+                                    currency
+                                  )}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-xs text-gray-500 mb-0.5">
+                                  ROAS
+                                </p>
+                                <p
+                                  className={`text-sm font-semibold ${getROASColor(
+                                    insight.roas
+                                  )}`}
+                                >
+                                  {insight.roas.toFixed(2)}x
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-xs text-gray-500 mb-0.5">
+                                  المبيعات
+                                </p>
+                                <p className="text-sm font-semibold text-gray-900">
+                                  {insight.purchases.toLocaleString("en-US")}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-xs text-gray-500 mb-0.5">
+                                  CPC
+                                </p>
+                                <p className="text-sm text-gray-700">
+                                  {formatAndConvert(
+                                    insight.cpc,
+                                    accountCurrency,
+                                    currency
+                                  )}
+                                </p>
+                              </div>
+                              <div>
+                                <p className="text-xs text-gray-500 mb-0.5">
+                                  CTR
+                                </p>
+                                <p className="text-sm text-gray-700">
+                                  {insight.ctr.toFixed(2)}%
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Desktop: Table */}
+                    <div className="hidden lg:block overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead className="text-xs text-gray-500 border-b border-gray-100">
+                          <tr>
+                            <th className="text-right py-3 px-2 font-medium">
+                              الحملة
+                            </th>
+                            <th className="text-right py-3 px-2 font-medium">
+                              الحالة
+                            </th>
+                            <th className="text-right py-3 px-2 font-medium">
+                              الإنفاق
+                            </th>
+                            <th className="text-right py-3 px-2 font-medium">
+                              الإيرادات
+                            </th>
+                            <th className="text-right py-3 px-2 font-medium">
+                              ROAS
+                            </th>
+                            <th className="text-right py-3 px-2 font-medium">
+                              المبيعات
+                            </th>
+                            <th className="text-right py-3 px-2 font-medium">
+                              CPC
+                            </th>
+                            <th className="text-right py-3 px-2 font-medium">
+                              CTR
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {insights.map((insight) => {
+                            const meta = insight.campaignId
+                              ? statusMap.get(insight.campaignId)
+                              : undefined;
+                            const name =
+                              insight.campaignName ?? meta?.name ?? "—";
+                            return (
+                              <tr
+                                key={insight.campaignId ?? name}
+                                className="border-b border-gray-50 hover:bg-gray-50 transition"
+                              >
+                                <td className="py-3 px-2 font-medium text-gray-900">
+                                  {name}
+                                </td>
+                                <td className="py-3 px-2">
+                                  <StatusBadge status={meta?.status} />
+                                </td>
+                                <td className="py-3 px-2 text-gray-700">
+                                  {formatAndConvert(
+                                    insight.spend,
+                                    accountCurrency,
+                                    currency
+                                  )}
+                                </td>
+                                <td className="py-3 px-2 text-gray-900 font-medium">
+                                  {formatAndConvert(
+                                    insight.revenue,
+                                    accountCurrency,
+                                    currency
+                                  )}
+                                </td>
+                                <td
+                                  className={`py-3 px-2 font-semibold ${getROASColor(
+                                    insight.roas
+                                  )}`}
+                                >
+                                  {insight.roas.toFixed(2)}x
+                                </td>
+                                <td className="py-3 px-2 text-gray-700">
+                                  {insight.purchases.toLocaleString("en-US")}
+                                </td>
+                                <td className="py-3 px-2 text-gray-700">
+                                  {formatAndConvert(
+                                    insight.cpc,
+                                    accountCurrency,
+                                    currency
+                                  )}
+                                </td>
+                                <td className="py-3 px-2 text-gray-700">
+                                  {insight.ctr.toFixed(2)}%
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+              </div>
+            </>
+          )}
         </main>
       </div>
     </div>

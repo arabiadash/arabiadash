@@ -3,7 +3,7 @@ import {
   type UnifiedCampaign,
   type UnifiedInsight,
   type UnifiedAccount,
-  type DateRange,
+  type DateRangeInput,
   type TimeIncrement,
 } from "../types";
 import {
@@ -53,7 +53,7 @@ export class MetaAdapter implements AdProviderAdapter {
   }
 
   async getAccountInsights(
-    range: DateRange,
+    range: DateRangeInput,
     timeIncrement?: TimeIncrement
   ): Promise<UnifiedInsight[]> {
     const insights = await fetchMetaAccountInsights(
@@ -66,7 +66,7 @@ export class MetaAdapter implements AdProviderAdapter {
   }
 
   async getCampaignInsights(
-    range: DateRange,
+    range: DateRangeInput,
     timeIncrement?: TimeIncrement
   ): Promise<UnifiedInsight[]> {
     const insights = await fetchMetaCampaignInsights(
