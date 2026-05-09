@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -21,23 +21,24 @@ import {
   HelpCircle,
   Loader2,
   Plus,
-  ArrowUp,
-  ArrowDown,
   ArrowLeft,
   Sparkles,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import {
-  mockStats,
   mockChartData,
   mockPlatformPerformance,
   mockTopCampaigns,
   formatCurrency,
-  formatPercent,
   AD_PLATFORM_IDS,
   platformNameToId,
   getConnectedAdPlatforms,
 } from "@/lib/mock-data";
+import { useInsights } from "@/lib/hooks/use-insights";
+import { useCurrency } from "@/lib/contexts/currency-context";
+import { aggregateInsights } from "@/lib/meta/metrics";
+import { formatAndConvert, type Currency } from "@/lib/currency";
+import { CurrencyToggle } from "@/components/CurrencyToggle";
 import {
   AreaChart,
   Area,
@@ -69,17 +70,42 @@ export default function DashboardClient({
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
 
+  // Real Meta data hooks
+  const {
+    insights,
+    loading: insightsLoading,
+    error: insightsError,
+    noConnection,
+  } = useInsights("30d", "account");
+  const { currency } = useCurrency();
+  const [accountCurrency, setAccountCurrency] = useState<Currency>("USD");
+
+  useEffect(() => {
+    fetch("/api/meta/account")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const c = data?.currency;
+        if (c === "USD" || c === "SAR") {
+          setAccountCurrency(c);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const aggregated = useMemo(
+    () => (insights.length === 0 ? null : aggregateInsights(insights)),
+    [insights]
+  );
+
   // Check if user has any connections
   const hasConnections = connectedPlatforms.length > 0;
 
-  // Filter mock data by connected ad platforms
+  // Filter mock data by connected ad platforms (charts/tables still use mock)
   const connectedAdPlatforms = useMemo(
     () => getConnectedAdPlatforms(connectedPlatforms),
     [connectedPlatforms]
   );
 
-  // Scaling factor: ratio of connected ad platforms to total ad platforms.
-  // Used for aggregate metrics (KPIs, daily totals) that aren't tagged per-platform.
   const scaleFactor = connectedAdPlatforms.length / AD_PLATFORM_IDS.length;
 
   const filteredTopCampaigns = useMemo(
@@ -104,21 +130,41 @@ export default function DashboardClient({
         ...d,
         spend: Math.round(d.spend * scaleFactor),
         revenue: Math.round(d.revenue * scaleFactor),
-        // ROAS is a ratio, not an aggregate — keep as-is when there's data, else 0
         roas: scaleFactor > 0 ? d.roas : 0,
       })),
     [scaleFactor]
   );
 
-  const scaledStats = useMemo(
-    () => ({
-      totalSpend: Math.round(mockStats.totalSpend * scaleFactor),
-      totalRevenue: Math.round(mockStats.totalRevenue * scaleFactor),
-      roas: scaleFactor > 0 ? mockStats.roas : 0,
-      customers: Math.round(mockStats.customers * scaleFactor),
-    }),
-    [scaleFactor]
-  );
+  // Real KPI cards from aggregated insights (Meta-only for now)
+  const kpiCards = useMemo(() => {
+    if (!aggregated) return [];
+    return [
+      {
+        label: "إجمالي الإنفاق الإعلاني",
+        value: formatAndConvert(aggregated.spend, accountCurrency, currency),
+        icon: DollarSign,
+        color: "indigo",
+      },
+      {
+        label: "إجمالي الإيرادات",
+        value: formatAndConvert(aggregated.revenue, accountCurrency, currency),
+        icon: ShoppingCart,
+        color: "green",
+      },
+      {
+        label: "العائد على الإعلان (ROAS)",
+        value: `${aggregated.roas.toFixed(2)}x`,
+        icon: TrendingUp,
+        color: "purple",
+      },
+      {
+        label: "عدد المبيعات",
+        value: aggregated.purchases.toLocaleString("en-US"),
+        icon: Users,
+        color: "blue",
+      },
+    ];
+  }, [aggregated, accountCurrency, currency]);
 
   // Handle sign out
   const handleSignOut = async () => {
@@ -129,86 +175,6 @@ export default function DashboardClient({
   };
 
   const initial = fullName.charAt(0).toUpperCase();
-
-  // Stats: scaled by connected ad platforms (or 0 across the board if none connected)
-  const hasAdData = connectedAdPlatforms.length > 0;
-  const stats = hasAdData
-    ? [
-        {
-          label: "إجمالي الإنفاق الإعلاني",
-          value: formatCurrency(scaledStats.totalSpend),
-          currency: "ريال",
-          change: formatPercent(mockStats.spendChange),
-          changeType: mockStats.spendChange >= 0 ? "up" : "down",
-          icon: DollarSign,
-          color: "indigo",
-        },
-        {
-          label: "إجمالي المبيعات",
-          value: formatCurrency(scaledStats.totalRevenue),
-          currency: "ريال",
-          change: formatPercent(mockStats.revenueChange),
-          changeType: mockStats.revenueChange >= 0 ? "up" : "down",
-          icon: ShoppingCart,
-          color: "green",
-        },
-        {
-          label: "العائد على الإعلان (ROAS)",
-          value: scaledStats.roas.toFixed(2),
-          currency: "x",
-          change: formatPercent(mockStats.roasChange),
-          changeType: mockStats.roasChange >= 0 ? "up" : "down",
-          icon: TrendingUp,
-          color: "purple",
-        },
-        {
-          label: "عدد العملاء",
-          value: formatCurrency(scaledStats.customers),
-          currency: "",
-          change: formatPercent(mockStats.customersChange),
-          changeType: mockStats.customersChange >= 0 ? "up" : "down",
-          icon: Users,
-          color: "blue",
-        },
-      ]
-    : [
-        {
-          label: "إجمالي الإنفاق الإعلاني",
-          value: "0",
-          currency: "ريال",
-          change: "+0%",
-          changeType: "neutral",
-          icon: DollarSign,
-          color: "indigo",
-        },
-        {
-          label: "إجمالي المبيعات",
-          value: "0",
-          currency: "ريال",
-          change: "+0%",
-          changeType: "neutral",
-          icon: ShoppingCart,
-          color: "green",
-        },
-        {
-          label: "العائد على الإعلان (ROAS)",
-          value: "0.0",
-          currency: "x",
-          change: "+0%",
-          changeType: "neutral",
-          icon: TrendingUp,
-          color: "purple",
-        },
-        {
-          label: "عدد العملاء",
-          value: "0",
-          currency: "",
-          change: "+0%",
-          changeType: "neutral",
-          icon: Users,
-          color: "blue",
-        },
-      ];
 
   // Sidebar menu items
   const menuItems = [
@@ -316,6 +282,7 @@ export default function DashboardClient({
               </div>
             </div>
             <div className="flex items-center gap-3">
+              <CurrencyToggle />
               <button className="relative p-2 hover:bg-gray-50 rounded-lg transition">
                 <Bell className="w-5 h-5 text-gray-600" />
                 <span className="absolute top-1.5 left-1.5 w-2 h-2 bg-red-500 rounded-full"></span>
@@ -376,61 +343,81 @@ export default function DashboardClient({
             </div>
           )}
 
-          {/* Stats Grid */}
+          {/* Stats Grid - Real Meta data */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-4 sm:mb-8">
-            {stats.map((stat, i) => {
-              const colorClasses: Record<string, string> = {
-                indigo: "bg-indigo-50 text-indigo-600",
-                green: "bg-green-50 text-green-600",
-                purple: "bg-purple-50 text-purple-600",
-                blue: "bg-blue-50 text-blue-600",
-              };
-
-              return (
+            {noConnection ? (
+              <div className="col-span-2 lg:col-span-4 bg-white border border-gray-100 rounded-xl p-6 sm:p-8 text-center">
+                <div className="w-12 h-12 mx-auto bg-indigo-50 rounded-xl flex items-center justify-center mb-3">
+                  <Link2 className="w-6 h-6 text-indigo-600" />
+                </div>
+                <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-2">
+                  اربط حساب Meta لعرض المؤشرات الفعلية
+                </h3>
+                <p className="text-sm text-gray-600 mb-4">
+                  ستظهر هنا بيانات الإنفاق والإيرادات والـ ROAS من حسابك على
+                  Meta Ads
+                </p>
+                <Link
+                  href="/dashboard/connections"
+                  className="inline-flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-5 py-2.5 rounded-lg font-semibold hover:shadow-lg transition"
+                >
+                  <Plus className="w-5 h-5" />
+                  ربط Meta
+                </Link>
+              </div>
+            ) : insightsError ? (
+              <div className="col-span-2 lg:col-span-4 bg-red-50 border border-red-200 rounded-xl p-4 text-red-700 text-sm text-center">
+                تعذّر جلب البيانات من Meta. حاول تحديث الصفحة.
+              </div>
+            ) : insightsLoading || !aggregated ? (
+              [0, 1, 2, 3].map((i) => (
                 <div
                   key={i}
-                  className="bg-white border border-gray-100 rounded-xl p-3 sm:p-6 hover:shadow-md transition"
+                  className="bg-white border border-gray-100 rounded-xl p-3 sm:p-6 animate-pulse"
                 >
-                  <div className="flex items-center justify-between mb-2 sm:mb-4">
-                    <div
-                      className={`w-8 h-8 sm:w-10 sm:h-10 rounded-lg flex items-center justify-center ${
-                        colorClasses[stat.color]
-                      }`}
-                    >
-                      <stat.icon className="w-4 h-4 sm:w-5 sm:h-5" />
-                    </div>
-                    <span
-                      className={`text-xs font-semibold flex items-center gap-0.5 sm:gap-1 ${
-                        stat.changeType === "up"
-                          ? "text-green-600"
-                          : stat.changeType === "down"
-                          ? "text-red-600"
-                          : "text-gray-500"
-                      }`}
-                    >
-                      {stat.changeType === "up" && <ArrowUp className="w-3 h-3" />}
-                      {stat.changeType === "down" && (
-                        <ArrowDown className="w-3 h-3" />
-                      )}
-                      {stat.change}
-                    </span>
-                  </div>
-                  <p className="text-xs sm:text-sm text-gray-600 mb-1 truncate">
-                    {stat.label}
-                  </p>
-                  <div className="flex items-baseline gap-1 flex-wrap">
-                    <span className="text-lg sm:text-2xl font-bold text-gray-900">
-                      {stat.value}
-                    </span>
-                    {stat.currency && (
-                      <span className="text-xs sm:text-sm text-gray-500">
-                        {stat.currency}
-                      </span>
-                    )}
-                  </div>
+                  <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-lg bg-gray-200 mb-2 sm:mb-4"></div>
+                  <div className="h-3 bg-gray-200 rounded mb-2 w-3/4"></div>
+                  <div className="h-6 bg-gray-200 rounded w-1/2"></div>
                 </div>
-              );
-            })}
+              ))
+            ) : (
+              kpiCards.map((stat, i) => {
+                const colorClasses: Record<string, string> = {
+                  indigo: "bg-indigo-50 text-indigo-600",
+                  green: "bg-green-50 text-green-600",
+                  purple: "bg-purple-50 text-purple-600",
+                  blue: "bg-blue-50 text-blue-600",
+                };
+
+                return (
+                  <div
+                    key={i}
+                    className="bg-white border border-gray-100 rounded-xl p-3 sm:p-6 hover:shadow-md transition"
+                  >
+                    <div className="flex items-center justify-between mb-2 sm:mb-4">
+                      <div
+                        className={`w-8 h-8 sm:w-10 sm:h-10 rounded-lg flex items-center justify-center ${
+                          colorClasses[stat.color]
+                        }`}
+                      >
+                        <stat.icon className="w-4 h-4 sm:w-5 sm:h-5" />
+                      </div>
+                    </div>
+                    <p className="text-xs sm:text-sm text-gray-600 mb-1 truncate">
+                      {stat.label}
+                    </p>
+                    <div
+                      className="flex items-baseline gap-1 flex-wrap"
+                      dir="ltr"
+                    >
+                      <span className="text-lg sm:text-2xl font-bold text-gray-900">
+                        {stat.value}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
           </div>
 
           {/* Charts Section - Only show if has connections */}
