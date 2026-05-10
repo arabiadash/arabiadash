@@ -31,6 +31,7 @@ import {
   ChevronsUpDown,
   ArrowUp,
   ArrowDown,
+  RefreshCw,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import {
@@ -142,6 +143,37 @@ const STATUS_CONFIG: Record<string, { label: string; classes: string }> = {
   DELETED: { label: "محذوفة", classes: "bg-red-100 text-red-700" },
   ARCHIVED: { label: "مؤرشفة", classes: "bg-blue-100 text-blue-700" },
 };
+
+// Arabic relative-time formatter for "آخر تحديث: قبل X دقيقة".
+// Picks the largest unit that fits and uses correct singular/dual/plural forms.
+function formatArabicRelativeTime(date: Date, now: number): string {
+  const diffMs = Math.max(0, now - date.getTime());
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 10) return "الآن";
+  if (seconds < 60) return `قبل ${seconds} ثانية`;
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    if (minutes === 1) return "قبل دقيقة";
+    if (minutes === 2) return "قبل دقيقتين";
+    if (minutes <= 10) return `قبل ${minutes} دقائق`;
+    return `قبل ${minutes} دقيقة`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    if (hours === 1) return "قبل ساعة";
+    if (hours === 2) return "قبل ساعتين";
+    if (hours <= 10) return `قبل ${hours} ساعات`;
+    return `قبل ${hours} ساعة`;
+  }
+
+  const days = Math.floor(hours / 24);
+  if (days === 1) return "قبل يوم";
+  if (days === 2) return "قبل يومين";
+  if (days <= 10) return `قبل ${days} أيام`;
+  return `قبل ${days} يوم`;
+}
 
 type SortableColumn =
   | "campaignName"
@@ -646,15 +678,7 @@ function AdDetailModal({
   // Show multi-image gallery whenever 2+ images exist — works for classic
   // carousels AND Meta's Flexible Ads (asset_feed_spec.images).
   const hasCarouselImages = (ad.carouselImages?.length ?? 0) >= 2;
-
-  // TEMP DEBUG — remove after diagnosing why multi-image ads aren't displaying
-  console.log("[AdDetailModal]", {
-    adName: ad.name,
-    creativeType: ad.creativeType,
-    carouselImagesCount: ad.carouselImages?.length ?? 0,
-    carouselImages: ad.carouselImages,
-    hasCarouselImages,
-  });
+  const hasSiteLinks = (ad.siteLinks?.length ?? 0) > 0;
 
   const [carouselIndex, setCarouselIndex] = useState(0);
 
@@ -743,6 +767,39 @@ function AdDetailModal({
               </div>
             )}
           </div>
+
+          {hasSiteLinks && (
+            <div>
+              <p className="text-xs text-gray-500 mb-2">
+                روابط المنتجات في الإعلان
+              </p>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                {ad.siteLinks!.map((link, idx) => (
+                  <a
+                    key={`${link.imageHash || link.url}-${idx}`}
+                    href={link.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block bg-gray-50 hover:bg-gray-100 rounded-lg overflow-hidden transition border border-gray-100"
+                  >
+                    <div className="aspect-square bg-white">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={link.imageUrl}
+                        alt={link.title || "Product"}
+                        className="w-full h-full object-cover"
+                      />
+                    </div>
+                    {link.title && (
+                      <p className="text-xs text-gray-700 px-2 py-2 truncate">
+                        {link.title}
+                      </p>
+                    )}
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div>
             <p className="text-xs text-gray-500 mb-1">اسم الإعلان</p>
@@ -1076,7 +1133,39 @@ export default function ReportsClient({
   }, [activeTab]);
 
   // Ads (for the Creatives tab + tab badge count). Same dateRange as the rest.
-  const { ads, loading: adsLoading } = useAds({ range: dateRange });
+  const {
+    ads,
+    loading: adsLoading,
+    source: adsSource,
+    fetchedAt: adsFetchedAt,
+    revalidating: adsRevalidating,
+    rateLimited: adsRateLimited,
+    refresh: refreshAds,
+  } = useAds({ range: dateRange });
+
+  // Manual refresh button has a 30s cooldown to avoid hammering Meta.
+  const [lastRefreshAt, setLastRefreshAt] = useState<number>(0);
+  const [now, setNow] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    // 1Hz tick so the relative-time badge updates without a manual refresh.
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const REFRESH_COOLDOWN_MS = 30_000;
+  const refreshCooldownRemaining = Math.max(
+    0,
+    Math.ceil((lastRefreshAt + REFRESH_COOLDOWN_MS - now) / 1000)
+  );
+  const refreshDisabled =
+    adsLoading || adsRevalidating || refreshCooldownRemaining > 0;
+
+  const handleRefreshAds = async () => {
+    if (refreshDisabled) return;
+    setLastRefreshAt(Date.now());
+    await refreshAds();
+  };
 
   // Show ALL ads in the Creatives tab — the in-tab status filter (الكل / نشط /
   // موقوف) controls visibility from there. Filtering by spend > 0 here was
@@ -2353,12 +2442,62 @@ export default function ReportsClient({
                 )}
                     </>
                   ) : (
-                    <CreativesGrid
-                      ads={activeAds}
-                      loading={adsLoading}
-                      accountCurrency={accountCurrency}
-                      displayCurrency={currency}
-                    />
+                    <>
+                      {/* Freshness badge + manual refresh */}
+                      <div className="flex flex-wrap items-center justify-between gap-3 mb-4 pb-4 border-b border-gray-100">
+                        <div className="text-xs text-gray-500 flex items-center gap-2 flex-wrap">
+                          {adsRevalidating && (
+                            <Loader2 className="w-3 h-3 animate-spin text-indigo-500" />
+                          )}
+                          {adsFetchedAt ? (
+                            <span>
+                              آخر تحديث:{" "}
+                              {formatArabicRelativeTime(adsFetchedAt, now)}
+                            </span>
+                          ) : adsLoading ? (
+                            <span>جاري التحميل...</span>
+                          ) : null}
+                          {adsSource === "cache-stale" && (
+                            <span className="text-amber-600">
+                              (يتم التحديث في الخلفية)
+                            </span>
+                          )}
+                          {(adsSource === "rate-limited" || adsRateLimited) && (
+                            <span className="text-amber-600">
+                              (تم تجاوز الحد المؤقت — نعرض البيانات المخزّنة)
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          onClick={handleRefreshAds}
+                          disabled={refreshDisabled}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                          title={
+                            refreshCooldownRemaining > 0
+                              ? `انتظر ${refreshCooldownRemaining} ثانية`
+                              : "تحديث البيانات"
+                          }
+                        >
+                          <RefreshCw
+                            className={`w-3.5 h-3.5 ${
+                              adsRevalidating || adsLoading
+                                ? "animate-spin"
+                                : ""
+                            }`}
+                          />
+                          {refreshCooldownRemaining > 0
+                            ? `تحديث (${refreshCooldownRemaining}ث)`
+                            : "تحديث"}
+                        </button>
+                      </div>
+
+                      <CreativesGrid
+                        ads={activeAds}
+                        loading={adsLoading}
+                        accountCurrency={accountCurrency}
+                        displayCurrency={currency}
+                      />
+                    </>
                   )}
                 </div>
               </div>

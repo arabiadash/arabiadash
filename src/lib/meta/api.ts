@@ -106,6 +106,15 @@ export interface MetaAdCreative {
     images?: Array<{ url?: string; hash?: string }>;
     videos?: Array<{ video_id?: string; thumbnail_url?: string }>;
   };
+  creative_sourcing_spec?: {
+    associated_product_set_id?: string;
+    site_links_spec?: Array<{
+      site_link_title?: string;
+      site_link_url?: string;
+      site_link_image_hash?: string;
+      site_link_image_url?: string;
+    }>;
+  };
 }
 
 export interface MetaCatalogProduct {
@@ -384,7 +393,8 @@ const AD_FIELDS = [
   "creative{id,name,image_url,thumbnail_url,video_id,object_type,body,title,call_to_action_type,product_set_id," +
     "object_story_spec{link_data{child_attachments{image_url,video_id,name,link,description},picture,image_hash,message,name,description}," +
     "video_data{image_url,video_id,title,message}}," +
-    "asset_feed_spec{images{url,hash,permalink_url},videos{video_id,thumbnail_url,url_tags},bodies{text},titles{text},descriptions{text},call_to_action_types,link_urls{website_url}}}",
+    "asset_feed_spec{images{url,hash},videos{video_id,thumbnail_url},bodies{text},titles{text},descriptions{text}}," +
+    "creative_sourcing_spec{associated_product_set_id,site_links_spec{site_link_title,site_link_url,site_link_image_hash,site_link_image_url}}}",
   "insights{spend,impressions,clicks,ctr,cpc,actions,action_values,reach}",
 ].join(",");
 
@@ -591,6 +601,50 @@ function extractCarouselImages(
 }
 
 /**
+ * Resolve a batch of image hashes to URLs via /act_{accountId}/adimages.
+ * Meta caps `hashes` per request; we chunk by 50 to stay safe. Hashes that
+ * fail to resolve are simply absent from the returned Map — callers should
+ * treat that as a soft fallback.
+ */
+export async function resolveImageHashesToUrls(
+  accessToken: string,
+  accountId: string,
+  hashes: string[]
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (hashes.length === 0) return out;
+
+  const CHUNK_SIZE = 50;
+  for (let i = 0; i < hashes.length; i += CHUNK_SIZE) {
+    const chunk = hashes.slice(i, i + CHUNK_SIZE);
+    try {
+      const url =
+        `https://graph.facebook.com/${META_API_VERSION}/${accountId}/adimages?` +
+        `hashes=${encodeURIComponent(JSON.stringify(chunk))}` +
+        `&fields=hash,url,permalink_url` +
+        `&access_token=${encodeURIComponent(accessToken)}`;
+      const response = await fetch(url);
+      if (!response.ok) {
+        console.warn(
+          `[adimages] Hash batch failed: ${response.status}`,
+          await response.text()
+        );
+        continue;
+      }
+      const data = (await response.json()) as {
+        data?: Array<{ hash?: string; url?: string }>;
+      };
+      for (const img of data.data ?? []) {
+        if (img.hash && img.url) out.set(img.hash, img.url);
+      }
+    } catch (err) {
+      console.warn("[adimages] Failed to fetch hash batch:", err);
+    }
+  }
+  return out;
+}
+
+/**
  * Convert a raw MetaAd to the unified shape used across the app.
  * Reuses metric extractors from ./metrics for action_type handling consistency.
  */
@@ -607,9 +661,11 @@ export function metaAdToUnified(ad: MetaAd): UnifiedAd {
 
   // Detect creative type. Order matters:
   //   1. catalog: ONLY when product_set_id is set (SHARE alone is too broad)
-  //   2. carousel: ≥2 carousel images extracted from spec
-  //   3. video / image / unknown
-  const carouselImages = extractCarouselImages(ad.creative);
+  //   2. carousel: ≥2 carousel images via extractCarouselImages (legacy + asset_feed_spec)
+  //   3. carousel fallback: raw asset_feed_spec.images ≥2 (when extract returned <2)
+  //   4. video / image / unknown
+  // Note: carousel beats video even when both exist — show all available creatives.
+  let carouselImages = extractCarouselImages(ad.creative);
 
   // Video detection across multiple paths (legacy creative + Advantage+ specs)
   const extractedVideoId =
@@ -618,27 +674,52 @@ export function metaAdToUnified(ad: MetaAd): UnifiedAd {
     ad.creative?.asset_feed_spec?.videos?.[0]?.video_id;
 
   let creativeType: UnifiedAd["creativeType"] = "unknown";
+  let pendingImageHashes: string[] | undefined;
   if (ad.creative?.product_set_id) {
     creativeType = "catalog";
   } else if (carouselImages.length > 1) {
     creativeType = "carousel";
+  } else if ((ad.creative?.asset_feed_spec?.images?.length ?? 0) >= 2) {
+    // Fallback: extractCarouselImages didn't return ≥2 (e.g. items missing
+    // some field), but asset_feed_spec.images itself has ≥2 entries.
+    // Meta returns these as {hash} only (no url), and frequently duplicates
+    // the same hash 5–10 times for non-Flexible ads — dedupe before deciding.
+    const rawImages = ad.creative!.asset_feed_spec!.images ?? [];
+
+    const uniqueHashes = Array.from(
+      new Set(
+        rawImages
+          .map((img) => img.hash)
+          .filter((h): h is string => !!h)
+      )
+    );
+
+    if (uniqueHashes.length >= 2) {
+      // Real Flexible Ad. Hashes will be resolved to URLs in a batch call
+      // after the per-ad mapping completes (see MetaAdapter.getAds).
+      pendingImageHashes = uniqueHashes;
+      creativeType = "carousel";
+    } else {
+      // Single image duplicated by Meta — treat as a regular image ad.
+      creativeType = "image";
+    }
   } else if (extractedVideoId) {
     creativeType = "video";
   } else if (ad.creative?.image_url) {
     creativeType = "image";
   }
 
-  // TEMP DEBUG — remove after diagnosing Flexible Ads multi-image issue
-  console.log("[Meta Adapter Detection]", {
-    adId: ad.id,
-    adName: ad.name,
-    hasAssetFeedSpec: !!ad.creative?.asset_feed_spec,
-    assetFeedImagesCount: ad.creative?.asset_feed_spec?.images?.length ?? 0,
-    hasChildAttachments:
-      (ad.creative?.object_story_spec?.link_data?.child_attachments?.length ??
-        0) >= 2,
-    finalType: creativeType,
-  });
+  // Site links: Advantage+ shopping ads carry multiple product links here,
+  // each with its own thumbnail + Arabic title. Surfaced in the detail modal.
+  const siteLinks =
+    ad.creative?.creative_sourcing_spec?.site_links_spec
+      ?.map((sl) => ({
+        title: sl.site_link_title || "",
+        url: sl.site_link_url || "",
+        imageUrl: sl.site_link_image_url || "",
+        imageHash: sl.site_link_image_hash || "",
+      }))
+      .filter((sl) => !!sl.imageUrl) ?? [];
 
   // Normalize status: ACTIVE / DELETED kept as-is; everything else
   // (PAUSED, ARCHIVED, CAMPAIGN_PAUSED, ADSET_PAUSED, IN_PROCESS, WITH_ISSUES,
@@ -670,6 +751,8 @@ export function metaAdToUnified(ad: MetaAd): UnifiedAd {
     callToAction: ad.creative?.call_to_action_type,
     productSetId: ad.creative?.product_set_id,
     carouselImages: carouselImages.length > 0 ? carouselImages : undefined,
+    carouselImageHashes: pendingImageHashes,
+    siteLinks: siteLinks.length > 0 ? siteLinks : undefined,
     spend,
     revenue,
     roas: spend > 0 ? revenue / spend : 0,

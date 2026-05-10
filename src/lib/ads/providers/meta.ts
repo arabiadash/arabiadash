@@ -14,6 +14,7 @@ import {
   getAds as fetchMetaAds,
   getCatalogTopProducts,
   metaAdToUnified,
+  resolveImageHashesToUrls,
   type MetaCampaign,
   type MetaInsight,
 } from "@/lib/meta/api";
@@ -85,6 +86,40 @@ export class MetaAdapter implements AdProviderAdapter {
   async getAds(range: DateRangeInput): Promise<UnifiedAd[]> {
     const ads = await fetchMetaAds(this.accessToken, this.accountId, range);
     const unifiedAds = ads.map(metaAdToUnified);
+
+    // Resolve carouselImageHashes → URLs in one batched call.
+    const allHashes = new Set<string>();
+    for (const ad of unifiedAds) {
+      if (ad.creativeType === "carousel" && ad.carouselImageHashes) {
+        ad.carouselImageHashes.forEach((h) => allHashes.add(h));
+      }
+    }
+
+    if (allHashes.size > 0) {
+      const hashToUrl = await resolveImageHashesToUrls(
+        this.accessToken,
+        this.accountId,
+        Array.from(allHashes)
+      );
+
+      for (const ad of unifiedAds) {
+        if (ad.creativeType === "carousel" && ad.carouselImageHashes) {
+          const resolved = ad.carouselImageHashes
+            .map((h) => hashToUrl.get(h))
+            .filter((url): url is string => !!url);
+
+          if (resolved.length >= 2) {
+            ad.carouselImages = resolved;
+          } else {
+            // Couldn't resolve enough URLs — fall back to a regular image ad
+            // (image_url from the legacy creative will be used by the UI).
+            ad.creativeType = "image";
+            ad.carouselImages = undefined;
+          }
+          delete ad.carouselImageHashes;
+        }
+      }
+    }
 
     // Enrich catalog ads with their top products (parallel, capped to avoid
     // hitting Meta rate limits on accounts with many catalog ads).
