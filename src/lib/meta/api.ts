@@ -382,21 +382,40 @@ export async function getCampaignInsights(
   );
 }
 
-const AD_FIELDS = [
-  "id",
-  "name",
-  "status",
-  "effective_status",
-  "campaign_id",
-  "adset_id",
-  "preview_shareable_link",
-  "creative{id,name,image_url,thumbnail_url,video_id,object_type,body,title,call_to_action_type,product_set_id," +
-    "object_story_spec{link_data{child_attachments{image_url,video_id,name,link,description},picture,image_hash,message,name,description}," +
-    "video_data{image_url,video_id,title,message}}," +
-    "asset_feed_spec{images{url,hash},videos{video_id,thumbnail_url},bodies{text},titles{text},descriptions{text}}," +
-    "creative_sourcing_spec{associated_product_set_id,site_links_spec{site_link_title,site_link_url,site_link_image_hash,site_link_image_url}}}",
-  "insights{spend,impressions,clicks,ctr,cpc,actions,action_values,reach}",
-].join(",");
+/**
+ * Build the `fields` parameter for /ads. The insights subfield carries an
+ * inline `.time_range(...)` modifier when a date window is provided — Meta
+ * then omits the `insights` field entirely for ads with zero activity in
+ * that window, which lets us drop them post-fetch.
+ *
+ * For lifetime (dates === null) we fall back to plain `insights{...}` which
+ * Meta resolves against the account's full lifetime.
+ */
+function buildAdFields(
+  dates: { since: string; until: string } | null
+): string {
+  // Lifetime: Meta defaults nested `insights{...}` to last-30-days, not
+  // lifetime — use `.date_preset(maximum)` to force the full account window.
+  const insightsField = dates
+    ? `insights.time_range({"since":"${dates.since}","until":"${dates.until}"}){spend,impressions,clicks,ctr,cpc,actions,action_values,reach}`
+    : `insights.date_preset(maximum){spend,impressions,clicks,ctr,cpc,actions,action_values,reach}`;
+
+  return [
+    "id",
+    "name",
+    "status",
+    "effective_status",
+    "campaign_id",
+    "adset_id",
+    "preview_shareable_link",
+    "creative{id,name,image_url,thumbnail_url,video_id,object_type,body,title,call_to_action_type,product_set_id," +
+      "object_story_spec{link_data{child_attachments{image_url,video_id,name,link,description},picture,image_hash,message,name,description}," +
+      "video_data{image_url,video_id,title,message}}," +
+      "asset_feed_spec{images{url,hash},videos{video_id,thumbnail_url},bodies{text},titles{text},descriptions{text}}," +
+      "creative_sourcing_spec{associated_product_set_id,site_links_spec{site_link_title,site_link_url,site_link_image_hash,site_link_image_url}}}",
+    insightsField,
+  ].join(",");
+}
 
 // Without explicit filtering, Meta's /ads endpoint silently excludes archived
 // statuses, capping results to ACTIVE+PAUSED only. Force all statuses by
@@ -437,8 +456,12 @@ export async function getAds(
   const baseUrl = `https://graph.facebook.com/${META_API_VERSION}/${accountId}/ads`;
   const dates = resolveRangeToDates(range);
 
+  // Date filtering happens via the `.time_range(...)` modifier on the insights
+  // subfield (see buildAdFields). No top-level time_range/date_preset needed —
+  // ads with zero activity in the window simply lack an `insights` field, and
+  // are dropped by MetaAdapter.getAds.
   const params = new URLSearchParams({
-    fields: AD_FIELDS,
+    fields: buildAdFields(dates),
     access_token: accessToken,
     limit: "100",
     filtering: JSON.stringify([
@@ -449,15 +472,6 @@ export async function getAds(
       },
     ]),
   });
-
-  if (dates) {
-    params.set(
-      "time_range",
-      JSON.stringify({ since: dates.since, until: dates.until })
-    );
-  } else {
-    params.set("date_preset", "maximum");
-  }
 
   const allAds: MetaAd[] = [];
   let nextUrl: string | null = `${baseUrl}?${params.toString()}`;

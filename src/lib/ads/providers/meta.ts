@@ -87,9 +87,18 @@ export class MetaAdapter implements AdProviderAdapter {
     const ads = await fetchMetaAds(this.accessToken, this.accountId, range);
     const unifiedAds = ads.map(metaAdToUnified);
 
+    // Filter out ads that didn't run in the selected period.
+    // Meta omits the `insights` field for ads with zero activity in
+    // time_range, so metaAdToUnified produced spend/impressions = 0 for
+    // those — drop them before any further enrichment to keep the response
+    // tight and the cache lean.
+    const filteredAds = unifiedAds.filter(
+      (ad) => ad.spend > 0 || ad.impressions > 0
+    );
+
     // Resolve carouselImageHashes → URLs in one batched call.
     const allHashes = new Set<string>();
-    for (const ad of unifiedAds) {
+    for (const ad of filteredAds) {
       if (ad.creativeType === "carousel" && ad.carouselImageHashes) {
         ad.carouselImageHashes.forEach((h) => allHashes.add(h));
       }
@@ -102,7 +111,7 @@ export class MetaAdapter implements AdProviderAdapter {
         Array.from(allHashes)
       );
 
-      for (const ad of unifiedAds) {
+      for (const ad of filteredAds) {
         if (ad.creativeType === "carousel" && ad.carouselImageHashes) {
           const resolved = ad.carouselImageHashes
             .map((h) => hashToUrl.get(h))
@@ -123,7 +132,7 @@ export class MetaAdapter implements AdProviderAdapter {
 
     // Enrich catalog ads with their top products (parallel, capped to avoid
     // hitting Meta rate limits on accounts with many catalog ads).
-    const catalogAds = unifiedAds.filter(
+    const catalogAds = filteredAds.filter(
       (ad) => ad.creativeType === "catalog" && ad.productSetId
     );
     // Cap initial eager fetches at 5 (was 10) to keep p95 dashboard loads
@@ -155,7 +164,7 @@ export class MetaAdapter implements AdProviderAdapter {
       productResults.map((r) => [r.adId, r.products])
     );
 
-    return unifiedAds.map((ad) => {
+    return filteredAds.map((ad) => {
       if (ad.creativeType === "catalog" && productsByAdId.has(ad.id)) {
         const products = productsByAdId.get(ad.id) ?? [];
         return {
