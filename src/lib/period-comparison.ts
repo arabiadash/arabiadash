@@ -20,6 +20,74 @@ export function computePreviousPeriod(
 
   if (range.type === "preset") {
     if (range.preset === "lifetime") return null;
+
+    const today = new Date();
+
+    // Today → Yesterday
+    if (range.preset === "today") {
+      const yesterday = new Date(today);
+      yesterday.setDate(today.getDate() - 1);
+      const yStr = formatISO(yesterday);
+      return { since: yStr, until: yStr };
+    }
+
+    // Yesterday → Day before yesterday
+    if (range.preset === "yesterday") {
+      const dayBefore = new Date(today);
+      dayBefore.setDate(today.getDate() - 2);
+      const dStr = formatISO(dayBefore);
+      return { since: dStr, until: dStr };
+    }
+
+    // This month → same window in last month (1st → same day-of-month).
+    // If current day-of-month exceeds last month's length, cap at month end.
+    if (range.preset === "this_month") {
+      const dayOfMonth = today.getDate();
+      const firstDayLastMonth = new Date(
+        today.getFullYear(),
+        today.getMonth() - 1,
+        1
+      );
+      const sameDayLastMonth = new Date(
+        today.getFullYear(),
+        today.getMonth() - 1,
+        dayOfMonth
+      );
+      const lastDayLastMonth = new Date(
+        today.getFullYear(),
+        today.getMonth(),
+        0
+      );
+      const effectiveEnd =
+        sameDayLastMonth > lastDayLastMonth
+          ? lastDayLastMonth
+          : sameDayLastMonth;
+
+      return {
+        since: formatISO(firstDayLastMonth),
+        until: formatISO(effectiveEnd),
+      };
+    }
+
+    // Last month → month before that
+    if (range.preset === "last_month") {
+      const firstDayMonthBefore = new Date(
+        today.getFullYear(),
+        today.getMonth() - 2,
+        1
+      );
+      const lastDayMonthBefore = new Date(
+        today.getFullYear(),
+        today.getMonth() - 1,
+        0
+      );
+      return {
+        since: formatISO(firstDayMonthBefore),
+        until: formatISO(lastDayMonthBefore),
+      };
+    }
+
+    // Rolling-window presets (7d/14d/30d/90d): shift back by `days`
     const daysMap: Record<string, number> = {
       "7d": 7,
       "14d": 14,
@@ -29,7 +97,6 @@ export function computePreviousPeriod(
     const days = daysMap[range.preset];
     if (!days) return null;
 
-    const today = new Date();
     const prevEnd = new Date(today);
     prevEnd.setDate(today.getDate() - days);
     const prevStart = new Date(prevEnd);

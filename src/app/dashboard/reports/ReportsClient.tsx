@@ -94,9 +94,18 @@ const ARABIC_MONTHS = [
 
 function getDayCount(range: DateRangeValue): number {
   if (range.type === "preset") {
+    const today = new Date();
     const map: Record<string, number> = {
+      today: 1,
+      yesterday: 1,
       "7d": 7,
       "14d": 14,
+      this_month: today.getDate(),
+      last_month: new Date(
+        today.getFullYear(),
+        today.getMonth(),
+        0
+      ).getDate(),
       "30d": 30,
       "90d": 90,
       lifetime: 0,
@@ -257,13 +266,13 @@ export default function ReportsClient({
     [campaigns]
   );
 
-  // Smart time_increment: daily for ranges ≤ 90 days, aggregate otherwise.
-  // Used for KPI subtitle/messaging (reflects the selected dateRange).
+  // Smart time_increment: daily breakdown for non-lifetime ranges (all presets
+  // except 'lifetime' are ≤ 90 days). Custom ranges check explicit length.
   const dayCount = getDayCount(dateRange);
   const shouldShowDailyBreakdown =
     dateRange.type === "custom"
       ? dayCount <= 90
-      : ["7d", "14d", "30d", "90d"].includes(dateRange.preset);
+      : dateRange.preset !== "lifetime";
 
   // Lifetime can't be shown as a meaningful chart (it would be one big aggregate row).
   // Fallback: chart shows last 90 days while KPIs still aggregate the full lifetime.
@@ -278,7 +287,7 @@ export default function ReportsClient({
   const chartShouldShowDaily =
     chartDateRange.type === "custom"
       ? chartDayCount <= 90
-      : ["7d", "14d", "30d", "90d"].includes(chartDateRange.preset);
+      : chartDateRange.preset !== "lifetime";
 
   // Insights for table (campaign level — one row per campaign, follows dateRange)
   const {

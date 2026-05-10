@@ -90,6 +90,7 @@ import {
   type CustomDateRange,
   type DateRangeInput,
   isCustomRange,
+  presetToCustomRange,
 } from "@/lib/ads/types";
 export type { DateRange, TimeIncrement, CustomDateRange, DateRangeInput };
 export { isCustomRange };
@@ -182,6 +183,9 @@ function chunkDateRange(
 /**
  * Resolve a DateRangeInput to an explicit since/until pair.
  * Returns null for 'lifetime' (caller should use date_preset=maximum instead).
+ *
+ * Delegates non-lifetime preset → since/until conversion to presetToCustomRange
+ * (single source of truth in @/lib/ads/types).
  */
 function resolveRangeToDates(
   range: DateRangeInput
@@ -191,21 +195,8 @@ function resolveRangeToDates(
   }
   if (range === "lifetime") return null;
 
-  const daysMap: Record<Exclude<DateRange, "lifetime">, number> = {
-    "7d": 7,
-    "14d": 14,
-    "30d": 30,
-    "90d": 90,
-  };
-  const days = daysMap[range];
-  const today = new Date();
-  const sinceDate = new Date(today);
-  sinceDate.setDate(today.getDate() - (days - 1));
-
-  return {
-    since: formatLocalISO(sinceDate),
-    until: formatLocalISO(today),
-  };
+  const customRange = presetToCustomRange(range);
+  return { since: customRange.since, until: customRange.until };
 }
 
 /**

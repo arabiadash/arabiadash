@@ -11,14 +11,28 @@ interface DateRangePickerProps {
 }
 
 const PRESET_LABELS: Record<DateRange, string> = {
+  today: "اليوم",
+  yesterday: "الأمس",
   "7d": "آخر 7 أيام",
   "14d": "آخر 14 يوم",
+  this_month: "هذا الشهر",
+  last_month: "الشهر الماضي",
   "30d": "آخر 30 يوم",
   "90d": "آخر 90 يوم",
   lifetime: "مدى الحياة",
 };
 
-const DISPLAYED_PRESETS: DateRange[] = ["7d", "30d", "90d", "lifetime"];
+const DISPLAYED_PRESETS: DateRange[] = [
+  "today",
+  "yesterday",
+  "7d",
+  "14d",
+  "this_month",
+  "last_month",
+  "30d",
+  "90d",
+  "lifetime",
+];
 
 function formatCustomRange(since: string, until: string): string {
   const formatDate = (s: string) => {

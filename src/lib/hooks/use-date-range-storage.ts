@@ -14,9 +14,17 @@ function isValidDateRangeValue(v: unknown): v is DateRangeValue {
   if (typeof v !== "object" || v === null) return false;
   const obj = v as Record<string, unknown>;
   if (obj.type === "preset") {
-    return ["7d", "14d", "30d", "90d", "lifetime"].includes(
-      obj.preset as string
-    );
+    return [
+      "today",
+      "yesterday",
+      "7d",
+      "14d",
+      "this_month",
+      "last_month",
+      "30d",
+      "90d",
+      "lifetime",
+    ].includes(obj.preset as string);
   }
   if (obj.type === "custom") {
     return typeof obj.since === "string" && typeof obj.until === "string";

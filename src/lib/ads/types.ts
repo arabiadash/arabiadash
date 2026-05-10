@@ -76,7 +76,16 @@ export interface UnifiedAccount {
 // =================================================================
 // Date Range
 // =================================================================
-export type DateRange = "7d" | "14d" | "30d" | "90d" | "lifetime";
+export type DateRange =
+  | "today"
+  | "yesterday"
+  | "7d"
+  | "14d"
+  | "this_month"
+  | "last_month"
+  | "30d"
+  | "90d"
+  | "lifetime";
 
 // Custom range with arbitrary start/end dates (ISO YYYY-MM-DD strings)
 export interface CustomDateRange {
@@ -143,39 +152,74 @@ export function formatChartTooltipLabel(dateStr: string): string {
 }
 
 /**
- * Convert a preset to actual since/until dates ending TODAY (inclusive).
- * Returns null for 'lifetime' (caller should fall back to Meta's preset).
+ * Convert a non-lifetime preset to actual since/until dates.
+ * - today / yesterday → single-day range
+ * - 7d/14d/30d/90d   → rolling window ending today (inclusive)
+ * - this_month       → first of month → today
+ * - last_month       → first to last of previous month
  *
- * Example (today = 2026-05-09):
- *   presetToCustomRange('7d')  → { since: '2026-05-03', until: '2026-05-09' }
- *   presetToCustomRange('30d') → { since: '2026-04-10', until: '2026-05-09' }
- *
- * Why: Meta's `last_30d` preset excludes today's data. By computing explicit
- * dates ending today, we include today's (partial) data in the response.
+ * Why: Meta's `last_30d` preset excludes today's data. Explicit dates avoid
+ * that and allow more meaningful presets like "this_month".
  */
 export function presetToCustomRange(
-  preset: DateRange
-): CustomDateRange | null {
-  if (preset === "lifetime") return null;
+  preset: Exclude<DateRange, "lifetime">
+): CustomDateRange {
+  const formatISO = (d: Date) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${dd}`;
+  };
 
-  const daysMap: Record<Exclude<DateRange, "lifetime">, number> = {
+  const today = new Date();
+
+  if (preset === "today") {
+    const todayStr = formatISO(today);
+    return { since: todayStr, until: todayStr };
+  }
+
+  if (preset === "yesterday") {
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
+    const yStr = formatISO(yesterday);
+    return { since: yStr, until: yStr };
+  }
+
+  if (preset === "this_month") {
+    const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
+    return { since: formatISO(firstDay), until: formatISO(today) };
+  }
+
+  if (preset === "last_month") {
+    const firstDayLastMonth = new Date(
+      today.getFullYear(),
+      today.getMonth() - 1,
+      1
+    );
+    // Day 0 of current month = last day of previous month.
+    const lastDayLastMonth = new Date(
+      today.getFullYear(),
+      today.getMonth(),
+      0
+    );
+    return {
+      since: formatISO(firstDayLastMonth),
+      until: formatISO(lastDayLastMonth),
+    };
+  }
+
+  // Rolling-window presets
+  const daysMap: Record<"7d" | "14d" | "30d" | "90d", number> = {
     "7d": 7,
     "14d": 14,
     "30d": 30,
     "90d": 90,
   };
   const days = daysMap[preset];
+  const sinceDate = new Date(today);
+  sinceDate.setDate(today.getDate() - (days - 1));
 
-  const today = new Date();
-  const since = new Date(today);
-  since.setDate(today.getDate() - (days - 1));
-
-  const formatISO = (d: Date) => d.toISOString().split("T")[0];
-
-  return {
-    since: formatISO(since),
-    until: formatISO(today),
-  };
+  return { since: formatISO(sinceDate), until: formatISO(today) };
 }
 
 export type TimeIncrement = 1 | 7 | "all_days";

@@ -86,10 +86,8 @@ export function useInsights(
 
     if ((!effectiveSince || !effectiveUntil) && range !== "lifetime") {
       const converted = presetToCustomRange(range);
-      if (converted) {
-        effectiveSince = converted.since;
-        effectiveUntil = converted.until;
-      }
+      effectiveSince = converted.since;
+      effectiveUntil = converted.until;
     }
 
     if (effectiveSince && effectiveUntil) {
