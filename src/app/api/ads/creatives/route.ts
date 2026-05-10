@@ -1,8 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { getAdapterForProvider } from "@/lib/ads/factory";
-import type { AdProvider } from "@/lib/ads/cache";
-import type { DateRange, DateRangeInput } from "@/lib/ads/types";
+import {
+  getCachedCreatives,
+  setCachedCreatives,
+  type AdProvider,
+} from "@/lib/ads/cache";
+import type {
+  DateRange,
+  DateRangeInput,
+  UnifiedAd,
+} from "@/lib/ads/types";
 
 const VALID_PROVIDERS: readonly AdProvider[] = [
   "meta",
@@ -54,6 +63,23 @@ function parseRangeFromParams(
   return "30d";
 }
 
+function rangeToCacheKey(range: DateRangeInput): string {
+  return typeof range === "string" ? range : `custom:${range.since}:${range.until}`;
+}
+
+// Meta rate-limit (code 80004) bubbles up as an Error whose message contains
+// the upstream JSON. Detect it conservatively by string match.
+function isRateLimitError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message;
+  return (
+    msg.includes("80004") ||
+    msg.includes("User request limit reached") ||
+    msg.includes("rate limit") ||
+    msg.includes("Application request limit reached")
+  );
+}
+
 export async function GET(request: NextRequest) {
   try {
     const provider = (request.nextUrl.searchParams.get("provider") ||
@@ -74,6 +100,9 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const forceRefresh =
+      request.nextUrl.searchParams.get("refresh") === "true";
+
     const supabase = await createClient();
     const {
       data: { user },
@@ -92,13 +121,128 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const ads = await adapter.getAds(parsed);
+    // We need the account_id (string, e.g. act_123) for the creatives_cache key.
+    // The adapter has it but doesn't expose it; resolve via the connection row.
+    const { data: connection } = await supabase
+      .from("connections")
+      .select("account_id")
+      .eq("user_id", user.id)
+      .eq("platform", provider)
+      .eq("status", "active")
+      .maybeSingle();
 
-    return NextResponse.json({
-      data: ads,
+    if (!connection) {
+      return NextResponse.json({ error: "no_connection" }, { status: 404 });
+    }
+
+    const dateRange = rangeToCacheKey(parsed);
+    const cacheParams = {
+      userId: user.id,
       provider,
-      range: parsed,
-    });
+      accountId: connection.account_id as string,
+      dateRange,
+    };
+
+    // 1. Force refresh: skip cache, fetch fresh, write back.
+    if (forceRefresh) {
+      try {
+        const ads = await adapter.getAds(parsed);
+        await setCachedCreatives({ ...cacheParams, data: ads });
+        return NextResponse.json({
+          data: ads,
+          source: "fresh",
+          fetchedAt: new Date().toISOString(),
+          revalidating: false,
+          provider,
+          range: parsed,
+        });
+      } catch (err) {
+        // Even on force refresh, fall back to stale if available.
+        const cached = await getCachedCreatives<UnifiedAd[]>(cacheParams);
+        if (cached && isRateLimitError(err)) {
+          return NextResponse.json(
+            {
+              data: cached.data,
+              source: "rate-limited",
+              fetchedAt: cached.fetchedAt.toISOString(),
+              revalidating: false,
+              provider,
+              range: parsed,
+              warning: "rate_limited_serving_cache",
+            },
+            { status: 200 }
+          );
+        }
+        throw err;
+      }
+    }
+
+    // 2. Cache lookup.
+    const cached = await getCachedCreatives<UnifiedAd[]>(cacheParams);
+
+    // 3. Fresh hit — return immediately, no work in background.
+    if (cached?.status === "fresh") {
+      return NextResponse.json({
+        data: cached.data,
+        source: "cache-fresh",
+        fetchedAt: cached.fetchedAt.toISOString(),
+        revalidating: false,
+        provider,
+        range: parsed,
+      });
+    }
+
+    // 4. Stale hit — return stale, kick off background refresh.
+    if (cached?.status === "stale") {
+      after(async () => {
+        try {
+          const ads = await adapter.getAds(parsed);
+          await setCachedCreatives({ ...cacheParams, data: ads });
+        } catch (bgErr) {
+          console.warn(
+            "[ads/creatives] Background revalidation failed",
+            bgErr
+          );
+        }
+      });
+
+      return NextResponse.json({
+        data: cached.data,
+        source: "cache-stale",
+        fetchedAt: cached.fetchedAt.toISOString(),
+        revalidating: true,
+        provider,
+        range: parsed,
+      });
+    }
+
+    // 5. Cache miss — fetch synchronously.
+    try {
+      const ads = await adapter.getAds(parsed);
+      await setCachedCreatives({ ...cacheParams, data: ads });
+      return NextResponse.json({
+        data: ads,
+        source: "fresh",
+        fetchedAt: new Date().toISOString(),
+        revalidating: false,
+        provider,
+        range: parsed,
+      });
+    } catch (err) {
+      // 6. Graceful fallback: rate-limited with no cache → 429.
+      if (isRateLimitError(err)) {
+        return NextResponse.json(
+          {
+            error: "rate_limited",
+            message:
+              "Meta API rate limit reached and no cached data available. Please retry in a few minutes.",
+            provider,
+          },
+          { status: 429 }
+        );
+      }
+      throw err;
+    }
   } catch (err) {
     console.error("[ads/creatives] Error:", err);
     return NextResponse.json({ error: "fetch_failed" }, { status: 500 });

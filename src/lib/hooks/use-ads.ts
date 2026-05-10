@@ -1,8 +1,14 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { UnifiedAd, DateRangeValue } from "@/lib/ads/types";
 import type { AdProvider } from "@/lib/ads/cache";
+
+export type AdsSource =
+  | "fresh"
+  | "cache-fresh"
+  | "cache-stale"
+  | "rate-limited";
 
 interface UseAdsOptions {
   range?: DateRangeValue;
@@ -14,19 +20,27 @@ interface UseAdsReturn {
   ads: UnifiedAd[];
   loading: boolean;
   error: string | null;
+  source: AdsSource | null;
+  fetchedAt: Date | null;
+  revalidating: boolean;
+  rateLimited: boolean;
+  refresh: () => Promise<void>;
 }
 
 /**
  * Fetch ads (with creative + performance) for the current period from
- * /api/ads/creatives. Mirrors the URL-building logic from useInsights so
- * preset/custom range inputs are handled consistently.
+ * /api/ads/creatives. SWR-aware: surfaces freshness so the UI can show
+ * "آخر تحديث" badges and a manual refresh button.
  */
 export function useAds(options: UseAdsOptions): UseAdsReturn {
   const [ads, setAds] = useState<UnifiedAd[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [source, setSource] = useState<AdsSource | null>(null);
+  const [fetchedAt, setFetchedAt] = useState<Date | null>(null);
+  const [revalidating, setRevalidating] = useState(false);
+  const [rateLimited, setRateLimited] = useState(false);
 
-  // Stable primitives for deps (avoid re-fetch on object reference change)
   const provider = options.provider ?? "meta";
   const customSince = options.customRange?.since;
   const customUntil = options.customRange?.until;
@@ -38,57 +52,100 @@ export function useAds(options: UseAdsOptions): UseAdsReturn {
   const rangeUntil =
     options.range?.type === "custom" ? options.range.until : undefined;
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
+  const buildParams = useCallback(
+    (forceRefresh: boolean): URLSearchParams => {
+      const params = new URLSearchParams();
+      params.set("provider", provider);
+      if (customSince && customUntil) {
+        params.set("since", customSince);
+        params.set("until", customUntil);
+      } else if (rangeType === "custom" && rangeSince && rangeUntil) {
+        params.set("since", rangeSince);
+        params.set("until", rangeUntil);
+      } else if (rangeType === "preset" && rangePreset) {
+        params.set("range", rangePreset);
+      } else {
+        params.set("range", "30d");
+      }
+      if (forceRefresh) params.set("refresh", "true");
+      return params;
+    },
+    [
+      provider,
+      customSince,
+      customUntil,
+      rangeType,
+      rangePreset,
+      rangeSince,
+      rangeUntil,
+    ]
+  );
 
-    const params = new URLSearchParams();
-    params.set("provider", provider);
+  // Track a request token so a stale in-flight refresh can't clobber a newer one.
+  const reqTokenRef = useRef(0);
 
-    if (customSince && customUntil) {
-      params.set("since", customSince);
-      params.set("until", customUntil);
-    } else if (rangeType === "custom" && rangeSince && rangeUntil) {
-      params.set("since", rangeSince);
-      params.set("until", rangeUntil);
-    } else if (rangeType === "preset" && rangePreset) {
-      params.set("range", rangePreset);
-    } else {
-      params.set("range", "30d");
-    }
+  const doFetch = useCallback(
+    async (forceRefresh: boolean): Promise<void> => {
+      const token = ++reqTokenRef.current;
+      setLoading(true);
+      setError(null);
 
-    fetch(`/api/ads/creatives?${params.toString()}`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((data) => {
-        if (cancelled) return;
+      try {
+        const res = await fetch(
+          `/api/ads/creatives?${buildParams(forceRefresh).toString()}`
+        );
+        const data = await res.json();
+
+        if (token !== reqTokenRef.current) return;
+
+        if (res.status === 429) {
+          setRateLimited(true);
+          setError(data.error ?? "rate_limited");
+          setAds([]);
+          setSource(null);
+          setFetchedAt(null);
+          setRevalidating(false);
+          return;
+        }
+
+        if (!res.ok) {
+          throw new Error(data.error ?? `HTTP ${res.status}`);
+        }
+
         setAds(Array.isArray(data.data) ? data.data : []);
-      })
-      .catch((err) => {
-        if (cancelled) return;
+        setSource((data.source as AdsSource) ?? null);
+        setFetchedAt(data.fetchedAt ? new Date(data.fetchedAt) : null);
+        setRevalidating(Boolean(data.revalidating));
+        setRateLimited(data.source === "rate-limited");
+      } catch (err) {
+        if (token !== reqTokenRef.current) return;
         console.error("[useAds] Error:", err);
         setError(err instanceof Error ? err.message : "fetch_failed");
         setAds([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+        setSource(null);
+        setFetchedAt(null);
+        setRevalidating(false);
+      } finally {
+        if (token === reqTokenRef.current) setLoading(false);
+      }
+    },
+    [buildParams]
+  );
 
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    provider,
-    customSince,
-    customUntil,
-    rangeType,
-    rangePreset,
-    rangeSince,
-    rangeUntil,
-  ]);
+  useEffect(() => {
+    void doFetch(false);
+  }, [doFetch]);
 
-  return { ads, loading, error };
+  const refresh = useCallback(() => doFetch(true), [doFetch]);
+
+  return {
+    ads,
+    loading,
+    error,
+    source,
+    fetchedAt,
+    revalidating,
+    rateLimited,
+    refresh,
+  };
 }

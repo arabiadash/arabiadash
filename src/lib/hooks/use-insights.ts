@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   presetToCustomRange,
   type UnifiedInsight,
@@ -11,12 +11,23 @@ import {
 } from "@/lib/ads/types";
 import type { AdProvider } from "@/lib/ads/cache";
 
+export type InsightsSource =
+  | "fresh"
+  | "cache-fresh"
+  | "cache-stale"
+  | "rate-limited";
+
 interface UseInsightsReturn {
   insights: UnifiedInsight[];
   loading: boolean;
   error: string | null;
   cached: boolean;
   noConnection: boolean;
+  source: InsightsSource | null;
+  fetchedAt: Date | null;
+  revalidating: boolean;
+  rateLimited: boolean;
+  refresh: () => Promise<void>;
 }
 
 export interface UseInsightsOptions {
@@ -30,10 +41,6 @@ export interface UseInsightsOptions {
 /**
  * Convert a DateRangePicker `DateRangeValue` to the slice of UseInsightsOptions
  * that controls the date range. Spread the result into useInsights options.
- *
- * Example:
- *   const [picked, setPicked] = useState<DateRangeValue>({ type: 'preset', preset: '30d' });
- *   const insights = useInsights({ ...dateRangeValueToOptions(picked), level: 'account' });
  */
 export function dateRangeValueToOptions(
   value: DateRangeValue
@@ -62,81 +69,116 @@ export function useInsights(
   const [error, setError] = useState<string | null>(null);
   const [cached, setCached] = useState(false);
   const [noConnection, setNoConnection] = useState(false);
+  const [source, setSource] = useState<InsightsSource | null>(null);
+  const [fetchedAt, setFetchedAt] = useState<Date | null>(null);
+  const [revalidating, setRevalidating] = useState(false);
+  const [rateLimited, setRateLimited] = useState(false);
 
-  // Stable primitives for dep array (avoid re-fetch when caller passes a new
-  // customRange object reference with the same values).
   const customSince = customRange?.since;
   const customUntil = customRange?.until;
 
-  useEffect(() => {
-    let cancelled = false;
+  const buildParams = useCallback(
+    (forceRefresh: boolean): URLSearchParams => {
+      const params = new URLSearchParams({ provider, level });
 
-    setLoading(true);
-    setError(null);
-    setNoConnection(false);
+      let effectiveSince = customSince;
+      let effectiveUntil = customUntil;
 
-    const params = new URLSearchParams({ provider, level });
+      if ((!effectiveSince || !effectiveUntil) && range !== "lifetime") {
+        const converted = presetToCustomRange(range);
+        effectiveSince = converted.since;
+        effectiveUntil = converted.until;
+      }
 
-    // Resolve effective dates. Order:
-    //   1. explicit customRange from caller → use as-is
-    //   2. preset (except 'lifetime') → convert to since/until ending today
-    //   3. 'lifetime' preset → pass through to backend (uses Meta's `maximum`)
-    let effectiveSince = customSince;
-    let effectiveUntil = customUntil;
+      if (effectiveSince && effectiveUntil) {
+        params.set("since", effectiveSince);
+        params.set("until", effectiveUntil);
+      } else {
+        params.set("range", range);
+      }
 
-    if ((!effectiveSince || !effectiveUntil) && range !== "lifetime") {
-      const converted = presetToCustomRange(range);
-      effectiveSince = converted.since;
-      effectiveUntil = converted.until;
-    }
+      if (timeIncrement) {
+        params.set("time_increment", String(timeIncrement));
+      }
 
-    if (effectiveSince && effectiveUntil) {
-      params.set("since", effectiveSince);
-      params.set("until", effectiveUntil);
-    } else {
-      params.set("range", range);
-    }
+      if (forceRefresh) {
+        params.set("refresh", "true");
+      }
 
-    if (timeIncrement) {
-      params.set("time_increment", String(timeIncrement));
-    }
+      return params;
+    },
+    [provider, level, customSince, customUntil, range, timeIncrement]
+  );
 
-    fetch(`/api/ads/insights?${params.toString()}`)
-      .then(async (response) => {
+  const reqTokenRef = useRef(0);
+
+  const doFetch = useCallback(
+    async (forceRefresh: boolean): Promise<void> => {
+      const token = ++reqTokenRef.current;
+      setLoading(true);
+      setError(null);
+      setNoConnection(false);
+
+      try {
+        const response = await fetch(
+          `/api/ads/insights?${buildParams(forceRefresh).toString()}`
+        );
         const data = await response.json();
+
+        if (token !== reqTokenRef.current) return;
+
+        if (response.status === 429) {
+          setRateLimited(true);
+          setError(data.error ?? "rate_limited");
+          setInsights([]);
+          setSource(null);
+          setFetchedAt(null);
+          setRevalidating(false);
+          return;
+        }
 
         if (!response.ok) {
           if (data.error === "no_connection") {
-            if (!cancelled) {
-              setNoConnection(true);
-              setInsights([]);
-            }
+            setNoConnection(true);
+            setInsights([]);
             return;
           }
           throw new Error(data.error || "Failed to fetch insights");
         }
 
-        if (!cancelled) {
-          setInsights(data.data || []);
-          setCached(data.cached || false);
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          console.error("[useInsights] Error:", err);
-          setError(err.message);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      });
+        setInsights(data.data || []);
+        setCached(data.source?.startsWith("cache-") ?? false);
+        setSource((data.source as InsightsSource) ?? null);
+        setFetchedAt(data.fetchedAt ? new Date(data.fetchedAt) : null);
+        setRevalidating(Boolean(data.revalidating));
+        setRateLimited(data.source === "rate-limited");
+      } catch (err) {
+        if (token !== reqTokenRef.current) return;
+        console.error("[useInsights] Error:", err);
+        setError(err instanceof Error ? err.message : "fetch_failed");
+      } finally {
+        if (token === reqTokenRef.current) setLoading(false);
+      }
+    },
+    [buildParams]
+  );
 
-    return () => {
-      cancelled = true;
-    };
-  }, [range, customSince, customUntil, level, provider, timeIncrement]);
+  useEffect(() => {
+    void doFetch(false);
+  }, [doFetch]);
 
-  return { insights, loading, error, cached, noConnection };
+  const refresh = useCallback(() => doFetch(true), [doFetch]);
+
+  return {
+    insights,
+    loading,
+    error,
+    cached,
+    noConnection,
+    source,
+    fetchedAt,
+    revalidating,
+    rateLimited,
+    refresh,
+  };
 }

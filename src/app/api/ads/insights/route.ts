@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { getAdapterForProvider } from "@/lib/ads/factory";
 import {
-  getCachedData,
+  getCachedDataSWR,
   setCachedData,
   type AdProvider,
 } from "@/lib/ads/cache";
@@ -29,6 +30,17 @@ const VALID_PROVIDERS: readonly AdProvider[] = [
   "snapchat",
 ] as const;
 
+function isRateLimitError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message;
+  return (
+    msg.includes("80004") ||
+    msg.includes("User request limit reached") ||
+    msg.includes("rate limit") ||
+    msg.includes("Application request limit reached")
+  );
+}
+
 export async function GET(request: NextRequest) {
   try {
     const provider = (request.nextUrl.searchParams.get("provider") ||
@@ -39,6 +51,8 @@ export async function GET(request: NextRequest) {
       request.nextUrl.searchParams.get("time_increment");
     const sinceParam = request.nextUrl.searchParams.get("since");
     const untilParam = request.nextUrl.searchParams.get("until");
+    const forceRefresh =
+      request.nextUrl.searchParams.get("refresh") === "true";
 
     if (!VALID_PROVIDERS.includes(provider)) {
       return NextResponse.json(
@@ -47,7 +61,6 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Parse range: custom (since/until) takes precedence over preset (range)
     const isValidISODate = (s: string): boolean =>
       /^\d{4}-\d{2}-\d{2}$/.test(s);
 
@@ -143,37 +156,122 @@ export async function GET(request: NextRequest) {
       timeIncrement ? `:t${timeIncrement}` : ""
     }`;
 
-    const cached = await getCachedData<UnifiedInsight[]>(
+    const fetchInsights = async (): Promise<UnifiedInsight[]> => {
+      if (level === "campaign") {
+        return adapter.getCampaignInsights(range, timeIncrement);
+      }
+      return adapter.getAccountInsights(range, timeIncrement);
+    };
+
+    // 1. Force refresh.
+    if (forceRefresh) {
+      try {
+        const insights = await fetchInsights();
+        await setCachedData(connection.id, provider, cacheKey, insights);
+        return NextResponse.json({
+          data: insights,
+          source: "fresh",
+          fetchedAt: new Date().toISOString(),
+          revalidating: false,
+          range,
+          level,
+          provider,
+        });
+      } catch (err) {
+        const cached = await getCachedDataSWR<UnifiedInsight[]>(
+          connection.id,
+          provider,
+          cacheKey
+        );
+        if (cached && isRateLimitError(err)) {
+          return NextResponse.json({
+            data: cached.data,
+            source: "rate-limited",
+            fetchedAt: cached.fetchedAt.toISOString(),
+            revalidating: false,
+            range,
+            level,
+            provider,
+            warning: "rate_limited_serving_cache",
+          });
+        }
+        throw err;
+      }
+    }
+
+    // 2. Cache lookup.
+    const cached = await getCachedDataSWR<UnifiedInsight[]>(
       connection.id,
       provider,
       cacheKey
     );
-    if (cached) {
+
+    // 3. Fresh hit.
+    if (cached?.status === "fresh") {
       return NextResponse.json({
-        data: cached,
-        cached: true,
+        data: cached.data,
+        source: "cache-fresh",
+        fetchedAt: cached.fetchedAt.toISOString(),
+        revalidating: false,
         range,
         level,
         provider,
       });
     }
 
-    let insights: UnifiedInsight[];
-    if (level === "campaign") {
-      insights = await adapter.getCampaignInsights(range, timeIncrement);
-    } else {
-      insights = await adapter.getAccountInsights(range, timeIncrement);
+    // 4. Stale hit — serve stale, refresh in background.
+    if (cached?.status === "stale") {
+      after(async () => {
+        try {
+          const insights = await fetchInsights();
+          await setCachedData(connection.id, provider, cacheKey, insights);
+        } catch (bgErr) {
+          console.warn(
+            "[ads/insights] Background revalidation failed",
+            bgErr
+          );
+        }
+      });
+
+      return NextResponse.json({
+        data: cached.data,
+        source: "cache-stale",
+        fetchedAt: cached.fetchedAt.toISOString(),
+        revalidating: true,
+        range,
+        level,
+        provider,
+      });
     }
 
-    await setCachedData(connection.id, provider, cacheKey, insights);
-
-    return NextResponse.json({
-      data: insights,
-      cached: false,
-      range,
-      level,
-      provider,
-    });
+    // 5. Cache miss.
+    try {
+      const insights = await fetchInsights();
+      await setCachedData(connection.id, provider, cacheKey, insights);
+      return NextResponse.json({
+        data: insights,
+        source: "fresh",
+        fetchedAt: new Date().toISOString(),
+        revalidating: false,
+        range,
+        level,
+        provider,
+      });
+    } catch (err) {
+      // 6. Graceful fallback.
+      if (isRateLimitError(err)) {
+        return NextResponse.json(
+          {
+            error: "rate_limited",
+            message:
+              "Meta API rate limit reached and no cached data available. Please retry in a few minutes.",
+            provider,
+          },
+          { status: 429 }
+        );
+      }
+      throw err;
+    }
   } catch (err) {
     console.error("[ads/insights] Error:", err);
     return NextResponse.json({ error: "fetch_failed" }, { status: 500 });
