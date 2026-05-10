@@ -3,6 +3,7 @@ import {
   type UnifiedCampaign,
   type UnifiedInsight,
   type UnifiedAccount,
+  type UnifiedAd,
   type DateRangeInput,
   type TimeIncrement,
 } from "../types";
@@ -10,6 +11,9 @@ import {
   getCampaigns as fetchMetaCampaigns,
   getAccountInsights as fetchMetaAccountInsights,
   getCampaignInsights as fetchMetaCampaignInsights,
+  getAds as fetchMetaAds,
+  getCatalogTopProducts,
+  metaAdToUnified,
   type MetaCampaign,
   type MetaInsight,
 } from "@/lib/meta/api";
@@ -76,6 +80,60 @@ export class MetaAdapter implements AdProviderAdapter {
       timeIncrement
     );
     return insights.map((i) => this.normalizeInsight(i));
+  }
+
+  async getAds(range: DateRangeInput): Promise<UnifiedAd[]> {
+    const ads = await fetchMetaAds(this.accessToken, this.accountId, range);
+    const unifiedAds = ads.map(metaAdToUnified);
+
+    // Enrich catalog ads with their top products (parallel, capped to avoid
+    // hitting Meta rate limits on accounts with many catalog ads).
+    const catalogAds = unifiedAds.filter(
+      (ad) => ad.creativeType === "catalog" && ad.productSetId
+    );
+    // Cap initial eager fetches at 5 (was 10) to keep p95 dashboard loads
+    // snappy. Catalog ads beyond this fall back to the smart placeholder; the
+    // detail modal can fetch on-demand later if we add that path.
+    const catalogAdsToFetch = catalogAds.slice(0, 5);
+
+    const productResults = await Promise.all(
+      catalogAdsToFetch.map(async (ad) => {
+        if (!ad.productSetId) return { adId: ad.id, products: [] };
+        try {
+          const products = await getCatalogTopProducts(
+            this.accessToken,
+            ad.productSetId,
+            4
+          );
+          return { adId: ad.id, products };
+        } catch (error) {
+          console.warn(
+            `[MetaAdapter] Failed to fetch products for ad ${ad.id}`,
+            error
+          );
+          return { adId: ad.id, products: [] };
+        }
+      })
+    );
+
+    const productsByAdId = new Map(
+      productResults.map((r) => [r.adId, r.products])
+    );
+
+    return unifiedAds.map((ad) => {
+      if (ad.creativeType === "catalog" && productsByAdId.has(ad.id)) {
+        const products = productsByAdId.get(ad.id) ?? [];
+        return {
+          ...ad,
+          catalogProducts: products.map((p) => ({
+            id: p.id,
+            name: p.name,
+            imageUrl: p.image_url,
+          })),
+        };
+      }
+      return ad;
+    });
   }
 
   async getAccount(): Promise<UnifiedAccount> {

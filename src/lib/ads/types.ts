@@ -62,6 +62,63 @@ export interface UnifiedInsight {
 }
 
 // =================================================================
+// Unified Ad (with creative + performance, for the Ad Creatives view)
+// =================================================================
+export interface UnifiedAd {
+  // Identity
+  id: string;
+  name: string;
+  // Status: every non-ACTIVE / non-DELETED state from Meta (PAUSED, ARCHIVED,
+  // CAMPAIGN_PAUSED, ADSET_PAUSED, IN_PROCESS, WITH_ISSUES, …) is normalized
+  // to PAUSED — users only care about whether the ad is currently running.
+  status: "ACTIVE" | "PAUSED" | "DELETED";
+
+  // Hierarchy
+  campaignId?: string;
+  campaignName?: string;
+  adsetId?: string;
+  adsetName?: string;
+
+  // Creative
+  creativeId?: string;
+  imageUrl?: string; // Image ads
+  thumbnailUrl?: string; // Video ad preview
+  videoId?: string; // Meta video ID
+  creativeType: "image" | "video" | "carousel" | "catalog" | "unknown";
+
+  // Creative content
+  title?: string;
+  body?: string;
+  callToAction?: string;
+
+  // Catalog-specific
+  productSetId?: string;
+  catalogProducts?: Array<{
+    id: string;
+    name?: string;
+    imageUrl?: string;
+  }>;
+
+  // Carousel images (when creativeType === 'carousel')
+  carouselImages?: string[];
+
+  // Always-available shareable link to the ad preview on Facebook
+  previewLink?: string;
+
+  // Performance
+  spend: number;
+  revenue: number;
+  roas: number;
+  purchases: number;
+  impressions: number;
+  clicks: number;
+  ctr: number;
+  cpc: number;
+
+  provider: AdProvider;
+}
+
+// =================================================================
 // Unified Account Info
 // =================================================================
 export interface UnifiedAccount {
@@ -249,4 +306,7 @@ export interface AdProviderAdapter {
 
   // Get account information
   getAccount(): Promise<UnifiedAccount>;
+
+  // Get ads with creative + performance for a date range
+  getAds(range: DateRangeInput): Promise<UnifiedAd[]>;
 }

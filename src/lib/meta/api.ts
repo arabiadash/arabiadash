@@ -1,4 +1,6 @@
 import { META_API_VERSION, type MetaAdAccount } from "./oauth";
+import { getRevenue, getPurchaseCount } from "./metrics";
+import type { UnifiedAd } from "@/lib/ads/types";
 
 interface AdAccountsResponse {
   data: MetaAdAccount[];
@@ -63,6 +65,68 @@ export interface MetaCampaign {
   stop_time?: string;
   created_time: string;
   updated_time: string;
+}
+
+export interface MetaCarouselCard {
+  image_url?: string;
+  image_hash?: string;
+  link?: string;
+  name?: string;
+  description?: string;
+}
+
+export interface MetaAdCreative {
+  id: string;
+  name?: string;
+  image_url?: string;
+  thumbnail_url?: string;
+  video_id?: string;
+  object_type?: string;
+  body?: string;
+  title?: string;
+  call_to_action_type?: string;
+  product_set_id?: string;
+  object_story_spec?: {
+    link_data?: {
+      child_attachments?: MetaCarouselCard[];
+      picture?: string;
+      image_hash?: string;
+      message?: string;
+      name?: string;
+      description?: string;
+    };
+    video_data?: {
+      image_url?: string;
+      video_id?: string;
+      title?: string;
+      message?: string;
+    };
+  };
+  asset_feed_spec?: {
+    images?: Array<{ url?: string; hash?: string }>;
+    videos?: Array<{ video_id?: string; thumbnail_url?: string }>;
+  };
+}
+
+export interface MetaCatalogProduct {
+  id: string;
+  name?: string;
+  image_url?: string;
+  retailer_id?: string;
+}
+
+export interface MetaAd {
+  id: string;
+  name: string;
+  status: string;
+  effective_status?: string;
+  campaign_id?: string;
+  adset_id?: string;
+  preview_shareable_link?: string;
+  creative?: MetaAdCreative;
+  insights?: {
+    data: MetaInsight[];
+  };
 }
 
 export interface MetaInsight {
@@ -307,4 +371,313 @@ export async function getCampaignInsights(
     timeIncrement,
     "campaign"
   );
+}
+
+const AD_FIELDS = [
+  "id",
+  "name",
+  "status",
+  "effective_status",
+  "campaign_id",
+  "adset_id",
+  "preview_shareable_link",
+  "creative{id,name,image_url,thumbnail_url,video_id,object_type,body,title,call_to_action_type,product_set_id," +
+    "object_story_spec{link_data{child_attachments{image_url,video_id,name,link,description},picture,image_hash,message,name,description}," +
+    "video_data{image_url,video_id,title,message}}," +
+    "asset_feed_spec{images{url,hash,permalink_url},videos{video_id,thumbnail_url,url_tags},bodies{text},titles{text},descriptions{text},call_to_action_types,link_urls{website_url}}}",
+  "insights{spend,impressions,clicks,ctr,cpc,actions,action_values,reach}",
+].join(",");
+
+// Without explicit filtering, Meta's /ads endpoint silently excludes archived
+// statuses, capping results to ACTIVE+PAUSED only. Force all statuses by
+// including every effective_status value the platform can return.
+const ALL_AD_STATUSES = [
+  "ACTIVE",
+  "PAUSED",
+  "DELETED",
+  "PENDING_REVIEW",
+  "DISAPPROVED",
+  "PREAPPROVED",
+  "PENDING_BILLING_INFO",
+  "CAMPAIGN_PAUSED",
+  "ARCHIVED",
+  "ADSET_PAUSED",
+  "IN_PROCESS",
+  "WITH_ISSUES",
+];
+
+interface AdsResponse {
+  data: MetaAd[];
+  paging?: {
+    cursors: { before: string; after: string };
+    next?: string;
+  };
+}
+
+/**
+ * Fetch ads with creative info + nested insights for the period.
+ * No time_increment → one aggregate insight row per ad.
+ * Follows paging.next to fetch all pages (up to MAX_PAGES safety cap).
+ */
+export async function getAds(
+  accessToken: string,
+  accountId: string,
+  range: DateRangeInput = "30d"
+): Promise<MetaAd[]> {
+  const baseUrl = `https://graph.facebook.com/${META_API_VERSION}/${accountId}/ads`;
+  const dates = resolveRangeToDates(range);
+
+  const params = new URLSearchParams({
+    fields: AD_FIELDS,
+    access_token: accessToken,
+    limit: "100",
+    filtering: JSON.stringify([
+      {
+        field: "ad.effective_status",
+        operator: "IN",
+        value: ALL_AD_STATUSES,
+      },
+    ]),
+  });
+
+  if (dates) {
+    params.set(
+      "time_range",
+      JSON.stringify({ since: dates.since, until: dates.until })
+    );
+  } else {
+    params.set("date_preset", "maximum");
+  }
+
+  const allAds: MetaAd[] = [];
+  let nextUrl: string | null = `${baseUrl}?${params.toString()}`;
+  let pageCount = 0;
+  const MAX_PAGES = 20;
+
+  while (nextUrl && pageCount < MAX_PAGES) {
+    const response: Response = await fetch(nextUrl);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `Failed to fetch ads: ${response.status} ${errorText}`
+      );
+    }
+    const result = (await response.json()) as AdsResponse;
+    if (Array.isArray(result.data)) {
+      allAds.push(...result.data);
+    }
+    nextUrl = result.paging?.next ?? null;
+    pageCount++;
+  }
+
+  return allAds;
+}
+
+/**
+ * Fetch the video source URL for playback + a permalink to the video on
+ * Facebook (used as a fallback when source is not available).
+ * Meta returns expiring CDN links so we don't cache, resolve on-demand instead.
+ */
+export async function getVideoSource(
+  accessToken: string,
+  videoId: string
+): Promise<{ source: string | null; permalinkUrl: string | null }> {
+  try {
+    const url = `https://graph.facebook.com/${META_API_VERSION}/${videoId}`;
+    const params = new URLSearchParams({
+      fields: "source,permalink_url",
+      access_token: accessToken,
+    });
+
+    const response = await fetch(`${url}?${params.toString()}`);
+    if (!response.ok) {
+      console.warn(`[getVideoSource] Failed: ${response.status}`);
+      return { source: null, permalinkUrl: null };
+    }
+
+    const result = (await response.json()) as {
+      source?: string;
+      permalink_url?: string;
+    };
+    return {
+      source: result.source ?? null,
+      permalinkUrl: result.permalink_url ?? null,
+    };
+  } catch (error) {
+    console.warn("[getVideoSource] Error:", error);
+    return { source: null, permalinkUrl: null };
+  }
+}
+
+/**
+ * Fetch top products of a catalog product set. Used to enrich catalog ads
+ * with preview thumbnails. Returns empty array on failure (e.g. missing perms).
+ */
+export async function getCatalogTopProducts(
+  accessToken: string,
+  productSetId: string,
+  limit: number = 4
+): Promise<MetaCatalogProduct[]> {
+  try {
+    const productsUrl = `https://graph.facebook.com/${META_API_VERSION}/${productSetId}/products`;
+    const productsParams = new URLSearchParams({
+      fields: "id,name,image_url,retailer_id",
+      access_token: accessToken,
+      limit: String(limit),
+    });
+
+    const response = await fetch(`${productsUrl}?${productsParams.toString()}`);
+    if (!response.ok) {
+      console.warn(
+        `[getCatalogTopProducts] Failed for product_set ${productSetId}: ${response.status}`
+      );
+      return [];
+    }
+
+    const result = (await response.json()) as {
+      data?: Array<{
+        id: string;
+        name?: string;
+        image_url?: string;
+        retailer_id?: string;
+      }>;
+    };
+
+    if (!Array.isArray(result.data)) return [];
+    return result.data.slice(0, limit).map((p) => ({
+      id: p.id,
+      name: p.name,
+      image_url: p.image_url,
+      retailer_id: p.retailer_id,
+    }));
+  } catch (error) {
+    console.warn("[getCatalogTopProducts] Error:", error);
+    return [];
+  }
+}
+
+/**
+ * Extract carousel image URLs from creative. Tries object_story_spec first
+ * (legacy ads), then asset_feed_spec (Advantage+ ads).
+ */
+function extractCarouselImages(
+  creative: MetaAdCreative | undefined
+): string[] {
+  if (!creative) return [];
+
+  const images: string[] = [];
+
+  // Path 1: legacy ads (object_story_spec.link_data.child_attachments)
+  const childAttachments =
+    creative.object_story_spec?.link_data?.child_attachments;
+  if (Array.isArray(childAttachments)) {
+    for (const card of childAttachments) {
+      if (card.image_url && !images.includes(card.image_url)) {
+        images.push(card.image_url);
+      }
+    }
+  }
+
+  // Path 2: Advantage+ ads (asset_feed_spec.images) — merge unique only
+  if (Array.isArray(creative.asset_feed_spec?.images)) {
+    for (const img of creative.asset_feed_spec!.images!) {
+      if (img.url && !images.includes(img.url)) {
+        images.push(img.url);
+      }
+    }
+  }
+
+  return images;
+}
+
+/**
+ * Convert a raw MetaAd to the unified shape used across the app.
+ * Reuses metric extractors from ./metrics for action_type handling consistency.
+ */
+export function metaAdToUnified(ad: MetaAd): UnifiedAd {
+  const insight = ad.insights?.data?.[0];
+
+  const spend = insight ? parseFloat(insight.spend || "0") : 0;
+  const revenue = insight ? getRevenue(insight) : 0;
+  const purchases = insight ? getPurchaseCount(insight) : 0;
+  const impressions = insight ? parseInt(insight.impressions || "0") : 0;
+  const clicks = insight ? parseInt(insight.clicks || "0") : 0;
+  const ctr = insight ? parseFloat(insight.ctr || "0") : 0;
+  const cpc = insight ? parseFloat(insight.cpc || "0") : 0;
+
+  // Detect creative type. Order matters:
+  //   1. catalog: ONLY when product_set_id is set (SHARE alone is too broad)
+  //   2. carousel: ≥2 carousel images extracted from spec
+  //   3. video / image / unknown
+  const carouselImages = extractCarouselImages(ad.creative);
+
+  // Video detection across multiple paths (legacy creative + Advantage+ specs)
+  const extractedVideoId =
+    ad.creative?.video_id ||
+    ad.creative?.object_story_spec?.video_data?.video_id ||
+    ad.creative?.asset_feed_spec?.videos?.[0]?.video_id;
+
+  let creativeType: UnifiedAd["creativeType"] = "unknown";
+  if (ad.creative?.product_set_id) {
+    creativeType = "catalog";
+  } else if (carouselImages.length > 1) {
+    creativeType = "carousel";
+  } else if (extractedVideoId) {
+    creativeType = "video";
+  } else if (ad.creative?.image_url) {
+    creativeType = "image";
+  }
+
+  // TEMP DEBUG — remove after diagnosing Flexible Ads multi-image issue
+  console.log("[Meta Adapter Detection]", {
+    adId: ad.id,
+    adName: ad.name,
+    hasAssetFeedSpec: !!ad.creative?.asset_feed_spec,
+    assetFeedImagesCount: ad.creative?.asset_feed_spec?.images?.length ?? 0,
+    hasChildAttachments:
+      (ad.creative?.object_story_spec?.link_data?.child_attachments?.length ??
+        0) >= 2,
+    finalType: creativeType,
+  });
+
+  // Normalize status: ACTIVE / DELETED kept as-is; everything else
+  // (PAUSED, ARCHIVED, CAMPAIGN_PAUSED, ADSET_PAUSED, IN_PROCESS, WITH_ISSUES,
+  //  PENDING_REVIEW, DISAPPROVED, …) collapses to PAUSED.
+  const rawStatus = ad.effective_status || ad.status;
+  let status: UnifiedAd["status"];
+  if (rawStatus === "ACTIVE") {
+    status = "ACTIVE";
+  } else if (rawStatus === "DELETED") {
+    status = "DELETED";
+  } else {
+    status = "PAUSED";
+  }
+
+  return {
+    id: ad.id,
+    name: ad.name,
+    status,
+    campaignId: ad.campaign_id,
+    adsetId: ad.adset_id,
+    creativeId: ad.creative?.id,
+    imageUrl: ad.creative?.image_url,
+    thumbnailUrl: ad.creative?.thumbnail_url,
+    videoId: extractedVideoId,
+    previewLink: ad.preview_shareable_link,
+    creativeType,
+    title: ad.creative?.title,
+    body: ad.creative?.body,
+    callToAction: ad.creative?.call_to_action_type,
+    productSetId: ad.creative?.product_set_id,
+    carouselImages: carouselImages.length > 0 ? carouselImages : undefined,
+    spend,
+    revenue,
+    roas: spend > 0 ? revenue / spend : 0,
+    purchases,
+    impressions,
+    clicks,
+    ctr,
+    cpc,
+    provider: "meta",
+  };
 }

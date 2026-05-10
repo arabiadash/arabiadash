@@ -37,6 +37,7 @@ import {
   useInsights,
   dateRangeValueToOptions,
 } from "@/lib/hooks/use-insights";
+import { useAds } from "@/lib/hooks/use-ads";
 import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
 import {
   computePreviousPeriod,
@@ -58,6 +59,7 @@ import {
   type DateRangeValue,
   type UnifiedCampaign,
   type UnifiedInsight,
+  type UnifiedAd,
 } from "@/lib/ads/types";
 import {
   AreaChart,
@@ -190,6 +192,826 @@ function SortableHeader({
   );
 }
 
+const STATUS_COLORS: Record<string, string> = {
+  ACTIVE: "bg-green-100 text-green-700",
+  PAUSED: "bg-yellow-100 text-yellow-700",
+  DELETED: "bg-red-100 text-red-700",
+  ARCHIVED: "bg-gray-100 text-gray-700",
+};
+
+const STATUS_LABELS_AR: Record<string, string> = {
+  ACTIVE: "نشط",
+  PAUSED: "موقوف",
+  DELETED: "محذوف",
+  ARCHIVED: "مؤرشف",
+};
+
+const CTA_LABELS_AR: Record<string, string> = {
+  SHOP_NOW: "تسوّق الآن",
+  LEARN_MORE: "تعلّم المزيد",
+  SIGN_UP: "سجّل الآن",
+  BOOK_TRAVEL: "احجز الآن",
+  DOWNLOAD: "تنزيل",
+  GET_OFFER: "احصل على العرض",
+  SUBSCRIBE: "اشترك",
+  CONTACT_US: "تواصل معنا",
+};
+
+function CarouselImage({ images }: { images: string[] }) {
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  return (
+    <div className="w-full h-full relative">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={images[currentIndex]}
+        alt={`Slide ${currentIndex + 1}`}
+        className="w-full h-full object-cover transition-opacity duration-300"
+        loading="lazy"
+        onError={(e) => {
+          (e.target as HTMLImageElement).style.display = "none";
+        }}
+      />
+
+      <div className="absolute top-2 left-2">
+        <span className="px-2 py-0.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded text-[10px] font-semibold flex items-center gap-1">
+          <svg
+            className="w-3 h-3"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="2"
+              d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+            />
+          </svg>
+          {images.length} صور
+        </span>
+      </div>
+
+      <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-1">
+        {images.map((_, idx) => (
+          <button
+            key={idx}
+            onClick={(e) => {
+              e.stopPropagation();
+              setCurrentIndex(idx);
+            }}
+            className={`w-1.5 h-1.5 rounded-full transition ${
+              idx === currentIndex ? "bg-white scale-125" : "bg-white/50"
+            }`}
+            aria-label={`Slide ${idx + 1}`}
+          />
+        ))}
+      </div>
+
+      {images.length > 1 && (
+        <>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setCurrentIndex(
+                (prev) => (prev - 1 + images.length) % images.length
+              );
+            }}
+            className="absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-white/80 hover:bg-white text-gray-800 opacity-0 group-hover:opacity-100 transition flex items-center justify-center"
+            aria-label="Previous"
+          >
+            <svg
+              className="w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M9 5l7 7-7 7"
+              />
+            </svg>
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setCurrentIndex((prev) => (prev + 1) % images.length);
+            }}
+            className="absolute left-2 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full bg-white/80 hover:bg-white text-gray-800 opacity-0 group-hover:opacity-100 transition flex items-center justify-center"
+            aria-label="Next"
+          >
+            <svg
+              className="w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M15 19l-7-7 7-7"
+              />
+            </svg>
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+interface CreativeCardProps {
+  ad: UnifiedAd;
+  accountCurrency: Currency;
+  displayCurrency: Currency;
+  onClick?: () => void;
+}
+
+function CreativeCard({
+  ad,
+  accountCurrency,
+  displayCurrency,
+  onClick,
+}: CreativeCardProps) {
+  const imageUrl = ad.imageUrl || ad.thumbnailUrl;
+  const isVideo = ad.creativeType === "video";
+  const isCatalog = ad.creativeType === "catalog";
+  const isCarousel = ad.creativeType === "carousel";
+  const hasCatalogProducts =
+    isCatalog &&
+    Array.isArray(ad.catalogProducts) &&
+    ad.catalogProducts.length > 0;
+  const hasCarouselImages =
+    isCarousel &&
+    Array.isArray(ad.carouselImages) &&
+    ad.carouselImages.length > 1;
+
+  return (
+    <div
+      className="group bg-white border border-gray-200 rounded-lg overflow-hidden hover:shadow-md transition cursor-pointer"
+      onClick={onClick}
+    >
+      <div className="aspect-square relative bg-gray-100 overflow-hidden">
+        {hasCarouselImages ? (
+          <CarouselImage images={ad.carouselImages!} />
+        ) : hasCatalogProducts ? (
+          <div className="w-full h-full grid grid-cols-2 grid-rows-2 gap-px bg-gray-200">
+            {ad.catalogProducts!.slice(0, 4).map((product) => (
+              <div key={product.id} className="bg-gray-100 overflow-hidden">
+                {product.imageUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={product.imageUrl}
+                    alt={product.name || "Product"}
+                    className="w-full h-full object-cover"
+                    loading="lazy"
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).style.display = "none";
+                    }}
+                  />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-gray-300 text-xs">
+                    🛍️
+                  </div>
+                )}
+              </div>
+            ))}
+            {Array.from({
+              length: Math.max(0, 4 - ad.catalogProducts!.length),
+            }).map((_, i) => (
+              <div
+                key={`empty-${i}`}
+                className="bg-gradient-to-br from-indigo-50 to-purple-50 flex items-center justify-center text-indigo-300 text-xl"
+              >
+                🛍️
+              </div>
+            ))}
+          </div>
+        ) : isCatalog ? (
+          <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-indigo-50 to-purple-50 text-indigo-600 p-4">
+            <svg
+              className="w-12 h-12 mb-2"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="1.5"
+                d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"
+              />
+            </svg>
+            <p className="text-xs font-semibold">إعلان كتالوج</p>
+            <p className="text-[10px] text-indigo-400 mt-0.5 text-center">
+              منتجات ديناميكية
+            </p>
+          </div>
+        ) : imageUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={imageUrl}
+            alt={ad.name}
+            className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+            loading="lazy"
+            onError={(e) => {
+              (e.target as HTMLImageElement).style.display = "none";
+            }}
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">
+            بدون صورة
+          </div>
+        )}
+
+        {isVideo && !isCatalog && (
+          <>
+            <div className="absolute top-2 left-2">
+              <span className="px-2 py-0.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded text-[10px] font-semibold flex items-center gap-1">
+                <svg
+                  className="w-3 h-3"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                    d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"
+                  />
+                </svg>
+                فيديو
+              </span>
+            </div>
+            <div className="absolute inset-0 flex items-center justify-center bg-black/20 pointer-events-none">
+              <div className="w-12 h-12 rounded-full bg-white/90 flex items-center justify-center shadow-lg">
+                <svg
+                  className="w-5 h-5 text-gray-800 mr-0.5"
+                  fill="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+              </div>
+            </div>
+          </>
+        )}
+
+        {isCatalog && (
+          <div className="absolute top-2 left-2">
+            <span className="px-2 py-0.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded text-[10px] font-semibold flex items-center gap-1">
+              <svg
+                className="w-3 h-3"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                  d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"
+                />
+              </svg>
+              كتالوج
+            </span>
+          </div>
+        )}
+
+        <div className="absolute top-2 right-2">
+          <span
+            className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+              STATUS_COLORS[ad.status] ?? STATUS_COLORS.ARCHIVED
+            }`}
+          >
+            {STATUS_LABELS_AR[ad.status] ?? ad.status}
+          </span>
+        </div>
+      </div>
+
+      <div className="p-3">
+        <h4
+          className="font-semibold text-gray-900 text-xs line-clamp-2 mb-2 min-h-[2rem]"
+          title={ad.name}
+        >
+          {ad.name}
+        </h4>
+
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <div>
+            <p className="text-gray-500 text-[10px]">ROAS</p>
+            <p className={`font-bold ${getROASColor(ad.roas)}`}>
+              {ad.roas.toFixed(2)}x
+            </p>
+          </div>
+          <div className="text-left">
+            <p className="text-gray-500 text-[10px]">المبيعات</p>
+            <p className="font-bold text-gray-900">{ad.purchases}</p>
+          </div>
+          <div className="col-span-2">
+            <p className="text-gray-500 text-[10px]">الإنفاق</p>
+            <p className="font-bold text-gray-900">
+              {formatAndConvert(ad.spend, accountCurrency, displayCurrency)}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface CarouselDisplayProps {
+  images: string[];
+  currentIndex: number;
+  setCurrentIndex: (idx: number) => void;
+}
+
+/**
+ * Slideshow with arrows + thumbnail strip. Used by AdDetailModal for both
+ * classic carousels and Meta's Flexible Ads (asset_feed_spec.images).
+ */
+function CarouselDisplay({
+  images,
+  currentIndex,
+  setCurrentIndex,
+}: CarouselDisplayProps) {
+  return (
+    <div className="relative">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={images[currentIndex]}
+        alt={`Image ${currentIndex + 1}`}
+        className="w-full max-h-96 object-contain bg-gray-50"
+      />
+
+      <div className="absolute top-2 right-2 bg-black/60 text-white text-xs px-2 py-1 rounded">
+        {currentIndex + 1} / {images.length}
+      </div>
+
+      {images.length > 1 && (
+        <>
+          <button
+            onClick={() =>
+              setCurrentIndex(
+                (currentIndex - 1 + images.length) % images.length
+              )
+            }
+            className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-white/90 hover:bg-white text-gray-800 flex items-center justify-center shadow-lg"
+            aria-label="Previous"
+          >
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M9 5l7 7-7 7"
+              />
+            </svg>
+          </button>
+          <button
+            onClick={() => setCurrentIndex((currentIndex + 1) % images.length)}
+            className="absolute left-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-white/90 hover:bg-white text-gray-800 flex items-center justify-center shadow-lg"
+            aria-label="Next"
+          >
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                d="M15 19l-7-7 7-7"
+              />
+            </svg>
+          </button>
+        </>
+      )}
+
+      <div className="flex gap-1 mt-2 overflow-x-auto p-2">
+        {images.map((img, idx) => (
+          <button
+            key={idx}
+            onClick={() => setCurrentIndex(idx)}
+            className={`flex-shrink-0 w-12 h-12 rounded overflow-hidden border-2 transition ${
+              idx === currentIndex
+                ? "border-indigo-600"
+                : "border-transparent opacity-60 hover:opacity-100"
+            }`}
+            aria-label={`Go to image ${idx + 1}`}
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={img}
+              alt={`Thumbnail ${idx + 1}`}
+              className="w-full h-full object-cover"
+            />
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface AdDetailModalProps {
+  ad: UnifiedAd;
+  accountCurrency: Currency;
+  displayCurrency: Currency;
+  onClose: () => void;
+}
+
+function AdDetailModal({
+  ad,
+  accountCurrency,
+  displayCurrency,
+  onClose,
+}: AdDetailModalProps) {
+  const imageUrl = ad.imageUrl || ad.thumbnailUrl;
+  const isCatalog = ad.creativeType === "catalog";
+  const isVideo = ad.creativeType === "video";
+  const hasCatalogProducts =
+    isCatalog &&
+    Array.isArray(ad.catalogProducts) &&
+    ad.catalogProducts.length > 0;
+  // Show multi-image gallery whenever 2+ images exist — works for classic
+  // carousels AND Meta's Flexible Ads (asset_feed_spec.images).
+  const hasCarouselImages = (ad.carouselImages?.length ?? 0) >= 2;
+
+  // TEMP DEBUG — remove after diagnosing why multi-image ads aren't displaying
+  console.log("[AdDetailModal]", {
+    adName: ad.name,
+    creativeType: ad.creativeType,
+    carouselImagesCount: ad.carouselImages?.length ?? 0,
+    carouselImages: ad.carouselImages,
+    hasCarouselImages,
+  });
+
+  const [carouselIndex, setCarouselIndex] = useState(0);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between p-4 border-b border-gray-100 sticky top-0 bg-white">
+          <h3 className="font-bold text-gray-900 text-lg">تفاصيل الإعلان</h3>
+          <button
+            onClick={onClose}
+            className="p-2 hover:bg-gray-100 rounded-lg transition"
+          >
+            <X className="w-5 h-5 text-gray-500" />
+          </button>
+        </div>
+
+        <div className="p-4 sm:p-6 space-y-4">
+          <div className="rounded-lg overflow-hidden bg-gray-100">
+            {isVideo ? (
+              ad.thumbnailUrl ? (
+                <div className="relative">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={ad.thumbnailUrl}
+                    alt={ad.name}
+                    className="w-full max-h-96 object-contain bg-gray-50"
+                  />
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/30 pointer-events-none">
+                    <div className="w-16 h-16 rounded-full bg-white/90 flex items-center justify-center shadow-lg">
+                      <svg
+                        className="w-7 h-7 text-gray-800 mr-1"
+                        fill="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path d="M8 5v14l11-7z" />
+                      </svg>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="aspect-video flex items-center justify-center text-gray-400 bg-gray-50">
+                  لا توجد معاينة للفيديو
+                </div>
+              )
+            ) : hasCarouselImages ? (
+              <CarouselDisplay
+                images={ad.carouselImages!}
+                currentIndex={carouselIndex}
+                setCurrentIndex={setCarouselIndex}
+              />
+            ) : hasCatalogProducts ? (
+              <div className="grid grid-cols-2 gap-1 aspect-square">
+                {ad.catalogProducts!.slice(0, 4).map((product) => (
+                  <div key={product.id} className="bg-white overflow-hidden">
+                    {product.imageUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={product.imageUrl}
+                        alt={product.name || "Product"}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-gray-300">
+                        🛍️
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : imageUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={imageUrl}
+                alt={ad.name}
+                className="w-full max-h-96 object-contain bg-gray-50"
+              />
+            ) : (
+              <div className="aspect-video flex items-center justify-center text-gray-400 bg-gray-50">
+                لا توجد صورة
+              </div>
+            )}
+          </div>
+
+          <div>
+            <p className="text-xs text-gray-500 mb-1">اسم الإعلان</p>
+            <h4 className="font-semibold text-gray-900">{ad.name}</h4>
+          </div>
+
+          {ad.title && (
+            <div>
+              <p className="text-xs text-gray-500 mb-1">عنوان الإعلان</p>
+              <p className="text-sm font-medium text-gray-900">{ad.title}</p>
+            </div>
+          )}
+
+          {ad.body && (
+            <div>
+              <p className="text-xs text-gray-500 mb-1">نص الإعلان</p>
+              <p className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
+                {ad.body}
+              </p>
+            </div>
+          )}
+
+          {ad.callToAction && (
+            <div>
+              <p className="text-xs text-gray-500 mb-1">زر الإجراء</p>
+              <span className="inline-block px-3 py-1.5 bg-indigo-100 text-indigo-700 rounded-lg text-xs font-semibold">
+                {CTA_LABELS_AR[ad.callToAction] ?? ad.callToAction}
+              </span>
+            </div>
+          )}
+
+          {hasCatalogProducts && (
+            <div>
+              <p className="text-xs text-gray-500 mb-2">
+                أفضل المنتجات في الكتالوج
+              </p>
+              <div className="space-y-2">
+                {ad.catalogProducts!.map((product) => (
+                  <div
+                    key={product.id}
+                    className="flex items-center gap-3 p-2 bg-gray-50 rounded-lg"
+                  >
+                    {product.imageUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={product.imageUrl}
+                        alt={product.name || ""}
+                        className="w-12 h-12 rounded object-cover"
+                      />
+                    ) : (
+                      <div className="w-12 h-12 rounded bg-gray-200 flex items-center justify-center">
+                        🛍️
+                      </div>
+                    )}
+                    <p className="text-sm text-gray-700 flex-1 truncate">
+                      {product.name || product.id}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="border-t border-gray-100 pt-4">
+            <p className="text-xs text-gray-500 mb-3">
+              الأداء في الفترة المختارة
+            </p>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="bg-gray-50 rounded-lg p-3">
+                <p className="text-xs text-gray-500">ROAS</p>
+                <p
+                  className={`text-lg font-bold ${getROASColor(ad.roas)}`}
+                >
+                  {ad.roas.toFixed(2)}x
+                </p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <p className="text-xs text-gray-500">الإنفاق</p>
+                <p className="text-lg font-bold text-gray-900">
+                  {formatAndConvert(ad.spend, accountCurrency, displayCurrency)}
+                </p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <p className="text-xs text-gray-500">الإيرادات</p>
+                <p className="text-lg font-bold text-green-600">
+                  {formatAndConvert(
+                    ad.revenue,
+                    accountCurrency,
+                    displayCurrency
+                  )}
+                </p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <p className="text-xs text-gray-500">المبيعات</p>
+                <p className="text-lg font-bold text-gray-900">
+                  {ad.purchases}
+                </p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <p className="text-xs text-gray-500">CTR</p>
+                <p className="text-lg font-bold text-gray-900">
+                  {ad.ctr.toFixed(2)}%
+                </p>
+              </div>
+              <div className="bg-gray-50 rounded-lg p-3">
+                <p className="text-xs text-gray-500">CPC</p>
+                <p className="text-lg font-bold text-gray-900">
+                  {formatAndConvert(ad.cpc, accountCurrency, displayCurrency)}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Facebook preview link — always available when Meta exposes it */}
+          {ad.previewLink && (
+            <div className="border-t border-gray-100 pt-4">
+              <a
+                href={ad.previewLink}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-semibold rounded-lg hover:opacity-90 transition"
+              >
+                <svg
+                  className="w-4 h-4"
+                  fill="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path d="M12 2C6.477 2 2 6.477 2 12c0 5.013 3.693 9.153 8.505 9.876V14.65H8.031v-2.629h2.474v-1.749c0-2.896 1.411-4.167 3.818-4.167 1.153 0 1.762.085 2.051.124v2.294h-1.642c-1.022 0-1.379.969-1.379 2.061v1.437h2.995l-.406 2.629h-2.588v7.247C18.235 21.236 22 17.062 22 12c0-5.523-4.477-10-10-10z" />
+                </svg>
+                افتح الإعلان في فيسبوك
+              </a>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface CreativesGridProps {
+  ads: UnifiedAd[];
+  loading: boolean;
+  accountCurrency: Currency;
+  displayCurrency: Currency;
+}
+
+type CreativeStatusFilter = "all" | "ACTIVE" | "PAUSED";
+type CreativeSortKey = "roas" | "spend" | "purchases";
+
+function CreativesGrid({
+  ads,
+  loading,
+  accountCurrency,
+  displayCurrency,
+}: CreativesGridProps) {
+  const [statusFilter, setStatusFilter] =
+    useState<CreativeStatusFilter>("all");
+  const [sortBy, setSortBy] = useState<CreativeSortKey>("roas");
+  const [selectedAd, setSelectedAd] = useState<UnifiedAd | null>(null);
+
+  const filteredAds = useMemo(() => {
+    let result = [...ads];
+    if (statusFilter !== "all") {
+      result = result.filter((ad) => ad.status === statusFilter);
+    }
+    result.sort((a, b) => {
+      const aVal = (a[sortBy] as number) ?? 0;
+      const bVal = (b[sortBy] as number) ?? 0;
+      return bVal - aVal;
+    });
+    return result;
+  }, [ads, statusFilter, sortBy]);
+
+  if (loading) {
+    return (
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+        {Array.from({ length: 8 }).map((_, i) => (
+          <div
+            key={i}
+            className="bg-gray-50 rounded-lg aspect-square animate-pulse"
+          />
+        ))}
+      </div>
+    );
+  }
+
+  const filterOptions: Array<{ value: CreativeStatusFilter; label: string }> =
+    [
+      { value: "all", label: "الكل" },
+      { value: "ACTIVE", label: "نشط" },
+      { value: "PAUSED", label: "موقوف" },
+    ];
+
+  return (
+    <>
+      {/* Filters Bar */}
+      <div className="flex flex-col sm:flex-row gap-3 mb-4 pb-4 border-b border-gray-100">
+        <div className="flex items-center gap-1 flex-wrap">
+          {filterOptions.map((opt) => {
+            const count =
+              opt.value === "all"
+                ? ads.length
+                : ads.filter((a) => a.status === opt.value).length;
+            return (
+              <button
+                key={opt.value}
+                onClick={() => setStatusFilter(opt.value)}
+                className={`px-3 py-1.5 text-xs rounded-lg transition ${
+                  statusFilter === opt.value
+                    ? "bg-indigo-600 text-white"
+                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                }`}
+              >
+                {opt.label}
+                {count > 0 && (
+                  <span className="mr-1.5 opacity-75">({count})</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="sm:mr-auto">
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as CreativeSortKey)}
+            className="px-3 py-1.5 border border-gray-200 rounded-lg text-xs bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          >
+            <option value="roas">الأعلى ROAS</option>
+            <option value="spend">الأعلى إنفاق</option>
+            <option value="purchases">الأعلى مبيعات</option>
+          </select>
+        </div>
+      </div>
+
+      {filteredAds.length === 0 ? (
+        <div className="text-center py-12 text-gray-500">
+          <p className="text-sm">
+            {ads.length === 0
+              ? "لا توجد إعلانات في هذه الفترة"
+              : "لا توجد إعلانات مطابقة"}
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+          {filteredAds.map((ad) => (
+            <CreativeCard
+              key={ad.id}
+              ad={ad}
+              accountCurrency={accountCurrency}
+              displayCurrency={displayCurrency}
+              onClick={() => setSelectedAd(ad)}
+            />
+          ))}
+        </div>
+      )}
+
+      {selectedAd && (
+        <AdDetailModal
+          ad={selectedAd}
+          accountCurrency={accountCurrency}
+          displayCurrency={displayCurrency}
+          onClose={() => setSelectedAd(null)}
+        />
+      )}
+    </>
+  );
+}
+
 function StatusBadge({ status }: { status?: string }) {
   if (!status) {
     return (
@@ -234,6 +1056,32 @@ export default function ReportsClient({
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [currentPage, setCurrentPage] = useState(1);
   const [perPage, setPerPage] = useState<10 | 20 | 50>(20);
+
+  // Reports tab (campaigns table vs creatives grid), persisted to localStorage
+  const [activeTab, setActiveTab] = useState<"campaigns" | "creatives">(
+    "campaigns"
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const saved = localStorage.getItem("arabiadash:reportsTab");
+    if (saved === "campaigns" || saved === "creatives") {
+      setActiveTab(saved);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem("arabiadash:reportsTab", activeTab);
+  }, [activeTab]);
+
+  // Ads (for the Creatives tab + tab badge count). Same dateRange as the rest.
+  const { ads, loading: adsLoading } = useAds({ range: dateRange });
+
+  // Show ALL ads in the Creatives tab — the in-tab status filter (الكل / نشط /
+  // موقوف) controls visibility from there. Filtering by spend > 0 here was
+  // hiding paused/archived ads (e.g. 194 → 15 in lifetime range).
+  const activeAds = useMemo(() => ads, [ads]);
 
   // Fetch account currency
   useEffect(() => {
@@ -1084,19 +1932,46 @@ export default function ReportsClient({
               </div>
 
 
-              {/* Campaigns Table */}
-              <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
-                <div className="flex items-center justify-between mb-4 sm:mb-6">
-                  <div>
-                    <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
-                      الحملات الإعلانية
-                    </h3>
-                    <p className="text-xs sm:text-sm text-gray-500">
-                      {summary.campaignsCount} حملة في الفترة المختارة
-                    </p>
+              {/* Reports Tabs (Campaigns + Creatives) */}
+              <div className="bg-white border border-gray-100 rounded-xl overflow-hidden mb-4 sm:mb-6">
+                <div className="border-b border-gray-100 px-4 sm:px-6 pt-4 sm:pt-6">
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setActiveTab("campaigns")}
+                      className={`px-4 py-2.5 text-sm font-medium border-b-2 transition -mb-px ${
+                        activeTab === "campaigns"
+                          ? "border-indigo-600 text-indigo-600"
+                          : "border-transparent text-gray-500 hover:text-gray-700"
+                      }`}
+                    >
+                      الحملات
+                      {insights.length > 0 && (
+                        <span className="mr-2 px-1.5 py-0.5 bg-gray-100 rounded text-xs">
+                          {insights.length}
+                        </span>
+                      )}
+                    </button>
+                    <button
+                      onClick={() => setActiveTab("creatives")}
+                      className={`px-4 py-2.5 text-sm font-medium border-b-2 transition -mb-px ${
+                        activeTab === "creatives"
+                          ? "border-indigo-600 text-indigo-600"
+                          : "border-transparent text-gray-500 hover:text-gray-700"
+                      }`}
+                    >
+                      الإبداعات
+                      {ads.length > 0 && (
+                        <span className="mr-2 px-1.5 py-0.5 bg-gray-100 rounded text-xs">
+                          {ads.length}
+                        </span>
+                      )}
+                    </button>
                   </div>
                 </div>
 
+                <div className="p-4 sm:p-6">
+                  {activeTab === "campaigns" ? (
+                    <>
                 {insightsLoading ? (
                   <div className="space-y-2">
                     {[0, 1, 2, 3, 4].map((i) => (
@@ -1476,6 +2351,16 @@ export default function ReportsClient({
                     )}
                   </>
                 )}
+                    </>
+                  ) : (
+                    <CreativesGrid
+                      ads={activeAds}
+                      loading={adsLoading}
+                      accountCurrency={accountCurrency}
+                      displayCurrency={currency}
+                    />
+                  )}
+                </div>
               </div>
             </>
           )}
