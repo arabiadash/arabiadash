@@ -7,7 +7,7 @@ const STORAGE_KEY = "arabiadash:dateRange";
 
 const DEFAULT_VALUE: DateRangeValue = {
   type: "preset",
-  preset: "30d",
+  preset: "7d",
 };
 
 function isValidDateRangeValue(v: unknown): v is DateRangeValue {
