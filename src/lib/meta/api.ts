@@ -106,15 +106,6 @@ export interface MetaAdCreative {
     images?: Array<{ url?: string; hash?: string }>;
     videos?: Array<{ video_id?: string; thumbnail_url?: string }>;
   };
-  creative_sourcing_spec?: {
-    associated_product_set_id?: string;
-    site_links_spec?: Array<{
-      site_link_title?: string;
-      site_link_url?: string;
-      site_link_image_hash?: string;
-      site_link_image_url?: string;
-    }>;
-  };
 }
 
 export interface MetaCatalogProduct {
@@ -411,8 +402,7 @@ function buildAdFields(
     "creative{id,name,image_url,thumbnail_url,video_id,object_type,body,title,call_to_action_type,product_set_id," +
       "object_story_spec{link_data{child_attachments{image_url,video_id,name,link,description},picture,image_hash,message,name,description}," +
       "video_data{image_url,video_id,title,message}}," +
-      "asset_feed_spec{images{url,hash},videos{video_id,thumbnail_url},bodies{text},titles{text},descriptions{text}}," +
-      "creative_sourcing_spec{associated_product_set_id,site_links_spec{site_link_title,site_link_url,site_link_image_hash,site_link_image_url}}}",
+      "asset_feed_spec{images{url,hash},videos{video_id,thumbnail_url},bodies{text},titles{text},descriptions{text}}}",
     insightsField,
   ].join(",");
 }
@@ -723,18 +713,6 @@ export function metaAdToUnified(ad: MetaAd): UnifiedAd {
     creativeType = "image";
   }
 
-  // Site links: Advantage+ shopping ads carry multiple product links here,
-  // each with its own thumbnail + Arabic title. Surfaced in the detail modal.
-  const siteLinks =
-    ad.creative?.creative_sourcing_spec?.site_links_spec
-      ?.map((sl) => ({
-        title: sl.site_link_title || "",
-        url: sl.site_link_url || "",
-        imageUrl: sl.site_link_image_url || "",
-        imageHash: sl.site_link_image_hash || "",
-      }))
-      .filter((sl) => !!sl.imageUrl) ?? [];
-
   // Normalize status: ACTIVE / DELETED kept as-is; everything else
   // (PAUSED, ARCHIVED, CAMPAIGN_PAUSED, ADSET_PAUSED, IN_PROCESS, WITH_ISSUES,
   //  PENDING_REVIEW, DISAPPROVED, …) collapses to PAUSED.
@@ -766,7 +744,6 @@ export function metaAdToUnified(ad: MetaAd): UnifiedAd {
     productSetId: ad.creative?.product_set_id,
     carouselImages: carouselImages.length > 0 ? carouselImages : undefined,
     carouselImageHashes: pendingImageHashes,
-    siteLinks: siteLinks.length > 0 ? siteLinks : undefined,
     spend,
     revenue,
     roas: spend > 0 ? revenue / spend : 0,

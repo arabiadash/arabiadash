@@ -678,7 +678,6 @@ function AdDetailModal({
   // Show multi-image gallery whenever 2+ images exist — works for classic
   // carousels AND Meta's Flexible Ads (asset_feed_spec.images).
   const hasCarouselImages = (ad.carouselImages?.length ?? 0) >= 2;
-  const hasSiteLinks = (ad.siteLinks?.length ?? 0) > 0;
 
   const [carouselIndex, setCarouselIndex] = useState(0);
 
@@ -767,39 +766,6 @@ function AdDetailModal({
               </div>
             )}
           </div>
-
-          {hasSiteLinks && (
-            <div>
-              <p className="text-xs text-gray-500 mb-2">
-                روابط المنتجات في الإعلان
-              </p>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                {ad.siteLinks!.map((link, idx) => (
-                  <a
-                    key={`${link.imageHash || link.url}-${idx}`}
-                    href={link.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block bg-gray-50 hover:bg-gray-100 rounded-lg overflow-hidden transition border border-gray-100"
-                  >
-                    <div className="aspect-square bg-white">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={link.imageUrl}
-                        alt={link.title || "Product"}
-                        className="w-full h-full object-cover"
-                      />
-                    </div>
-                    {link.title && (
-                      <p className="text-xs text-gray-700 px-2 py-2 truncate">
-                        {link.title}
-                      </p>
-                    )}
-                  </a>
-                ))}
-              </div>
-            </div>
-          )}
 
           <div>
             <p className="text-xs text-gray-500 mb-1">اسم الإعلان</p>

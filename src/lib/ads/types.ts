@@ -106,16 +106,6 @@ export interface UnifiedAd {
   // resolution to URLs via /act_{id}/adimages. Removed after batch resolution.
   carouselImageHashes?: string[];
 
-  // Site links pulled from creative.creative_sourcing_spec.site_links_spec —
-  // Meta uses these for Advantage+ shopping ads to surface multiple product
-  // links inside one ad. Each entry has its own thumbnail + Arabic title.
-  siteLinks?: Array<{
-    title: string;
-    url: string;
-    imageUrl: string;
-    imageHash: string;
-  }>;
-
   // Always-available shareable link to the ad preview on Facebook
   previewLink?: string;
 
