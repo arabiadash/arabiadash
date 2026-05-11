@@ -718,6 +718,8 @@ export default function DashboardClient({
                           stroke="#10b981"
                           fillOpacity={1}
                           fill="url(#colorRevenue)"
+                          dot={{ r: 3, fill: "#10b981", strokeWidth: 0 }}
+                          activeDot={{ r: 5 }}
                         />
                         <Area
                           type="monotone"
@@ -726,6 +728,8 @@ export default function DashboardClient({
                           stroke="#6366f1"
                           fillOpacity={1}
                           fill="url(#colorSpend)"
+                          dot={{ r: 3, fill: "#6366f1", strokeWidth: 0 }}
+                          activeDot={{ r: 5 }}
                         />
                       </AreaChart>
                     </ResponsiveContainer>
@@ -879,6 +883,8 @@ export default function DashboardClient({
                             stroke="#a855f7"
                             fillOpacity={1}
                             fill="url(#colorRoas)"
+                            dot={{ r: 3, fill: "#a855f7", strokeWidth: 0 }}
+                            activeDot={{ r: 5 }}
                           />
                         </AreaChart>
                       </ResponsiveContainer>
