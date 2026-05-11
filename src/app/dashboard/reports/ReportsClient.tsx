@@ -1910,10 +1910,10 @@ export default function ReportsClient({
                         جاري تحميل البيانات...
                       </div>
                     </div>
-                  ) : displayChartData.length < 2 ? (
+                  ) : displayChartData.length === 0 ? (
                     <div className="h-full flex items-center justify-center">
                       <p className="text-gray-500 text-sm">
-                        لا توجد بيانات كافية للرسم البياني
+                        لا توجد بيانات لهذه الفترة
                       </p>
                     </div>
                   ) : (
@@ -1993,6 +1993,8 @@ export default function ReportsClient({
                           stroke="#10b981"
                           fillOpacity={1}
                           fill="url(#colorRev)"
+                          dot={{ r: 3, fill: "#10b981", strokeWidth: 0 }}
+                          activeDot={{ r: 5 }}
                         />
                         <Area
                           type="monotone"
@@ -2001,6 +2003,8 @@ export default function ReportsClient({
                           stroke="#6366f1"
                           fillOpacity={1}
                           fill="url(#colorSpd)"
+                          dot={{ r: 3, fill: "#6366f1", strokeWidth: 0 }}
+                          activeDot={{ r: 5 }}
                         />
                       </AreaChart>
                     </ResponsiveContainer>
