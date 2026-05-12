@@ -915,6 +915,8 @@ interface CreativesGridProps {
 type CreativeStatusFilter = "all" | "ACTIVE" | "PAUSED";
 type CreativeSortKey = "roas" | "spend" | "purchases";
 
+const CREATIVES_PAGE_SIZE = 20;
+
 function CreativesGrid({
   ads,
   loading,
@@ -925,6 +927,7 @@ function CreativesGrid({
     useState<CreativeStatusFilter>("all");
   const [sortBy, setSortBy] = useState<CreativeSortKey>("roas");
   const [selectedAd, setSelectedAd] = useState<UnifiedAd | null>(null);
+  const [visibleCount, setVisibleCount] = useState(CREATIVES_PAGE_SIZE);
 
   const filteredAds = useMemo(() => {
     let result = [...ads];
@@ -938,6 +941,13 @@ function CreativesGrid({
     });
     return result;
   }, [ads, statusFilter, sortBy]);
+
+  // Reset pagination when the filtered list identity changes (status filter,
+  // sort change, or upstream ads refresh). Without this, switching from a
+  // long list to a short one could leave visibleCount > filteredAds.length.
+  useEffect(() => {
+    setVisibleCount(CREATIVES_PAGE_SIZE);
+  }, [filteredAds]);
 
   if (loading) {
     return (
@@ -1011,7 +1021,7 @@ function CreativesGrid({
         </div>
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
-          {filteredAds.map((ad) => (
+          {filteredAds.slice(0, visibleCount).map((ad) => (
             <CreativeCard
               key={ad.id}
               ad={ad}
@@ -1020,6 +1030,24 @@ function CreativesGrid({
               onClick={() => setSelectedAd(ad)}
             />
           ))}
+          {visibleCount < filteredAds.length && (
+            <div className="col-span-full flex flex-wrap justify-center gap-3 mt-6">
+              <button
+                onClick={() =>
+                  setVisibleCount((c) => c + CREATIVES_PAGE_SIZE)
+                }
+                className="px-6 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 text-sm font-medium text-gray-700 transition"
+              >
+                تحميل المزيد ({filteredAds.length - visibleCount} متبقي)
+              </button>
+              <button
+                onClick={() => setVisibleCount(filteredAds.length)}
+                className="px-6 py-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 text-sm font-medium text-gray-500 transition"
+              >
+                تحميل الكل
+              </button>
+            </div>
+          )}
         </div>
       )}
 
