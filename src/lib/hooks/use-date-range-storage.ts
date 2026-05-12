@@ -41,17 +41,23 @@ export function useDateRangeStorage(): [
   DateRangeValue,
   (value: DateRangeValue) => void,
 ] {
-  const [value, setValue] = useState<DateRangeValue>(() => {
-    if (typeof window === "undefined") return DEFAULT_VALUE;
+  // Always start with DEFAULT_VALUE on both server and client to prevent
+  // hydration mismatch (React Error #418). Real value loaded after mount.
+  const [value, setValue] = useState<DateRangeValue>(DEFAULT_VALUE);
+
+  // Hydrate from localStorage after mount (client-only).
+  useEffect(() => {
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
-      if (!stored) return DEFAULT_VALUE;
+      if (!stored) return;
       const parsed = JSON.parse(stored);
-      return isValidDateRangeValue(parsed) ? parsed : DEFAULT_VALUE;
+      if (isValidDateRangeValue(parsed)) {
+        setValue(parsed);
+      }
     } catch {
-      return DEFAULT_VALUE;
+      // Ignore parse errors, keep DEFAULT_VALUE.
     }
-  });
+  }, []);
 
   useEffect(() => {
     try {

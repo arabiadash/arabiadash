@@ -1139,10 +1139,12 @@ export default function ReportsClient({
 
   // Manual refresh button has a 30s cooldown to avoid hammering Meta.
   const [lastRefreshAt, setLastRefreshAt] = useState<number>(0);
-  const [now, setNow] = useState<number>(() => Date.now());
+  // Start with 0 to ensure SSR/client match. Real value set after mount.
+  const [now, setNow] = useState<number>(0);
 
   useEffect(() => {
     // 1Hz tick so the relative-time badge updates without a manual refresh.
+    setNow(Date.now()); // Initial value after mount
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
