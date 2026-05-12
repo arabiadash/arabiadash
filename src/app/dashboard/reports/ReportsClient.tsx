@@ -40,6 +40,7 @@ import {
 } from "@/lib/hooks/use-insights";
 import { useAds } from "@/lib/hooks/use-ads";
 import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
+import { useElementHeight } from "@/lib/hooks/useElementHeight";
 import {
   computePreviousPeriod,
   computeDelta,
@@ -1149,6 +1150,11 @@ export default function ReportsClient({
     return () => window.clearInterval(id);
   }, []);
 
+  // Measure the chart wrapper height so we can pass an explicit pixel value
+  // to ResponsiveContainer. Avoids Recharts' `width(-1)/height(-1)` warning
+  // that fires on the first render before its ResizeObserver settles.
+  const [chartRef, chartHeight] = useElementHeight<HTMLDivElement>();
+
   const REFRESH_COOLDOWN_MS = 30_000;
   const refreshCooldownRemaining = Math.max(
     0,
@@ -1892,7 +1898,7 @@ export default function ReportsClient({
                     </p>
                   </div>
                 </div>
-                <div dir="ltr" className="h-56 sm:h-80">
+                <div ref={chartRef} dir="ltr" className="h-56 sm:h-80">
                   {!chartShouldShowDaily ? (
                     <div className="h-full flex items-center justify-center text-center px-4">
                       <p className="text-sm text-gray-500">
@@ -1913,7 +1919,8 @@ export default function ReportsClient({
                       </p>
                     </div>
                   ) : (
-                    <ResponsiveContainer width="100%" height="100%">
+                    chartHeight > 0 && (
+                    <ResponsiveContainer width="100%" height={chartHeight}>
                       <AreaChart data={displayChartData}>
                         <defs>
                           <linearGradient
@@ -2004,6 +2011,7 @@ export default function ReportsClient({
                         />
                       </AreaChart>
                     </ResponsiveContainer>
+                    )
                   )}
                 </div>
 

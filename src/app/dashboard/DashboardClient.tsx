@@ -37,6 +37,7 @@ import {
 } from "@/lib/hooks/use-insights";
 import { useCurrency } from "@/lib/contexts/currency-context";
 import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
+import { useElementHeight } from "@/lib/hooks/useElementHeight";
 import {
   computePreviousPeriod,
   computeDelta,
@@ -127,6 +128,13 @@ export default function DashboardClient({
   });
   const { currency } = useCurrency();
   const [accountCurrency, setAccountCurrency] = useState<Currency>("USD");
+
+  // Measure each chart's wrapper height so we can pass an explicit pixel
+  // value to ResponsiveContainer. Avoids Recharts' `width(-1)/height(-1)`
+  // warning that fires on the first render before its ResizeObserver settles.
+  const [perfRef, perfHeight] = useElementHeight<HTMLDivElement>();
+  const [platformRef, platformHeight] = useElementHeight<HTMLDivElement>();
+  const [roasRef, roasHeight] = useElementHeight<HTMLDivElement>();
 
   useEffect(() => {
     fetch("/api/ads/account?provider=meta")
@@ -622,7 +630,7 @@ export default function DashboardClient({
                     </p>
                   </div>
                 </div>
-                <div dir="ltr" className="h-56 sm:h-72">
+                <div ref={perfRef} dir="ltr" className="h-56 sm:h-72">
                   {!chartShouldShowDaily ? (
                     <div className="h-full flex items-center justify-center text-center px-4">
                       <p className="text-sm text-gray-500">
@@ -642,7 +650,8 @@ export default function DashboardClient({
                       </p>
                     </div>
                   ) : (
-                    <ResponsiveContainer width="100%" height="100%">
+                    perfHeight > 0 && (
+                    <ResponsiveContainer width="100%" height={perfHeight}>
                       <AreaChart data={displayChartData}>
                         <defs>
                           <linearGradient
@@ -733,6 +742,7 @@ export default function DashboardClient({
                         />
                       </AreaChart>
                     </ResponsiveContainer>
+                    )
                   )}
                 </div>
 
@@ -766,8 +776,9 @@ export default function DashboardClient({
                     <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
                       توزيع الإيرادات على المنصات
                     </p>
-                    <div dir="ltr" className="h-52 sm:h-64">
-                      <ResponsiveContainer width="100%" height="100%">
+                    <div ref={platformRef} dir="ltr" className="h-52 sm:h-64">
+                      {platformHeight > 0 && (
+                      <ResponsiveContainer width="100%" height={platformHeight}>
                         <BarChart data={filteredPlatformPerformance}>
                           <CartesianGrid
                             strokeDasharray="3 3"
@@ -794,6 +805,7 @@ export default function DashboardClient({
                           />
                         </BarChart>
                       </ResponsiveContainer>
+                      )}
                     </div>
                   </div>
                 )}
@@ -806,7 +818,7 @@ export default function DashboardClient({
                   <p className="text-xs sm:text-sm text-gray-500 mb-3 sm:mb-6">
                     العائد على الإنفاق الإعلاني
                   </p>
-                  <div dir="ltr" className="h-52 sm:h-64">
+                  <div ref={roasRef} dir="ltr" className="h-52 sm:h-64">
                     {!chartShouldShowDaily ? (
                       <div className="h-full flex items-center justify-center text-center px-4">
                         <p className="text-sm text-gray-500">
@@ -826,7 +838,8 @@ export default function DashboardClient({
                         </p>
                       </div>
                     ) : (
-                      <ResponsiveContainer width="100%" height="100%">
+                      roasHeight > 0 && (
+                      <ResponsiveContainer width="100%" height={roasHeight}>
                         <AreaChart data={displayChartData}>
                           <defs>
                             <linearGradient
@@ -888,6 +901,7 @@ export default function DashboardClient({
                           />
                         </AreaChart>
                       </ResponsiveContainer>
+                      )
                     )}
                   </div>
                 </div>
