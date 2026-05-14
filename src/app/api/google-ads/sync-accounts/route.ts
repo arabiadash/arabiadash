@@ -24,19 +24,20 @@ export async function POST() {
     }
 
     // 2. Admin client — needed because RLS would block updates on
-    // google_ads_connections from a user session; we filter by user_id
-    // explicitly so the user can only touch their own rows.
+    // connections from a user session; we filter by user_id explicitly so
+    // the user can only touch their own rows.
     const adminClient = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!,
       { auth: { persistSession: false } }
     );
 
-    // 3. Fetch all the user's Google Ads connections.
+    // 3. Fetch all the user's Google Ads connections from the unified table.
     const { data: connections, error: fetchError } = await adminClient
-      .from("google_ads_connections")
-      .select("customer_id, refresh_token")
-      .eq("user_id", user.id);
+      .from("connections")
+      .select("account_id, access_token, metadata")
+      .eq("user_id", user.id)
+      .eq("platform", "google");
 
     if (fetchError) {
       console.error("[sync-accounts] Fetch failed:", fetchError);
@@ -59,38 +60,50 @@ export async function POST() {
 
     for (const conn of connections) {
       const details = await fetchCustomerDetails(
-        conn.customer_id,
-        conn.refresh_token
+        conn.account_id,
+        conn.access_token
       );
 
       if (!details) {
         results.push({
-          customer_id: conn.customer_id,
+          customer_id: conn.account_id,
           status: "skipped",
         });
         continue;
       }
 
+      // Merge new Google fields into existing metadata — preserves the
+      // expires_at and google_access_token that the callback wrote, plus
+      // any other future fields. status is left alone (still 'pending'
+      // until the user activates from UI).
+      const existingMetadata =
+        (conn.metadata as Record<string, unknown>) || {};
+      const mergedMetadata = {
+        ...existingMetadata,
+        currency: details.currency_code,
+        timezone_name: details.time_zone,
+        is_manager: details.is_manager,
+        manager_customer_id: details.manager_customer_id,
+      };
+
       const { error: updateError } = await adminClient
-        .from("google_ads_connections")
+        .from("connections")
         .update({
-          descriptive_name: details.descriptive_name,
-          currency_code: details.currency_code,
-          time_zone: details.time_zone,
-          is_manager: details.is_manager,
-          manager_customer_id: details.manager_customer_id,
+          account_name: details.descriptive_name,
+          metadata: mergedMetadata,
         })
         .eq("user_id", user.id)
-        .eq("customer_id", conn.customer_id);
+        .eq("platform", "google")
+        .eq("account_id", conn.account_id);
 
       if (updateError) {
         results.push({
-          customer_id: conn.customer_id,
+          customer_id: conn.account_id,
           status: "failed",
         });
       } else {
         results.push({
-          customer_id: conn.customer_id,
+          customer_id: conn.account_id,
           status: "updated",
           name: details.descriptive_name ?? undefined,
         });

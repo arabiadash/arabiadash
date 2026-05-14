@@ -66,10 +66,17 @@ export async function GET(request: NextRequest) {
       return errorRedirect(request, "no_accounts");
     }
 
-    // 7. Persist one row per accessible account. Service role required because
-    // we write tokens that the user's session shouldn't have direct write
-    // access to via RLS. is_active stays false — the user activates accounts
-    // explicitly from the connections page.
+    // 7. Persist one row per accessible account into the unified connections
+    // table. Service role required because we write tokens the user's session
+    // shouldn't have direct write access to via RLS.
+    //
+    // status='pending' is the Approach C choice: every newly discovered
+    // account is recorded but inactive — the user explicitly activates the
+    // ones they care about from the connections page (UI lives in Phase 4).
+    // The unified adapter only picks up rows with status='active'.
+    //
+    // Google-specific fields land in metadata; sync-accounts enriches it
+    // later with currency/timezone/is_manager/manager_customer_id.
     const adminClient = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!,
@@ -81,18 +88,23 @@ export async function GET(request: NextRequest) {
     ).toISOString();
 
     const { error: upsertError } = await adminClient
-      .from("google_ads_connections")
+      .from("connections")
       .upsert(
         customerIds.map((customerId) => ({
           user_id: user.id,
-          customer_id: customerId,
-          refresh_token: tokens.refresh_token,
-          access_token: tokens.access_token,
-          expires_at: expiresAt,
-          is_active: false,
-          descriptive_name: null,
+          platform: "google",
+          account_id: customerId,
+          account_name: null,
+          // refresh_token stored in access_token (column is provider-agnostic).
+          access_token: tokens.refresh_token,
+          status: "pending",
+          metadata: {
+            expires_at: expiresAt,
+            google_access_token: tokens.access_token,
+          },
+          connected_at: new Date().toISOString(),
         })),
-        { onConflict: "user_id,customer_id" }
+        { onConflict: "user_id,platform,account_id" }
       );
 
     if (upsertError) {
