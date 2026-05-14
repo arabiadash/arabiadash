@@ -394,6 +394,12 @@ export default function ConnectionsClient({
                 const googleCounts = isGoogle ? platformCounts.google : undefined;
                 const hasGoogleConnections = (googleCounts?.total ?? 0) > 0;
 
+                // Meta is now also multi-account (Phase 4.1.5 unification).
+                // Same UX as Google: count + manage link / OAuth init.
+                const isMeta = platform.id === "meta";
+                const metaCounts = isMeta ? platformCounts.meta : undefined;
+                const hasMetaConnections = (metaCounts?.total ?? 0) > 0;
+
                 return (
                   <div
                     key={platform.id}
@@ -460,6 +466,38 @@ export default function ConnectionsClient({
                         className="w-full bg-gradient-to-r from-red-500 to-orange-500 text-white py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg transition flex items-center justify-center gap-2"
                       >
                         ربط Google Ads
+                      </button>
+                    ) : isMeta && hasMetaConnections ? (
+                      // Meta with at least one connection — count + manage link
+                      <div className="space-y-2">
+                        <div className="bg-gray-50 rounded-lg px-3 py-2 mb-2">
+                          <p className="text-xs text-gray-500 mb-0.5">
+                            حسابات مفعّلة
+                          </p>
+                          <p className="text-lg font-bold text-gray-900">
+                            {metaCounts!.active}
+                            <span className="text-sm font-normal text-gray-400">
+                              {" "}
+                              / {metaCounts!.total}
+                            </span>
+                          </p>
+                        </div>
+                        <Link
+                          href="/dashboard/connections/meta"
+                          className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg hover:shadow-indigo-500/30 transition flex items-center justify-center gap-2"
+                        >
+                          إدارة الحسابات
+                        </Link>
+                      </div>
+                    ) : isMeta ? (
+                      // Meta with no connections — kick off OAuth (Facebook blue)
+                      <button
+                        onClick={() => {
+                          window.location.href = "/api/auth/meta/init";
+                        }}
+                        className="w-full bg-gradient-to-r from-blue-600 to-blue-700 text-white py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg transition flex items-center justify-center gap-2"
+                      >
+                        ربط Meta Ads
                       </button>
                     ) : isConnected ? (
                       <div className="space-y-2">

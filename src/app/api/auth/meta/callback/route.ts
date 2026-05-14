@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { createClient } from "@/lib/supabase/server";
+import { createClient as createServerClient } from "@/lib/supabase/server";
+import { createClient } from "@supabase/supabase-js";
 import {
   exchangeCodeForToken,
   exchangeForLongLivedToken,
@@ -55,7 +56,7 @@ export async function GET(request: NextRequest) {
 
     cookieStore.delete("meta_oauth_state");
 
-    const supabase = await createClient();
+    const supabase = await createServerClient();
     const {
       data: { user },
       error: authError,
@@ -92,73 +93,94 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    if (adAccounts.length === 1) {
-      const account = adAccounts[0];
+    // Unified pattern (matches Google flow):
+    //   - Save ALL ad accounts to the connections table
+    //   - New rows: status='pending' (user activates from UI)
+    //   - Existing rows: preserve status (don't override active→pending)
+    //   - User picks which accounts to activate at /dashboard/connections/meta
+    const adminClient = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      { auth: { persistSession: false } }
+    );
 
-      const { error: dbError } = await supabase.from("connections").upsert(
-        {
-          user_id: user.id,
-          platform: "meta",
-          account_id: account.id,
-          account_name: account.name,
-          access_token: accessToken,
-          token_expires_at: tokenExpiresAt,
-          scopes: [...META_SCOPES],
-          status: "active",
-          metadata: {
-            meta_user_id: userInfo.id,
-            meta_user_name: userInfo.name,
-            currency: account.currency,
-            timezone_name: account.timezone_name,
-            account_status: account.account_status,
-          },
-          last_synced_at: new Date().toISOString(),
-        },
-        {
-          onConflict: "user_id,platform,account_id",
-        }
+    // Pre-fetch existing rows so we can preserve their status on re-OAuth.
+    // A user already running the app may have an active connection from the
+    // legacy single-select flow — don't silently flip it to pending under
+    // their feet.
+    const { data: existingRows, error: existingError } = await adminClient
+      .from("connections")
+      .select("account_id, status")
+      .eq("user_id", user.id)
+      .eq("platform", "meta");
+
+    if (existingError) {
+      console.error(
+        "[meta/callback] Failed to load existing rows:",
+        existingError
       );
-
-      if (dbError) {
-        console.error("[meta/callback] DB error:", dbError);
-        return NextResponse.redirect(
-          new URL(
-            "/dashboard/connections?error=meta_db_error",
-            request.url
-          )
-        );
-      }
-
       return NextResponse.redirect(
-        new URL(
-          "/dashboard/connections?success=meta_connected",
-          request.url
-        )
+        new URL("/dashboard/connections?error=meta_db_error", request.url)
       );
     }
 
-    const tempCookieOptions = {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax" as const,
-      maxAge: 600,
-      path: "/",
-    };
-
-    cookieStore.set("meta_temp_token", accessToken, tempCookieOptions);
-    cookieStore.set(
-      "meta_temp_expires_at",
-      tokenExpiresAt || "",
-      tempCookieOptions
-    );
-    cookieStore.set(
-      "meta_temp_user_info",
-      JSON.stringify(userInfo),
-      tempCookieOptions
+    const existingByAccountId = new Map(
+      (existingRows ?? []).map((r) => [r.account_id, r.status])
     );
 
+    const nowIso = new Date().toISOString();
+
+    const rowsToUpsert = adAccounts.map((account) => {
+      const previousStatus = existingByAccountId.get(account.id);
+      // Existing row → keep its status. New row → start as pending.
+      const status = previousStatus ?? "pending";
+
+      return {
+        user_id: user.id,
+        platform: "meta",
+        account_id: account.id,
+        account_name: account.name,
+        access_token: accessToken,
+        token_expires_at: tokenExpiresAt,
+        scopes: [...META_SCOPES],
+        status,
+        metadata: {
+          meta_user_id: userInfo.id,
+          meta_user_name: userInfo.name,
+          currency: account.currency,
+          timezone_name: account.timezone_name,
+          account_status: account.account_status,
+        },
+        last_synced_at: nowIso,
+      };
+    });
+
+    const { error: upsertError } = await adminClient
+      .from("connections")
+      .upsert(rowsToUpsert, {
+        onConflict: "user_id,platform,account_id",
+      });
+
+    if (upsertError) {
+      console.error("[meta/callback] Upsert failed:", upsertError);
+      return NextResponse.redirect(
+        new URL("/dashboard/connections?error=meta_db_error", request.url)
+      );
+    }
+
+    // Clean up cookies from the old 2+ accounts flow. They're no longer used
+    // but a half-finished OAuth attempt could leave one behind — best-effort.
+    cookieStore.delete("meta_temp_token");
+    cookieStore.delete("meta_temp_expires_at");
+    cookieStore.delete("meta_temp_user_info");
+
+    // Same UX as Google: land on the Meta sub-page where the user toggles
+    // accounts on/off.
     return NextResponse.redirect(
-      new URL("/dashboard/connections/select-account", request.url)
+      new URL(
+        `/dashboard/connections/meta?success=meta_connected&count=${adAccounts.length}`,
+        request.url
+      )
     );
   } catch (err) {
     console.error("[meta/callback] Unexpected error:", err);
