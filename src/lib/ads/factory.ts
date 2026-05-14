@@ -5,22 +5,40 @@ import type { AdProviderAdapter } from "./types";
 import type { AdProvider } from "./cache";
 
 /**
- * Get the user's adapter for a specific ad provider.
- * Returns null if user doesn't have an active connection for that provider.
+ * Get the user's adapter for a specific ad provider, optionally scoped to
+ * a specific account.
+ *
+ * - For single-account providers (Meta), accountId can be omitted and we
+ *   pick the user's only active connection.
+ * - For multi-account providers (Google), accountId is required — without
+ *   it we'd have no way to choose between the user's 11+ accounts. Callers
+ *   should enforce that via isMultiAccountProvider() before invoking.
+ *
+ * Returns null if no matching active connection exists.
  */
 export async function getAdapterForProvider(
   userId: string,
-  provider: AdProvider
+  provider: AdProvider,
+  accountId?: string
 ): Promise<AdProviderAdapter | null> {
   const supabase = await createClient();
 
-  const { data: connection, error } = await supabase
+  let query = supabase
     .from("connections")
     .select("id, account_id, account_name, access_token, metadata")
     .eq("user_id", userId)
     .eq("platform", provider)
-    .eq("status", "active")
-    .maybeSingle();
+    .eq("status", "active");
+
+  if (accountId) {
+    query = query.eq("account_id", accountId);
+  }
+
+  // maybeSingle() returns null + error when more than one row matches —
+  // which is correct for single-account providers but would also flag a
+  // multi-account provider invoked without an accountId. Callers are
+  // expected to enforce the accountId requirement upstream.
+  const { data: connection, error } = await query.maybeSingle();
 
   if (error || !connection) return null;
 
@@ -68,6 +86,16 @@ export async function getAdapterForProvider(
 }
 
 /**
+ * Providers where a user may have many active connections (Google, eventually
+ * TikTok). Endpoints must require account_id from callers for these.
+ */
+const MULTI_ACCOUNT_PROVIDERS: ReadonlySet<AdProvider> = new Set(["google"]);
+
+export function isMultiAccountProvider(provider: AdProvider): boolean {
+  return MULTI_ACCOUNT_PROVIDERS.has(provider);
+}
+
+/**
  * Get all adapters for the user (one per active connection).
  * Useful for cross-platform aggregations.
  */
@@ -78,7 +106,7 @@ export async function getAllAdaptersForUser(
 
   const { data: connections, error } = await supabase
     .from("connections")
-    .select("platform")
+    .select("platform, account_id")
     .eq("user_id", userId)
     .eq("status", "active");
 
@@ -86,7 +114,11 @@ export async function getAllAdaptersForUser(
 
   const adapters = await Promise.all(
     connections.map(async (c) => {
-      return getAdapterForProvider(userId, c.platform as AdProvider);
+      return getAdapterForProvider(
+        userId,
+        c.platform as AdProvider,
+        c.account_id
+      );
     })
   );
 

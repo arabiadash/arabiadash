@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { getAdapterForProvider } from "@/lib/ads/factory";
+import {
+  getAdapterForProvider,
+  isMultiAccountProvider,
+} from "@/lib/ads/factory";
 import {
   getCachedCreatives,
   setCachedCreatives,
@@ -92,6 +95,21 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const accountId =
+      request.nextUrl.searchParams.get("account_id") ?? undefined;
+
+    // Multi-account providers (Google) require account_id explicitly —
+    // the user has many active connections and we can't pick one for them.
+    if (isMultiAccountProvider(provider) && !accountId) {
+      return NextResponse.json(
+        {
+          error: "account_id_required",
+          message: `${provider} requires account_id parameter (the account/customer ID)`,
+        },
+        { status: 400 }
+      );
+    }
+
     const parsed = parseRangeFromParams(request.nextUrl.searchParams);
     if (typeof parsed === "object" && "error" in parsed) {
       return NextResponse.json(
@@ -113,7 +131,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
 
-    const adapter = await getAdapterForProvider(user.id, provider);
+    const adapter = await getAdapterForProvider(user.id, provider, accountId);
     if (!adapter) {
       return NextResponse.json(
         { error: "no_connection", provider },
@@ -123,12 +141,18 @@ export async function GET(request: NextRequest) {
 
     // We need the account_id (string, e.g. act_123) for the creatives_cache key.
     // The adapter has it but doesn't expose it; resolve via the connection row.
-    const { data: connection } = await supabase
+    let connQuery = supabase
       .from("connections")
       .select("account_id")
       .eq("user_id", user.id)
       .eq("platform", provider)
-      .eq("status", "active")
+      .eq("status", "active");
+
+    if (accountId) {
+      connQuery = connQuery.eq("account_id", accountId);
+    }
+
+    const { data: connection } = await connQuery
       .maybeSingle();
 
     if (!connection) {

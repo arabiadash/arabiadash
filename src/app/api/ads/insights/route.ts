@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { getAdapterForProvider } from "@/lib/ads/factory";
+import {
+  getAdapterForProvider,
+  isMultiAccountProvider,
+} from "@/lib/ads/factory";
 import {
   getCachedDataSWR,
   setCachedData,
@@ -51,12 +54,26 @@ export async function GET(request: NextRequest) {
       request.nextUrl.searchParams.get("time_increment");
     const sinceParam = request.nextUrl.searchParams.get("since");
     const untilParam = request.nextUrl.searchParams.get("until");
+    const accountId =
+      request.nextUrl.searchParams.get("account_id") ?? undefined;
     const forceRefresh =
       request.nextUrl.searchParams.get("refresh") === "true";
 
     if (!VALID_PROVIDERS.includes(provider)) {
       return NextResponse.json(
         { error: "invalid_provider", supported: VALID_PROVIDERS },
+        { status: 400 }
+      );
+    }
+
+    // Multi-account providers (Google) require account_id explicitly —
+    // the user has many active connections and we can't pick one for them.
+    if (isMultiAccountProvider(provider) && !accountId) {
+      return NextResponse.json(
+        {
+          error: "account_id_required",
+          message: `${provider} requires account_id parameter (the account/customer ID)`,
+        },
         { status: 400 }
       );
     }
@@ -132,7 +149,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
 
-    const adapter = await getAdapterForProvider(user.id, provider);
+    const adapter = await getAdapterForProvider(user.id, provider, accountId);
     if (!adapter) {
       return NextResponse.json(
         { error: "no_connection", provider },
@@ -140,13 +157,18 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const { data: connection } = await supabase
+    let connectionQuery = supabase
       .from("connections")
       .select("id")
       .eq("user_id", user.id)
       .eq("platform", provider)
-      .eq("status", "active")
-      .maybeSingle();
+      .eq("status", "active");
+
+    if (accountId) {
+      connectionQuery = connectionQuery.eq("account_id", accountId);
+    }
+
+    const { data: connection } = await connectionQuery.maybeSingle();
 
     if (!connection) {
       return NextResponse.json({ error: "no_connection" }, { status: 404 });
