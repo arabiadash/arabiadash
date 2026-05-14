@@ -2,6 +2,8 @@ import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import ConnectionsClient from "./ConnectionsClient";
 
+export const dynamic = "force-dynamic";
+
 export default async function ConnectionsPage() {
   const supabase = await createClient();
 
@@ -17,12 +19,37 @@ export default async function ConnectionsPage() {
   const companyName = user.user_metadata?.company_name || "";
   const email = user.email || "";
 
+  // Fetch all connections to compute per-platform counts. For multi-account
+  // platforms (Google) we want both active and total so the card can show
+  // "3 / 11 مفعّلة" style summaries.
   const { data: connectionsData } = await supabase
     .from("connections")
-    .select("platform")
-    .eq("status", "active");
+    .select("platform, status")
+    .eq("user_id", user.id);
 
-  const connectedPlatforms = (connectionsData ?? []).map((c) => c.platform);
+  const allConnections = connectionsData ?? [];
+
+  // Legacy single-account behavior: a platform is "connected" if at least
+  // one row is active. Meta + e-commerce platforms rely on this.
+  const connectedPlatforms = Array.from(
+    new Set(
+      allConnections
+        .filter((c) => c.status === "active")
+        .map((c) => c.platform)
+    )
+  );
+
+  // Counts per platform for the multi-account UI variant.
+  const platformCounts: Record<string, { active: number; total: number }> = {};
+  for (const conn of allConnections) {
+    if (!platformCounts[conn.platform]) {
+      platformCounts[conn.platform] = { active: 0, total: 0 };
+    }
+    platformCounts[conn.platform].total += 1;
+    if (conn.status === "active") {
+      platformCounts[conn.platform].active += 1;
+    }
+  }
 
   return (
     <ConnectionsClient
@@ -30,6 +57,7 @@ export default async function ConnectionsPage() {
       companyName={companyName}
       email={email}
       initialConnections={connectedPlatforms}
+      platformCounts={platformCounts}
     />
   );
 }

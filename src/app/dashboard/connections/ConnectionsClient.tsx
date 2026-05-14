@@ -32,6 +32,7 @@ interface ConnectionsClientProps {
   companyName: string;
   email: string;
   initialConnections: string[];
+  platformCounts: Record<string, { active: number; total: number }>;
 }
 
 const META_ERROR_MESSAGES: Record<string, string> = {
@@ -50,6 +51,7 @@ export default function ConnectionsClient({
   companyName,
   email,
   initialConnections,
+  platformCounts,
 }: ConnectionsClientProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -386,6 +388,12 @@ export default function ConnectionsClient({
                 const isConnected = connectedPlatforms.includes(platform.id);
                 const isConnecting = connecting === platform.id;
 
+                // Google is multi-account — show count + manage link instead
+                // of the binary connect/disconnect other platforms use.
+                const isGoogle = platform.id === "google";
+                const googleCounts = isGoogle ? platformCounts.google : undefined;
+                const hasGoogleConnections = (googleCounts?.total ?? 0) > 0;
+
                 return (
                   <div
                     key={platform.id}
@@ -421,7 +429,39 @@ export default function ConnectionsClient({
                       {platform.description}
                     </p>
 
-                    {isConnected ? (
+                    {isGoogle && hasGoogleConnections ? (
+                      // Google with at least one connection — show count + manage link
+                      <div className="space-y-2">
+                        <div className="bg-gray-50 rounded-lg px-3 py-2 mb-2">
+                          <p className="text-xs text-gray-500 mb-0.5">
+                            حسابات مفعّلة
+                          </p>
+                          <p className="text-lg font-bold text-gray-900">
+                            {googleCounts!.active}
+                            <span className="text-sm font-normal text-gray-400">
+                              {" "}
+                              / {googleCounts!.total}
+                            </span>
+                          </p>
+                        </div>
+                        <Link
+                          href="/dashboard/connections/google"
+                          className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg hover:shadow-indigo-500/30 transition flex items-center justify-center gap-2"
+                        >
+                          إدارة الحسابات
+                        </Link>
+                      </div>
+                    ) : isGoogle ? (
+                      // Google with no connections — kick off OAuth
+                      <button
+                        onClick={() => {
+                          window.location.href = "/api/google-ads/auth";
+                        }}
+                        className="w-full bg-gradient-to-r from-red-500 to-orange-500 text-white py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg transition flex items-center justify-center gap-2"
+                      >
+                        ربط Google Ads
+                      </button>
+                    ) : isConnected ? (
                       <div className="space-y-2">
                         <button
                           disabled
