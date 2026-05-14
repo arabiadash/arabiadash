@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { MetaAdapter } from "./providers/meta";
+import { GoogleAdsAdapter } from "./providers/google";
 import type { AdProviderAdapter } from "./types";
 import type { AdProvider } from "./cache";
 
@@ -27,6 +28,9 @@ export async function getAdapterForProvider(
     (connection.metadata as {
       currency?: string;
       timezone_name?: string;
+      // Google-specific metadata written at OAuth sync time:
+      is_manager?: boolean;
+      manager_customer_id?: string | null;
     }) || {};
 
   switch (provider) {
@@ -37,9 +41,24 @@ export async function getAdapterForProvider(
         timezone: metadata.timezone_name || "UTC",
       });
 
+    case "google":
+      // For Google, the `access_token` column holds the long-lived
+      // refresh_token (the column name is provider-agnostic). The
+      // login_customer_id (MCC) is only passed for accounts linked under
+      // our manager; standalone accounts have manager_customer_id = null
+      // in metadata, which we collapse to undefined here.
+      return new GoogleAdsAdapter(
+        connection.access_token,
+        connection.account_id,
+        {
+          name: connection.account_name || "",
+          currency: metadata.currency || "USD",
+          timezone: metadata.timezone_name || "UTC",
+        },
+        metadata.manager_customer_id ?? undefined
+      );
+
     // Future providers:
-    // case 'google':
-    //   return new GoogleAdapter(...);
     // case 'tiktok':
     //   return new TikTokAdapter(...);
 
