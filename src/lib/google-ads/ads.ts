@@ -1,0 +1,247 @@
+import { GoogleAdsApi } from "google-ads-api";
+
+function requireEnv(key: string): string {
+  const value = process.env[key];
+  if (!value) throw new Error(`Missing env var: ${key}`);
+  return value;
+}
+
+// google-ads-api@23 returns enum fields as integer protobuf values.
+// Ref: AdTypeEnum.AdType in the Google Ads API protos.
+const AD_TYPE_MAP: Record<number, string> = {
+  0: "UNSPECIFIED",
+  1: "UNKNOWN",
+  2: "TEXT_AD",
+  3: "EXPANDED_TEXT_AD",
+  6: "EXPANDED_DYNAMIC_SEARCH_AD",
+  7: "HOTEL_AD",
+  8: "SHOPPING_SMART_AD",
+  9: "SHOPPING_PRODUCT_AD",
+  10: "VIDEO_AD",
+  12: "GMAIL_AD",
+  13: "IMAGE_AD",
+  14: "RESPONSIVE_SEARCH_AD",
+  15: "LEGACY_RESPONSIVE_DISPLAY_AD",
+  16: "APP_AD",
+  17: "LEGACY_APP_INSTALL_AD",
+  18: "RESPONSIVE_DISPLAY_AD",
+  19: "LOCAL_AD",
+  20: "HTML5_UPLOAD_AD",
+  21: "DYNAMIC_HTML5_AD",
+  22: "APP_ENGAGEMENT_AD",
+  23: "SHOPPING_COMPARISON_LISTING_AD",
+  24: "VIDEO_BUMPER_AD",
+  25: "VIDEO_NON_SKIPPABLE_IN_STREAM_AD",
+  26: "VIDEO_OUTSTREAM_AD",
+  27: "VIDEO_TRUEVIEW_IN_STREAM_AD",
+  29: "VIDEO_RESPONSIVE_AD",
+  30: "SMART_CAMPAIGN_AD",
+  31: "CALL_AD",
+  32: "APP_PRE_REGISTRATION_AD",
+  33: "IN_FEED_VIDEO_AD",
+  34: "DEMAND_GEN_MULTI_ASSET_AD",
+  35: "DEMAND_GEN_CAROUSEL_AD",
+  36: "TRAVEL_AD",
+  39: "DEMAND_GEN_VIDEO_RESPONSIVE_AD",
+  40: "DEMAND_GEN_PRODUCT_AD",
+};
+
+const AD_STATUS_MAP: Record<number, string> = {
+  0: "UNSPECIFIED",
+  1: "UNKNOWN",
+  2: "ENABLED",
+  3: "PAUSED",
+  4: "REMOVED",
+};
+
+function mapAdType(value: unknown): string {
+  const num = Number(value);
+  return AD_TYPE_MAP[num] ?? `UNKNOWN_${num}`;
+}
+
+function mapAdStatus(value: unknown): string {
+  const num = Number(value);
+  return AD_STATUS_MAP[num] ?? "UNKNOWN";
+}
+
+export interface AdRow {
+  id: string;
+  type: string;
+  status: string;
+  ad_group_id: string;
+  ad_group_name: string;
+  campaign_id: string;
+  campaign_name: string;
+  final_url: string | null;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  revenue: number;
+  ctr: number;
+  cpc: number;
+  roas: number;
+}
+
+export interface AdTotals {
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  revenue: number;
+  ctr: number;
+  cpc: number;
+  roas: number;
+}
+
+export interface FetchAdsResult {
+  ads: AdRow[];
+  totals: AdTotals;
+}
+
+export interface FetchAdsOptions {
+  customerId: string;
+  refreshToken: string;
+  dateFrom: string; // YYYY-MM-DD — caller MUST validate format
+  dateTo: string; // YYYY-MM-DD — caller MUST validate format
+  /** Pass MCC ID for accounts linked to our manager. Omit for standalone. */
+  loginCustomerId?: string;
+}
+
+/**
+ * Fetch ad-level performance for a Google Ads account.
+ *
+ * Schema is intentionally minimal — metrics + identifiers + final URL only.
+ * Creative details (headlines, descriptions, images, video assets) are NOT
+ * included here; those vary wildly across ad types and warrant a separate
+ * fetcher if/when we need to display them.
+ *
+ * Caller MUST validate dateFrom/dateTo as YYYY-MM-DD before invoking — the
+ * values are interpolated into GAQL and not escaped.
+ *
+ * Returns null on auth/permission errors so the caller can treat the
+ * account as "not accessible right now" rather than failing the batch.
+ */
+export async function fetchAds(
+  options: FetchAdsOptions
+): Promise<FetchAdsResult | null> {
+  const clientId = requireEnv("GOOGLE_ADS_CLIENT_ID");
+  const clientSecret = requireEnv("GOOGLE_ADS_CLIENT_SECRET");
+  const developerToken = requireEnv("GOOGLE_ADS_DEVELOPER_TOKEN");
+
+  const api = new GoogleAdsApi({
+    client_id: clientId,
+    client_secret: clientSecret,
+    developer_token: developerToken,
+  });
+
+  const customer = api.Customer({
+    customer_id: options.customerId,
+    refresh_token: options.refreshToken,
+    ...(options.loginCustomerId
+      ? { login_customer_id: options.loginCustomerId }
+      : {}),
+  });
+
+  // GAQL: no OR / parentheses in WHERE, so the only status filter we can
+  // express is a flat `!= REMOVED`. LIMIT 500 is the MVP ceiling; we'll
+  // page later if accounts exceed it.
+  const query = `
+    SELECT
+      ad_group_ad.ad.id,
+      ad_group_ad.ad.type,
+      ad_group_ad.ad.final_urls,
+      ad_group_ad.status,
+      ad_group.id,
+      ad_group.name,
+      campaign.id,
+      campaign.name,
+      metrics.cost_micros,
+      metrics.impressions,
+      metrics.clicks,
+      metrics.conversions,
+      metrics.conversions_value,
+      metrics.ctr,
+      metrics.average_cpc
+    FROM ad_group_ad
+    WHERE segments.date BETWEEN '${options.dateFrom}' AND '${options.dateTo}'
+      AND ad_group_ad.status != 'REMOVED'
+    ORDER BY metrics.cost_micros DESC
+    LIMIT 500
+  `;
+
+  try {
+    const rows = await customer.query(query);
+
+    const ads: AdRow[] = rows.map((row) => {
+      const spend = Number(row.metrics?.cost_micros ?? 0) / 1_000_000;
+      const impressions = Number(row.metrics?.impressions ?? 0);
+      const clicks = Number(row.metrics?.clicks ?? 0);
+      const conversions = Number(row.metrics?.conversions ?? 0);
+      const revenue = Number(row.metrics?.conversions_value ?? 0);
+      const ctr = Number(row.metrics?.ctr ?? 0);
+      const cpc = Number(row.metrics?.average_cpc ?? 0) / 1_000_000;
+      const roas = spend > 0 ? revenue / spend : 0;
+
+      // final_urls is an array; pick the first non-empty value.
+      const ad = row.ad_group_ad?.ad;
+      const finalUrls = Array.isArray(ad?.final_urls) ? ad.final_urls : [];
+      const finalUrl =
+        finalUrls.find(
+          (u): u is string => typeof u === "string" && u.length > 0
+        ) ?? null;
+
+      return {
+        id: String(ad?.id ?? ""),
+        type: mapAdType(ad?.type),
+        status: mapAdStatus(row.ad_group_ad?.status),
+        ad_group_id: String(row.ad_group?.id ?? ""),
+        ad_group_name: String(row.ad_group?.name ?? ""),
+        campaign_id: String(row.campaign?.id ?? ""),
+        campaign_name: String(row.campaign?.name ?? ""),
+        final_url: finalUrl,
+        spend,
+        impressions,
+        clicks,
+        conversions,
+        revenue,
+        ctr,
+        cpc,
+        roas,
+      };
+    });
+
+    // Aggregate raw counters; ratios filled in below.
+    const totals: AdTotals = ads.reduce(
+      (acc, a) => ({
+        spend: acc.spend + a.spend,
+        impressions: acc.impressions + a.impressions,
+        clicks: acc.clicks + a.clicks,
+        conversions: acc.conversions + a.conversions,
+        revenue: acc.revenue + a.revenue,
+        ctr: 0,
+        cpc: 0,
+        roas: 0,
+      }),
+      {
+        spend: 0,
+        impressions: 0,
+        clicks: 0,
+        conversions: 0,
+        revenue: 0,
+        ctr: 0,
+        cpc: 0,
+        roas: 0,
+      }
+    );
+
+    totals.ctr =
+      totals.impressions > 0 ? totals.clicks / totals.impressions : 0;
+    totals.cpc = totals.clicks > 0 ? totals.spend / totals.clicks : 0;
+    totals.roas = totals.spend > 0 ? totals.revenue / totals.spend : 0;
+
+    return { ads, totals };
+  } catch {
+    return null;
+  }
+}
