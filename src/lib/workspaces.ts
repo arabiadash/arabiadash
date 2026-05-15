@@ -11,6 +11,13 @@ export type Workspace = Pick<
 >;
 
 /**
+ * Workspace plus its active connection count. Used wherever the UI needs
+ * to show "N active accounts" next to a workspace name (settings list,
+ * future switcher tooltips, etc).
+ */
+export type WorkspaceWithMeta = Workspace & { activeConnections: number };
+
+/**
  * Get the user's default workspace ID.
  *
  * Every user has exactly one default workspace (enforced by partial unique
