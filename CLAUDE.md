@@ -184,6 +184,27 @@ export const dynamic = 'force-dynamic';
 - Disable RLS policies
 - Bypass plan limits
 
+### Branching workflow (from Phase 4.4b sub-phase B onward)
+
+Feature code goes on dedicated branches, NOT direct push to main:
+
+```cmd
+git checkout -b phase-X.X-description    # at start
+# ... commits, push to branch
+gh pr create                              # optional but recommended
+# After verification on Vercel preview:
+git checkout main
+git merge phase-X.X-description
+git push origin main
+```
+
+Direct push to main is allowed only for:
+- Documentation (`CLAUDE.md`, README)
+- Tooling configuration (`.gitignore`, `package.json` scripts)
+- Hotfixes when main is broken
+
+Feature commits MUST use branches.
+
 ---
 
 ## 8. Key project resources
