@@ -1,8 +1,14 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import DashboardClient from "./DashboardClient";
+import { getUserWorkspaces, resolveActiveWorkspace } from "@/lib/workspaces";
 
-export default async function DashboardPage() {
+type PageProps = {
+  searchParams: Promise<{ [k: string]: string | string[] | undefined }>;
+};
+
+export default async function DashboardPage({ searchParams }: PageProps) {
+  const params = await searchParams;
   const supabase = await createClient();
 
   // Get the current user
@@ -20,10 +26,13 @@ export default async function DashboardPage() {
   const companyName = user.user_metadata?.company_name || "";
   const email = user.email || "";
 
-  const { data: connectionsData } = await supabase
-    .from("connections")
-    .select("platform")
-    .eq("status", "active");
+  // Parallel fetches: connections list + workspace list + active workspace
+  const [{ data: connectionsData }, workspaces, activeWorkspace] =
+    await Promise.all([
+      supabase.from("connections").select("platform").eq("status", "active"),
+      getUserWorkspaces(supabase, user.id),
+      resolveActiveWorkspace(supabase, user.id, params.workspace),
+    ]);
 
   const connectedPlatforms = (connectionsData ?? []).map((c) => c.platform);
 
@@ -33,6 +42,8 @@ export default async function DashboardPage() {
       companyName={companyName}
       email={email}
       connectedPlatforms={connectedPlatforms}
+      workspaces={workspaces}
+      activeWorkspaceId={activeWorkspace.id}
     />
   );
 }

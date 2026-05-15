@@ -15,6 +15,7 @@ import {
   Search,
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
+import type { Workspace } from "@/lib/workspaces";
 import type { MetaAccountRow } from "./page";
 
 interface MetaConnectionsClientProps {
@@ -22,6 +23,8 @@ interface MetaConnectionsClientProps {
   email: string;
   accounts: MetaAccountRow[];
   limit: number;
+  workspaces: Workspace[];
+  activeWorkspaceId: number;
 }
 
 // Meta account_status codes — see Meta Marketing API docs.
@@ -45,6 +48,8 @@ export default function MetaConnectionsClient({
   email,
   accounts: initialAccounts,
   limit,
+  workspaces,
+  activeWorkspaceId,
 }: MetaConnectionsClientProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -132,6 +137,8 @@ export default function MetaConnectionsClient({
         activeRoute="/dashboard/connections/meta"
         sidebarOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        workspaces={workspaces}
+        activeWorkspaceId={activeWorkspaceId}
       />
 
       <div className="lg:mr-64">

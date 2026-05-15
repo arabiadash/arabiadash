@@ -16,6 +16,7 @@ import {
   ArrowDown,
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
+import type { Workspace } from "@/lib/workspaces";
 import {
   mockPlatformPerformance,
   platformNameToId,
@@ -64,6 +65,8 @@ interface DashboardClientProps {
   companyName: string;
   email: string;
   connectedPlatforms: string[];
+  workspaces: Workspace[];
+  activeWorkspaceId: number;
 }
 
 function getDayCount(range: DateRangeValue): number {
@@ -97,6 +100,8 @@ export default function DashboardClient({
   companyName,
   email,
   connectedPlatforms,
+  workspaces,
+  activeWorkspaceId,
 }: DashboardClientProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -316,6 +321,8 @@ export default function DashboardClient({
         activeRoute="/dashboard"
         sidebarOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        workspaces={workspaces}
+        activeWorkspaceId={activeWorkspaceId}
       />
 
       {/* Main Content */}

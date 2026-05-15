@@ -1,10 +1,16 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import ConnectionsClient from "./ConnectionsClient";
+import { getUserWorkspaces, resolveActiveWorkspace } from "@/lib/workspaces";
 
 export const dynamic = "force-dynamic";
 
-export default async function ConnectionsPage() {
+type PageProps = {
+  searchParams: Promise<{ [k: string]: string | string[] | undefined }>;
+};
+
+export default async function ConnectionsPage({ searchParams }: PageProps) {
+  const params = await searchParams;
   const supabase = await createClient();
 
   const {
@@ -19,13 +25,16 @@ export default async function ConnectionsPage() {
   const companyName = user.user_metadata?.company_name || "";
   const email = user.email || "";
 
-  // Fetch all connections to compute per-platform counts. For multi-account
-  // platforms (Google) we want both active and total so the card can show
-  // "3 / 11 مفعّلة" style summaries.
-  const { data: connectionsData } = await supabase
-    .from("connections")
-    .select("platform, status")
-    .eq("user_id", user.id);
+  // Parallel: connections (for per-platform counts) + workspace data.
+  const [{ data: connectionsData }, workspaces, activeWorkspace] =
+    await Promise.all([
+      supabase
+        .from("connections")
+        .select("platform, status")
+        .eq("user_id", user.id),
+      getUserWorkspaces(supabase, user.id),
+      resolveActiveWorkspace(supabase, user.id, params.workspace),
+    ]);
 
   const allConnections = connectionsData ?? [];
 
@@ -58,6 +67,8 @@ export default async function ConnectionsPage() {
       email={email}
       initialConnections={connectedPlatforms}
       platformCounts={platformCounts}
+      workspaces={workspaces}
+      activeWorkspaceId={activeWorkspace.id}
     />
   );
 }

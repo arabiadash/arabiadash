@@ -28,6 +28,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
+import type { Workspace } from "@/lib/workspaces";
 import {
   useInsights,
   dateRangeValueToOptions,
@@ -72,6 +73,8 @@ interface ReportsClientProps {
   companyName: string;
   email: string;
   connectedPlatforms: string[];
+  workspaces: Workspace[];
+  activeWorkspaceId: number;
 }
 
 const ARABIC_MONTHS = [
@@ -1082,6 +1085,8 @@ export default function ReportsClient({
   fullName,
   email,
   connectedPlatforms,
+  workspaces,
+  activeWorkspaceId,
 }: ReportsClientProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -1444,6 +1449,8 @@ export default function ReportsClient({
           activeRoute="/dashboard/reports"
           sidebarOpen={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
+          workspaces={workspaces}
+          activeWorkspaceId={activeWorkspaceId}
         />
 
         <div className="lg:mr-64">
@@ -1560,6 +1567,8 @@ export default function ReportsClient({
         activeRoute="/dashboard/reports"
         sidebarOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        workspaces={workspaces}
+        activeWorkspaceId={activeWorkspaceId}
       />
 
       {/* Main */}

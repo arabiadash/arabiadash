@@ -15,6 +15,7 @@ import {
   Search,
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
+import type { Workspace } from "@/lib/workspaces";
 import type { GoogleAccountRow } from "./page";
 
 interface GoogleConnectionsClientProps {
@@ -22,6 +23,8 @@ interface GoogleConnectionsClientProps {
   email: string;
   accounts: GoogleAccountRow[];
   limit: number;
+  workspaces: Workspace[];
+  activeWorkspaceId: number;
 }
 
 export default function GoogleConnectionsClient({
@@ -29,6 +32,8 @@ export default function GoogleConnectionsClient({
   email,
   accounts: initialAccounts,
   limit,
+  workspaces,
+  activeWorkspaceId,
 }: GoogleConnectionsClientProps) {
   const [accounts, setAccounts] =
     useState<GoogleAccountRow[]>(initialAccounts);
@@ -102,6 +107,8 @@ export default function GoogleConnectionsClient({
         activeRoute="/dashboard/connections/google"
         sidebarOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        workspaces={workspaces}
+        activeWorkspaceId={activeWorkspaceId}
       />
 
       {/* Main Content */}
