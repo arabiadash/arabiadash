@@ -11,6 +11,14 @@
 export const ACTIVE_ACCOUNTS_LIMIT = 3;
 
 /**
+ * Max workspaces per user. Unlimited today; Phase 10 will swap this for a
+ * per-plan resolver once subscription tiers ship.
+ */
+// TODO(phase-10): Replace with getWorkspaceLimitForUser(userId)
+// when subscription tiers are wired in.
+export const WORKSPACE_LIMIT = Infinity;
+
+/**
  * How many active accounts is this user allowed?
  *
  * Async on purpose: Phase 10 will read the user's plan from DB,
