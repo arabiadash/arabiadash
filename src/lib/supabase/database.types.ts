@@ -253,6 +253,7 @@ export type Database = {
       }
       workspaces: {
         Row: {
+          archived_at: string | null
           created_at: string
           icon: string | null
           id: number
@@ -262,6 +263,7 @@ export type Database = {
           user_id: string
         }
         Insert: {
+          archived_at?: string | null
           created_at?: string
           icon?: string | null
           id?: number
@@ -271,6 +273,7 @@ export type Database = {
           user_id: string
         }
         Update: {
+          archived_at?: string | null
           created_at?: string
           icon?: string | null
           id?: number

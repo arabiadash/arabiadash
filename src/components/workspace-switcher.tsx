@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, Plus, Settings } from "lucide-react";
 import type { Workspace } from "@/lib/workspaces";
+import NewWorkspaceModal from "./new-workspace-modal";
 
 interface WorkspaceSwitcherProps {
   workspaces: Workspace[];
@@ -24,10 +26,16 @@ export default function WorkspaceSwitcher({
   const router = useRouter();
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const active =
     workspaces.find((w) => w.id === activeWorkspaceId) ?? workspaces[0];
+
+  const handleNewWorkspaceClick = () => {
+    setOpen(false);
+    setNewWorkspaceOpen(true);
+  };
 
   // Close when the user clicks anything outside the switcher. mousedown
   // (not click) so the dropdown closes before a downstream click handler
@@ -78,8 +86,8 @@ export default function WorkspaceSwitcher({
 
       {open && (
         <div
-          role="listbox"
-          className="absolute top-full left-4 right-4 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-10 py-1 max-h-64 overflow-y-auto"
+          role="menu"
+          className="absolute top-full left-4 right-4 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-10 py-1 max-h-72 overflow-y-auto"
         >
           {workspaces.map((w) => {
             const isActive = w.id === activeWorkspaceId;
@@ -87,8 +95,8 @@ export default function WorkspaceSwitcher({
               <button
                 key={w.id}
                 type="button"
-                role="option"
-                aria-selected={isActive}
+                role="menuitemradio"
+                aria-checked={isActive}
                 onClick={() => handleSelect(w)}
                 className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-right transition ${
                   isActive
@@ -103,8 +111,39 @@ export default function WorkspaceSwitcher({
               </button>
             );
           })}
+
+          <div
+            role="separator"
+            className="border-t border-gray-100 my-1"
+          />
+
+          <button
+            type="button"
+            role="menuitem"
+            onClick={handleNewWorkspaceClick}
+            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-right text-gray-700 hover:bg-gray-50 transition"
+          >
+            <Plus className="w-4 h-4 text-gray-500 flex-shrink-0" />
+            <span className="flex-1">workspace جديد</span>
+          </button>
+
+          <Link
+            role="menuitem"
+            href="/dashboard/settings#workspaces"
+            onClick={() => setOpen(false)}
+            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-right text-gray-700 hover:bg-gray-50 transition"
+          >
+            <Settings className="w-4 h-4 text-gray-500 flex-shrink-0" />
+            <span className="flex-1">إدارة workspaces</span>
+          </Link>
         </div>
       )}
+
+      <NewWorkspaceModal
+        key={newWorkspaceOpen ? "open" : "closed"}
+        open={newWorkspaceOpen}
+        onClose={() => setNewWorkspaceOpen(false)}
+      />
     </div>
   );
 }

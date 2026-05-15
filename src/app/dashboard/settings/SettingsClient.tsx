@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -21,11 +21,17 @@ import {
   Calendar,
   Eye,
   EyeOff,
+  Plus,
+  Briefcase,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import DashboardSidebar from "@/components/dashboard-sidebar";
-import type { Workspace } from "@/lib/workspaces";
+import NewWorkspaceModal from "@/components/new-workspace-modal";
+import ArchiveWorkspaceDialog from "@/components/archive-workspace-dialog";
+import type { Workspace, WorkspaceWithMeta } from "@/lib/workspaces";
+import { formatActiveCount } from "@/lib/format-arabic";
 import { deleteAccountAction } from "./actions";
+import { setWorkspaceAsDefault } from "./workspaces/actions";
 
 interface SettingsClientProps {
   fullName: string;
@@ -34,6 +40,7 @@ interface SettingsClientProps {
   lastSignInAt: string | null;
   workspaces: Workspace[];
   activeWorkspaceId: number;
+  workspacesWithCounts: WorkspaceWithMeta[];
 }
 
 type TabId = "profile" | "password" | "security";
@@ -45,11 +52,37 @@ export default function SettingsClient({
   lastSignInAt,
   workspaces,
   activeWorkspaceId,
+  workspacesWithCounts,
 }: SettingsClientProps) {
   const router = useRouter();
   const supabase = createClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>("profile");
+
+  // Workspaces section — setDefault action state. Tracks which workspace
+  // row is currently pending so only that row shows its spinner.
+  const [isSetDefaultPending, startSetDefaultTransition] = useTransition();
+  const [pendingSetDefaultId, setPendingSetDefaultId] = useState<number | null>(
+    null
+  );
+  const [workspaceActionError, setWorkspaceActionError] = useState<
+    string | null
+  >(null);
+  const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
+  const [workspaceToArchive, setWorkspaceToArchive] =
+    useState<Workspace | null>(null);
+
+  const handleSetDefault = (id: number) => {
+    setWorkspaceActionError(null);
+    setPendingSetDefaultId(id);
+    startSetDefaultTransition(async () => {
+      const result = await setWorkspaceAsDefault(id);
+      setPendingSetDefaultId(null);
+      if ("error" in result) {
+        setWorkspaceActionError(result.error);
+      }
+    });
+  };
 
   // Profile tab state
   const [profileForm, setProfileForm] = useState({
@@ -293,6 +326,99 @@ export default function SettingsClient({
             <p className="text-gray-600">
               قم بإدارة معلومات حسابك وإعدادات الأمان
             </p>
+          </div>
+
+          {/* Workspaces section */}
+          <div className="bg-white border border-gray-100 rounded-xl mb-8 overflow-hidden">
+            <div className="flex items-start justify-between gap-4 px-6 py-4 border-b border-gray-100">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-10 h-10 bg-indigo-50 rounded-lg flex items-center justify-center flex-shrink-0">
+                  <Briefcase className="w-5 h-5 text-indigo-600" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-lg font-bold text-gray-900">Workspaces</h2>
+                  <p className="text-sm text-gray-500 mt-0.5">
+                    افصل بياناتك حسب العميل أو العلامة التجارية
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setNewWorkspaceOpen(true)}
+                className="inline-flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:shadow-lg transition flex-shrink-0"
+              >
+                <Plus className="w-4 h-4" />
+                workspace جديد
+              </button>
+            </div>
+
+            {workspaceActionError && (
+              <div className="mx-6 mt-4 bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-2.5 text-sm">
+                {workspaceActionError}
+              </div>
+            )}
+
+            <ul className="divide-y divide-gray-100">
+              {workspacesWithCounts.map((w) => {
+                const isPending =
+                  isSetDefaultPending && pendingSetDefaultId === w.id;
+                return (
+                  <li
+                    key={w.id}
+                    className="flex items-center gap-4 px-6 py-4 flex-wrap"
+                  >
+                    <div className="w-10 h-10 bg-gradient-to-br from-indigo-100 to-purple-100 text-indigo-700 rounded-lg flex items-center justify-center font-bold flex-shrink-0">
+                      {w.name.charAt(0).toUpperCase()}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="text-sm font-semibold text-gray-900 truncate">
+                          {w.name}
+                        </h3>
+                        {w.is_default && (
+                          <span className="bg-indigo-50 text-indigo-700 text-xs font-medium px-2 py-0.5 rounded">
+                            افتراضي
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        {formatActiveCount(w.activeConnections)}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      <Link
+                        href={`/dashboard/settings/workspaces/${w.id}/edit`}
+                        className="text-sm text-gray-600 hover:text-indigo-600 px-3 py-1.5 rounded hover:bg-gray-50 transition"
+                      >
+                        إعادة تسمية
+                      </Link>
+                      {!w.is_default && (
+                        <button
+                          type="button"
+                          onClick={() => handleSetDefault(w.id)}
+                          disabled={isPending}
+                          className="text-sm text-gray-600 hover:text-indigo-600 px-3 py-1.5 rounded hover:bg-gray-50 transition disabled:opacity-50 inline-flex items-center gap-1.5"
+                        >
+                          {isPending && (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          )}
+                          تعيين كافتراضي
+                        </button>
+                      )}
+                      {!w.is_default && (
+                        <button
+                          type="button"
+                          onClick={() => setWorkspaceToArchive(w)}
+                          className="text-sm text-red-600 hover:text-red-700 px-3 py-1.5 rounded hover:bg-red-50 transition"
+                        >
+                          أرشفة
+                        </button>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
           </div>
 
           {/* Tabs */}
@@ -725,6 +851,24 @@ export default function SettingsClient({
           </div>
         </div>
       )}
+
+      <NewWorkspaceModal
+        open={newWorkspaceOpen}
+        onClose={() => setNewWorkspaceOpen(false)}
+      />
+
+      <ArchiveWorkspaceDialog
+        key={workspaceToArchive?.id ?? "closed"}
+        open={!!workspaceToArchive}
+        onClose={() => setWorkspaceToArchive(null)}
+        workspace={workspaceToArchive}
+        activeConnectionsCount={
+          workspaceToArchive
+            ? workspacesWithCounts.find((w) => w.id === workspaceToArchive.id)
+                ?.activeConnections ?? 0
+            : 0
+        }
+      />
     </div>
   );
 }

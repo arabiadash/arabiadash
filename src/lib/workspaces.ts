@@ -11,6 +11,13 @@ export type Workspace = Pick<
 >;
 
 /**
+ * Workspace plus its active connection count. Used wherever the UI needs
+ * to show "N active accounts" next to a workspace name (settings list,
+ * future switcher tooltips, etc).
+ */
+export type WorkspaceWithMeta = Workspace & { activeConnections: number };
+
+/**
  * Get the user's default workspace ID.
  *
  * Every user has exactly one default workspace (enforced by partial unique
@@ -44,8 +51,11 @@ export async function getDefaultWorkspaceId(
 }
 
 /**
- * Get every workspace owned by the user, sorted default-first then
- * alphabetical by name. Drives the switcher dropdown.
+ * Get every non-archived workspace owned by the user, sorted default-first
+ * then alphabetical by name. Drives the switcher dropdown and settings list.
+ *
+ * Archived rows (archived_at IS NOT NULL) are excluded — they only exist
+ * for historical reference and never appear in the UI.
  *
  * Returns [] on DB error rather than throwing — the switcher shows
  * "loading" rather than crashing a server-rendered page.
@@ -57,7 +67,8 @@ export async function getUserWorkspaces(
   const { data, error } = await supabase
     .from("workspaces")
     .select("id, name, icon, is_default")
-    .eq("user_id", userId);
+    .eq("user_id", userId)
+    .is("archived_at", null);
 
   if (error) {
     console.error("[workspaces/getUserWorkspaces] DB error:", {
@@ -71,6 +82,37 @@ export async function getUserWorkspaces(
     if (a.is_default !== b.is_default) return a.is_default ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
+}
+
+/**
+ * Count active connections (status='active') under a given workspace.
+ *
+ * Used by archiveWorkspace to block archival when the workspace still
+ * owns live ad accounts — the user has to move them first.
+ *
+ * Returns 0 on DB error (safe default; archive will proceed and any
+ * actually-active connection becomes orphaned only if the DB error
+ * lied, which we accept as the trade-off for not blocking a legit archive).
+ */
+export async function getActiveConnectionsCount(
+  supabase: SupabaseClient<Database>,
+  workspaceId: number
+): Promise<number> {
+  const { count, error } = await supabase
+    .from("connections")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId)
+    .eq("status", "active");
+
+  if (error) {
+    console.error("[workspaces/getActiveConnectionsCount] DB error:", {
+      message: error.message,
+      code: error.code,
+    });
+    return 0;
+  }
+
+  return count ?? 0;
 }
 
 /**
