@@ -2,30 +2,20 @@
 
 import { useState, useMemo, useEffect } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import {
-  BarChart3,
   TrendingUp,
   DollarSign,
   ShoppingCart,
   Users,
-  Settings,
-  LogOut,
   Bell,
   Search,
   Menu,
-  X,
-  Home,
   Link2,
-  FileText,
-  HelpCircle,
-  Loader2,
   Plus,
-  ArrowLeft,
   ArrowUp,
   ArrowDown,
 } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import DashboardSidebar from "@/components/dashboard-sidebar";
 import {
   mockPlatformPerformance,
   platformNameToId,
@@ -108,10 +98,7 @@ export default function DashboardClient({
   email,
   connectedPlatforms,
 }: DashboardClientProps) {
-  const router = useRouter();
-  const supabase = createClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [signingOut, setSigningOut] = useState(false);
 
   // Date range (persisted to localStorage, synced cross-tab)
   const [dateRange, setDateRange] = useDateRangeStorage();
@@ -319,99 +306,17 @@ export default function DashboardClient({
     ];
   }, [aggregated, accountCurrency, currency, previousSummary]);
 
-  // Handle sign out
-  const handleSignOut = async () => {
-    setSigningOut(true);
-    await supabase.auth.signOut();
-    router.push("/");
-    router.refresh();
-  };
-
   const initial = fullName.charAt(0).toUpperCase();
-
-  // Sidebar menu items
-  const menuItems = [
-    { label: "الرئيسية", icon: Home, href: "/dashboard", active: true },
-    { label: "ربط المنصات", icon: Link2, href: "/dashboard/connections", active: false },
-    { label: "التقارير", icon: FileText, href: "/dashboard/reports", active: false },
-    { label: "الإعدادات", icon: Settings, href: "/dashboard/settings", active: false },
-    { label: "المساعدة", icon: HelpCircle, href: "#", active: false },
-  ];
 
   return (
     <div className="min-h-screen bg-gray-50" dir="rtl">
-      {/* Mobile Sidebar Overlay */}
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
-      {/* Sidebar */}
-      <aside
-        className={`fixed top-0 right-0 h-full w-64 bg-white border-l border-gray-200 z-50 transform transition-transform duration-200 lg:translate-x-0 ${
-          sidebarOpen ? "translate-x-0" : "translate-x-full lg:translate-x-0"
-        }`}
-      >
-        <div className="h-16 flex items-center justify-between px-6 border-b border-gray-100">
-          <Link href="/dashboard" className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-lg flex items-center justify-center">
-              <BarChart3 className="w-5 h-5 text-white" />
-            </div>
-            <span className="text-lg font-bold text-gray-900">ArabiaDash</span>
-          </Link>
-          <button
-            onClick={() => setSidebarOpen(false)}
-            className="lg:hidden text-gray-500"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <nav className="p-4 space-y-1">
-          {menuItems.map((item, i) => (
-            <Link
-              key={i}
-              href={item.href}
-              className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition ${
-                item.active
-                  ? "bg-indigo-50 text-indigo-700"
-                  : "text-gray-700 hover:bg-gray-50"
-              }`}
-            >
-              <item.icon className="w-5 h-5" />
-              {item.label}
-            </Link>
-          ))}
-        </nav>
-
-        <div className="absolute bottom-0 right-0 left-0 p-4 border-t border-gray-100">
-          <div className="flex items-center gap-3 mb-3 px-2">
-            <div className="w-10 h-10 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-full flex items-center justify-center text-white font-bold">
-              {initial}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-gray-900 truncate">
-                {fullName}
-              </p>
-              <p className="text-xs text-gray-500 truncate">{email}</p>
-            </div>
-          </div>
-          <button
-            onClick={handleSignOut}
-            disabled={signingOut}
-            className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 transition disabled:opacity-50"
-          >
-            {signingOut ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
-            ) : (
-              <LogOut className="w-5 h-5" />
-            )}
-            {signingOut ? "جاري الخروج..." : "تسجيل الخروج"}
-          </button>
-        </div>
-      </aside>
+      <DashboardSidebar
+        fullName={fullName}
+        email={email}
+        activeRoute="/dashboard"
+        sidebarOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+      />
 
       {/* Main Content */}
       <div className="lg:mr-64">

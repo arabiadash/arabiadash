@@ -4,17 +4,9 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
-  BarChart3,
-  Settings,
-  LogOut,
   Bell,
   Search,
   Menu,
-  X,
-  Home,
-  Link2,
-  FileText,
-  HelpCircle,
   Loader2,
   CheckCircle2,
   ArrowLeft,
@@ -25,6 +17,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import DashboardSidebar from "@/components/dashboard-sidebar";
 import { platforms } from "@/lib/mock-data";
 
 interface ConnectionsClientProps {
@@ -57,7 +50,6 @@ export default function ConnectionsClient({
   const searchParams = useSearchParams();
   const supabase = createClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [signingOut, setSigningOut] = useState(false);
 
   // Connection states
   const [connecting, setConnecting] = useState<string | null>(null);
@@ -117,7 +109,7 @@ export default function ConnectionsClient({
     // Meta uses real OAuth flow — redirect to init route, which sets state
     // cookie and redirects to Facebook's OAuth dialog.
     if (platformId === "meta") {
-      window.location.href = "/api/auth/meta/init";
+      window.location.assign("/api/auth/meta/init");
       return;
     }
 
@@ -141,7 +133,7 @@ export default function ConnectionsClient({
       user_id: user.id,
       workspace_id: workspace.id,
       platform: platformId,
-      account_id: `placeholder_${platformId}_${Date.now()}`,
+      account_id: `placeholder_${platformId}_${crypto.randomUUID()}`,
       access_token: "placeholder",
       status: "active",
     });
@@ -193,24 +185,7 @@ export default function ConnectionsClient({
     router.refresh();
   };
 
-  // Handle sign out
-  const handleSignOut = async () => {
-    setSigningOut(true);
-    await supabase.auth.signOut();
-    router.push("/");
-    router.refresh();
-  };
-
   const initial = fullName.charAt(0).toUpperCase();
-
-  // Sidebar menu items
-  const menuItems = [
-    { label: "الرئيسية", icon: Home, href: "/dashboard", active: false },
-    { label: "ربط المنصات", icon: Link2, href: "/dashboard/connections", active: true },
-    { label: "التقارير", icon: FileText, href: "/dashboard/reports", active: false },
-    { label: "الإعدادات", icon: Settings, href: "/dashboard/settings", active: false },
-    { label: "المساعدة", icon: HelpCircle, href: "#", active: false },
-  ];
 
   // Filter platforms by category
   const adPlatforms = platforms.filter((p) => p.category === "ads");
@@ -218,78 +193,13 @@ export default function ConnectionsClient({
 
   return (
     <div className="min-h-screen bg-gray-50" dir="rtl">
-      {/* Mobile Sidebar Overlay */}
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
-      {/* Sidebar */}
-      <aside
-        className={`fixed top-0 right-0 h-full w-64 bg-white border-l border-gray-200 z-50 transform transition-transform duration-200 lg:translate-x-0 ${
-          sidebarOpen ? "translate-x-0" : "translate-x-full lg:translate-x-0"
-        }`}
-      >
-        <div className="h-16 flex items-center justify-between px-6 border-b border-gray-100">
-          <Link href="/dashboard" className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-lg flex items-center justify-center">
-              <BarChart3 className="w-5 h-5 text-white" />
-            </div>
-            <span className="text-lg font-bold text-gray-900">ArabiaDash</span>
-          </Link>
-          <button
-            onClick={() => setSidebarOpen(false)}
-            className="lg:hidden text-gray-500"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <nav className="p-4 space-y-1">
-          {menuItems.map((item, i) => (
-            <Link
-              key={i}
-              href={item.href}
-              className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition ${
-                item.active
-                  ? "bg-indigo-50 text-indigo-700"
-                  : "text-gray-700 hover:bg-gray-50"
-              }`}
-            >
-              <item.icon className="w-5 h-5" />
-              {item.label}
-            </Link>
-          ))}
-        </nav>
-
-        <div className="absolute bottom-0 right-0 left-0 p-4 border-t border-gray-100">
-          <div className="flex items-center gap-3 mb-3 px-2">
-            <div className="w-10 h-10 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-full flex items-center justify-center text-white font-bold">
-              {initial}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-gray-900 truncate">
-                {fullName}
-              </p>
-              <p className="text-xs text-gray-500 truncate">{email}</p>
-            </div>
-          </div>
-          <button
-            onClick={handleSignOut}
-            disabled={signingOut}
-            className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 transition disabled:opacity-50"
-          >
-            {signingOut ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
-            ) : (
-              <LogOut className="w-5 h-5" />
-            )}
-            {signingOut ? "جاري الخروج..." : "تسجيل الخروج"}
-          </button>
-        </div>
-      </aside>
+      <DashboardSidebar
+        fullName={fullName}
+        email={email}
+        activeRoute="/dashboard/connections"
+        sidebarOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+      />
 
       {/* Main Content */}
       <div className="lg:mr-64">
@@ -480,7 +390,7 @@ export default function ConnectionsClient({
                       // Google with no connections — kick off OAuth
                       <button
                         onClick={() => {
-                          window.location.href = "/api/google-ads/auth";
+                          window.location.assign("/api/google-ads/auth");
                         }}
                         className="w-full bg-gradient-to-r from-red-500 to-orange-500 text-white py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg transition flex items-center justify-center gap-2"
                       >
@@ -512,7 +422,7 @@ export default function ConnectionsClient({
                       // Meta with no connections — kick off OAuth (Facebook blue)
                       <button
                         onClick={() => {
-                          window.location.href = "/api/auth/meta/init";
+                          window.location.assign("/api/auth/meta/init");
                         }}
                         className="w-full bg-gradient-to-r from-blue-600 to-blue-700 text-white py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg transition flex items-center justify-center gap-2"
                       >

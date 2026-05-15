@@ -2,19 +2,13 @@
 
 import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import {
-  BarChart3,
-  Settings,
-  LogOut,
   Bell,
   Search,
   Menu,
   X,
-  Home,
   Link2,
   FileText,
-  HelpCircle,
   Loader2,
   Download,
   Mail,
@@ -33,7 +27,7 @@ import {
   ArrowDown,
   RefreshCw,
 } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import DashboardSidebar from "@/components/dashboard-sidebar";
 import {
   useInsights,
   dateRangeValueToOptions,
@@ -60,7 +54,6 @@ import {
   formatChartTooltipLabel,
   type DateRangeValue,
   type UnifiedCampaign,
-  type UnifiedInsight,
   type UnifiedAd,
 } from "@/lib/ads/types";
 import {
@@ -1090,10 +1083,7 @@ export default function ReportsClient({
   email,
   connectedPlatforms,
 }: ReportsClientProps) {
-  const router = useRouter();
-  const supabase = createClient();
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [signingOut, setSigningOut] = useState(false);
 
   const [dateRange, setDateRange] = useDateRangeStorage();
 
@@ -1428,13 +1418,6 @@ export default function ReportsClient({
     ]
   );
 
-  const handleSignOut = async () => {
-    setSigningOut(true);
-    await supabase.auth.signOut();
-    router.push("/");
-    router.refresh();
-  };
-
   const handleExport = (format: "pdf" | "excel" | "email") => {
     alert(
       format === "pdf"
@@ -1449,83 +1432,51 @@ export default function ReportsClient({
   const hasConnections = connectedPlatforms.length > 0;
   const customRangeLabel = formatCustomRangeLabel(dateRange);
 
-  const menuItems = [
-    { label: "الرئيسية", icon: Home, href: "/dashboard", active: false },
-    {
-      label: "ربط المنصات",
-      icon: Link2,
-      href: "/dashboard/connections",
-      active: false,
-    },
-    {
-      label: "التقارير",
-      icon: FileText,
-      href: "/dashboard/reports",
-      active: true,
-    },
-    {
-      label: "الإعدادات",
-      icon: Settings,
-      href: "/dashboard/settings",
-      active: false,
-    },
-    { label: "المساعدة", icon: HelpCircle, href: "#", active: false },
-  ];
-
   // ============================================================
   // Empty state — no connections at all
   // ============================================================
   if (!hasConnections) {
     return (
       <div className="min-h-screen bg-gray-50" dir="rtl">
-        <aside className="fixed top-0 right-0 h-full w-64 bg-white border-l border-gray-200 z-50 hidden lg:block">
-          <div className="h-16 flex items-center px-6 border-b border-gray-100">
-            <Link href="/dashboard" className="flex items-center gap-2">
-              <div className="w-8 h-8 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-lg flex items-center justify-center">
-                <BarChart3 className="w-5 h-5 text-white" />
-              </div>
-              <span className="text-lg font-bold text-gray-900">
-                ArabiaDash
-              </span>
-            </Link>
-          </div>
-          <nav className="p-4 space-y-1">
-            {menuItems.map((item, i) => (
-              <Link
-                key={i}
-                href={item.href}
-                className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition ${
-                  item.active
-                    ? "bg-indigo-50 text-indigo-700"
-                    : "text-gray-700 hover:bg-gray-50"
-                }`}
-              >
-                <item.icon className="w-5 h-5" />
-                {item.label}
-              </Link>
-            ))}
-          </nav>
-        </aside>
+        <DashboardSidebar
+          fullName={fullName}
+          email={email}
+          activeRoute="/dashboard/reports"
+          sidebarOpen={sidebarOpen}
+          onClose={() => setSidebarOpen(false)}
+        />
 
-        <div className="lg:mr-64 p-8">
-          <div className="max-w-2xl mx-auto text-center pt-20">
-            <div className="w-20 h-20 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-6">
-              <FileText className="w-10 h-10 text-indigo-600" />
+        <div className="lg:mr-64">
+          {/* Minimal header for mobile drawer access — empty state still
+              needs sign-out / nav reachable on small screens. */}
+          <header className="bg-white border-b border-gray-200 sticky top-0 z-30 lg:hidden">
+            <div className="flex items-center h-16 px-4">
+              <button onClick={() => setSidebarOpen(true)}>
+                <Menu className="w-6 h-6" />
+              </button>
             </div>
-            <h1 className="text-3xl font-bold text-gray-900 mb-3">
-              لا توجد بيانات لعرضها
-            </h1>
-            <p className="text-gray-600 mb-8 leading-relaxed">
-              اربط منصاتك الإعلانية أولاً لتتمكن من رؤية التقارير والتحليلات
-              التفصيلية لحملاتك
-            </p>
-            <Link
-              href="/dashboard/connections"
-              className="inline-flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-6 py-3 rounded-lg font-semibold hover:shadow-lg transition"
-            >
-              <Link2 className="w-5 h-5" />
-              ربط المنصات الآن
-            </Link>
+          </header>
+
+          <div className="p-8">
+            <div className="max-w-2xl mx-auto text-center pt-20">
+              <div className="w-20 h-20 bg-indigo-100 rounded-full flex items-center justify-center mx-auto mb-6">
+                <FileText className="w-10 h-10 text-indigo-600" />
+              </div>
+              <h1 className="text-3xl font-bold text-gray-900 mb-3">
+                لا توجد بيانات لعرضها
+              </h1>
+              <p className="text-gray-600 mb-8 leading-relaxed">
+                اربط منصاتك الإعلانية أولاً لتتمكن من رؤية التقارير
+                والتحليلات التفصيلية لحملاتك
+              </p>
+              <Link
+                href="/dashboard/connections"
+                className="inline-flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-6 py-3 rounded-lg font-semibold hover:shadow-lg transition"
+              >
+                <Link2 className="w-5 h-5" />
+                ربط المنصات الآن
+              </Link>
+            </div>
           </div>
         </div>
       </div>
@@ -1603,78 +1554,13 @@ export default function ReportsClient({
 
   return (
     <div className="min-h-screen bg-gray-50" dir="rtl">
-      {/* Mobile Sidebar Overlay */}
-      {sidebarOpen && (
-        <div
-          className="fixed inset-0 bg-black/50 z-40 lg:hidden"
-          onClick={() => setSidebarOpen(false)}
-        />
-      )}
-
-      {/* Sidebar */}
-      <aside
-        className={`fixed top-0 right-0 h-full w-64 bg-white border-l border-gray-200 z-50 transform transition-transform duration-200 lg:translate-x-0 ${
-          sidebarOpen ? "translate-x-0" : "translate-x-full lg:translate-x-0"
-        }`}
-      >
-        <div className="h-16 flex items-center justify-between px-6 border-b border-gray-100">
-          <Link href="/dashboard" className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-lg flex items-center justify-center">
-              <BarChart3 className="w-5 h-5 text-white" />
-            </div>
-            <span className="text-lg font-bold text-gray-900">ArabiaDash</span>
-          </Link>
-          <button
-            onClick={() => setSidebarOpen(false)}
-            className="lg:hidden text-gray-500"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <nav className="p-4 space-y-1">
-          {menuItems.map((item, i) => (
-            <Link
-              key={i}
-              href={item.href}
-              className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition ${
-                item.active
-                  ? "bg-indigo-50 text-indigo-700"
-                  : "text-gray-700 hover:bg-gray-50"
-              }`}
-            >
-              <item.icon className="w-5 h-5" />
-              {item.label}
-            </Link>
-          ))}
-        </nav>
-
-        <div className="absolute bottom-0 right-0 left-0 p-4 border-t border-gray-100">
-          <div className="flex items-center gap-3 mb-3 px-2">
-            <div className="w-10 h-10 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-full flex items-center justify-center text-white font-bold">
-              {initial}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold text-gray-900 truncate">
-                {fullName}
-              </p>
-              <p className="text-xs text-gray-500 truncate">{email}</p>
-            </div>
-          </div>
-          <button
-            onClick={handleSignOut}
-            disabled={signingOut}
-            className="w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 transition disabled:opacity-50"
-          >
-            {signingOut ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
-            ) : (
-              <LogOut className="w-5 h-5" />
-            )}
-            {signingOut ? "جاري الخروج..." : "تسجيل الخروج"}
-          </button>
-        </div>
-      </aside>
+      <DashboardSidebar
+        fullName={fullName}
+        email={email}
+        activeRoute="/dashboard/reports"
+        sidebarOpen={sidebarOpen}
+        onClose={() => setSidebarOpen(false)}
+      />
 
       {/* Main */}
       <div className="lg:mr-64">
