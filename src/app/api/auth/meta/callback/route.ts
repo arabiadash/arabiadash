@@ -2,12 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient as createServerClient } from "@/lib/supabase/server";
 import { createClient } from "@supabase/supabase-js";
+import type { Database } from "@/lib/supabase/database.types";
 import {
   exchangeCodeForToken,
   exchangeForLongLivedToken,
   META_SCOPES,
 } from "@/lib/meta/oauth";
 import { getAdAccounts, getMetaUserInfo } from "@/lib/meta/api";
+import { getDefaultWorkspaceId } from "@/lib/workspaces";
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -98,7 +100,7 @@ export async function GET(request: NextRequest) {
     //   - New rows: status='pending' (user activates from UI)
     //   - Existing rows: preserve status (don't override active→pending)
     //   - User picks which accounts to activate at /dashboard/connections/meta
-    const adminClient = createClient(
+    const adminClient = createClient<Database>(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!,
       { auth: { persistSession: false } }
@@ -128,6 +130,20 @@ export async function GET(request: NextRequest) {
       (existingRows ?? []).map((r) => [r.account_id, r.status])
     );
 
+    // Every new connection row needs a workspace_id (NOT NULL). Until the
+    // workspace switcher lands in Phase 4.4b, new rows go into the user's
+    // default workspace.
+    const workspaceId = await getDefaultWorkspaceId(adminClient, user.id);
+    if (!workspaceId) {
+      console.error(
+        "[meta/callback] No default workspace for user:",
+        user.id
+      );
+      return NextResponse.redirect(
+        new URL("/dashboard/connections?error=meta_db_error", request.url)
+      );
+    }
+
     const nowIso = new Date().toISOString();
 
     const rowsToUpsert = adAccounts.map((account) => {
@@ -137,6 +153,7 @@ export async function GET(request: NextRequest) {
 
       return {
         user_id: user.id,
+        workspace_id: workspaceId,
         platform: "meta",
         account_id: account.id,
         account_name: account.name,

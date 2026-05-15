@@ -121,9 +121,28 @@ export default function ConnectionsClient({
       return;
     }
 
+    // Legacy path for TikTok/Snapchat — no real OAuth yet (Phase 7/8). We
+    // insert a placeholder row so the UI can flip into the "connected"
+    // state. Real account_id + access_token arrive when those flows ship.
+    const { data: workspace } = await supabase
+      .from("workspaces")
+      .select("id")
+      .eq("user_id", user.id)
+      .eq("is_default", true)
+      .maybeSingle();
+
+    if (!workspace) {
+      setConnecting(null);
+      showError("تعذّر العثور على مساحة العمل. حاول مرة أخرى.");
+      return;
+    }
+
     const { error } = await supabase.from("connections").insert({
       user_id: user.id,
+      workspace_id: workspace.id,
       platform: platformId,
+      account_id: `placeholder_${platformId}_${Date.now()}`,
+      access_token: "placeholder",
       status: "active",
     });
 

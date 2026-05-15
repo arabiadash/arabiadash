@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { createClient as createServerClient } from "@/lib/supabase/server";
+import type { Database } from "@/lib/supabase/database.types";
 import { getUserAccountsLimit, buildLimitError } from "@/lib/plans";
 
 export const dynamic = "force-dynamic";
@@ -62,7 +63,7 @@ export async function PATCH(
     // 3. Admin client — RLS would block status writes from a user session;
     // we filter by user_id on every query so the user can only touch their
     // own rows.
-    const adminClient = createClient(
+    const adminClient = createClient<Database>(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!,
       { auth: { persistSession: false } }

@@ -2,10 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { createClient as createServerClient } from "@/lib/supabase/server";
+import type { Database } from "@/lib/supabase/database.types";
 import {
   exchangeCodeForTokens,
   getAccessibleCustomers,
 } from "@/lib/google-ads/oauth";
+import { getDefaultWorkspaceId } from "@/lib/workspaces";
 
 export const dynamic = "force-dynamic";
 
@@ -77,7 +79,7 @@ export async function GET(request: NextRequest) {
     //
     // Google-specific fields land in metadata; sync-accounts enriches it
     // later with currency/timezone/is_manager/manager_customer_id.
-    const adminClient = createClient(
+    const adminClient = createClient<Database>(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!,
       { auth: { persistSession: false } }
@@ -87,11 +89,20 @@ export async function GET(request: NextRequest) {
       Date.now() + tokens.expires_in * 1000
     ).toISOString();
 
+    // Every new connection row needs a workspace_id (NOT NULL). Until the
+    // workspace switcher lands in Phase 4.4b, new rows go into the user's
+    // default workspace.
+    const workspaceId = await getDefaultWorkspaceId(adminClient, user.id);
+    if (!workspaceId) {
+      return errorRedirect(request, "internal_error");
+    }
+
     const { error: upsertError } = await adminClient
       .from("connections")
       .upsert(
         customerIds.map((customerId) => ({
           user_id: user.id,
+          workspace_id: workspaceId,
           platform: "google",
           account_id: customerId,
           account_name: null,

@@ -42,3 +42,7 @@ next-env.d.ts
 
 # Claude Code (local settings, permissions, hooks)
 .claude/
+
+# Supabase CLI artifacts
+supabase/.temp/
+supabase/.branches/

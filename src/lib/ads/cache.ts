@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import type { Json } from "@/lib/supabase/database.types";
 
 const CACHE_TTL_MINUTES = 15;
 
@@ -71,7 +72,7 @@ export async function setCachedData<T>(
       connection_id: connectionId,
       provider,
       cache_key: cacheKey,
-      data: data as object,
+      data: data as Json,
       fetched_at: now.toISOString(),
       expires_at: expiresAt.toISOString(),
       fresh_until: freshUntil.toISOString(),
@@ -189,7 +190,7 @@ export async function setCachedCreatives<T>(params: {
       provider: params.provider,
       account_id: params.accountId,
       date_range: params.dateRange,
-      data: params.data as unknown as object,
+      data: params.data as unknown as Json,
       fetched_at: now.toISOString(),
       fresh_until: freshUntil.toISOString(),
       stale_until: staleUntil.toISOString(),
