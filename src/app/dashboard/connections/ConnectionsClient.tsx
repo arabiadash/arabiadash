@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import DashboardSidebar from "@/components/dashboard-sidebar";
+import type { Workspace } from "@/lib/workspaces";
 import { platforms } from "@/lib/mock-data";
 
 interface ConnectionsClientProps {
@@ -26,6 +27,8 @@ interface ConnectionsClientProps {
   email: string;
   initialConnections: string[];
   platformCounts: Record<string, { active: number; total: number }>;
+  workspaces: Workspace[];
+  activeWorkspaceId: number;
 }
 
 const META_ERROR_MESSAGES: Record<string, string> = {
@@ -45,6 +48,8 @@ export default function ConnectionsClient({
   email,
   initialConnections,
   platformCounts,
+  workspaces,
+  activeWorkspaceId,
 }: ConnectionsClientProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -199,6 +204,8 @@ export default function ConnectionsClient({
         activeRoute="/dashboard/connections"
         sidebarOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        workspaces={workspaces}
+        activeWorkspaceId={activeWorkspaceId}
       />
 
       {/* Main Content */}

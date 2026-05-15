@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import { ACTIVE_ACCOUNTS_LIMIT } from "@/lib/plans";
 import MetaConnectionsClient from "./MetaConnectionsClient";
+import { getUserWorkspaces, resolveActiveWorkspace } from "@/lib/workspaces";
 
 export const dynamic = "force-dynamic";
 
@@ -15,7 +16,14 @@ export interface MetaAccountRow {
   account_status: number | null;
 }
 
-export default async function MetaConnectionsPage() {
+type PageProps = {
+  searchParams: Promise<{ [k: string]: string | string[] | undefined }>;
+};
+
+export default async function MetaConnectionsPage({
+  searchParams,
+}: PageProps) {
+  const params = await searchParams;
   const supabase = await createClient();
 
   const {
@@ -29,13 +37,18 @@ export default async function MetaConnectionsPage() {
   const fullName = user.user_metadata?.full_name || "مستخدم";
   const email = user.email || "";
 
-  // Fetch all Meta connections for this user.
-  const { data: connectionsData } = await supabase
-    .from("connections")
-    .select("id, account_id, account_name, status, metadata")
-    .eq("user_id", user.id)
-    .eq("platform", "meta")
-    .order("id", { ascending: true });
+  // Parallel: Meta connections + workspace data.
+  const [{ data: connectionsData }, workspaces, activeWorkspace] =
+    await Promise.all([
+      supabase
+        .from("connections")
+        .select("id, account_id, account_name, status, metadata")
+        .eq("user_id", user.id)
+        .eq("platform", "meta")
+        .order("id", { ascending: true }),
+      getUserWorkspaces(supabase, user.id),
+      resolveActiveWorkspace(supabase, user.id, params.workspace),
+    ]);
 
   const accounts: MetaAccountRow[] = (connectionsData ?? []).map((row) => {
     const metadata =
@@ -67,6 +80,8 @@ export default async function MetaConnectionsPage() {
       email={email}
       accounts={accounts}
       limit={ACTIVE_ACCOUNTS_LIMIT}
+      workspaces={workspaces}
+      activeWorkspaceId={activeWorkspace.id}
     />
   );
 }

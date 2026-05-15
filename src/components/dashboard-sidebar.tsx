@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   BarChart3,
   X,
@@ -15,6 +15,8 @@ import {
   LogOut,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import WorkspaceSwitcher from "./workspace-switcher";
+import type { Workspace } from "@/lib/workspaces";
 
 interface DashboardSidebarProps {
   fullName: string;
@@ -28,6 +30,13 @@ interface DashboardSidebarProps {
   activeRoute: string;
   sidebarOpen: boolean;
   onClose: () => void;
+  /**
+   * Workspace data, optional during the Phase 4.4b sub-B migration. When
+   * absent (parent hasn't been updated yet), the switcher is hidden and
+   * nav links don't carry the workspace param. Both pieces appear together.
+   */
+  workspaces?: Workspace[];
+  activeWorkspaceId?: number;
 }
 
 const MENU_ITEMS = [
@@ -51,8 +60,11 @@ export default function DashboardSidebar({
   activeRoute,
   sidebarOpen,
   onClose,
+  workspaces,
+  activeWorkspaceId,
 }: DashboardSidebarProps) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const supabase = createClient();
   const [signingOut, setSigningOut] = useState(false);
 
@@ -65,6 +77,15 @@ export default function DashboardSidebar({
     itemHref === "/dashboard"
       ? activeRoute === "/dashboard"
       : activeRoute.startsWith(itemHref);
+
+  // Preserve the active workspace across navigations. Non-route hrefs
+  // (e.g. "#" placeholder for "المساعدة") pass through unchanged so we
+  // don't end up with "#?workspace=5".
+  const workspaceParam = searchParams.get("workspace");
+  const buildHref = (path: string) =>
+    workspaceParam && path.startsWith("/")
+      ? `${path}?workspace=${workspaceParam}`
+      : path;
 
   const handleSignOut = async () => {
     setSigningOut(true);
@@ -89,7 +110,7 @@ export default function DashboardSidebar({
         }`}
       >
         <div className="h-16 flex items-center justify-between px-6 border-b border-gray-100">
-          <Link href="/dashboard" className="flex items-center gap-2">
+          <Link href={buildHref("/dashboard")} className="flex items-center gap-2">
             <div className="w-8 h-8 bg-gradient-to-br from-indigo-600 to-purple-600 rounded-lg flex items-center justify-center">
               <BarChart3 className="w-5 h-5 text-white" />
             </div>
@@ -100,13 +121,22 @@ export default function DashboardSidebar({
           </button>
         </div>
 
+        {workspaces && workspaces.length > 0 && activeWorkspaceId !== undefined && (
+          <div className="border-b border-gray-100">
+            <WorkspaceSwitcher
+              workspaces={workspaces}
+              activeWorkspaceId={activeWorkspaceId}
+            />
+          </div>
+        )}
+
         <nav className="p-4 space-y-1">
           {MENU_ITEMS.map((item) => {
             const active = isActive(item.href);
             return (
               <Link
                 key={item.href}
-                href={item.href}
+                href={buildHref(item.href)}
                 className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-lg text-sm font-medium transition ${
                   active
                     ? "bg-indigo-50 text-indigo-700"

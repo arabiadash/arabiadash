@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import DashboardSidebar from "@/components/dashboard-sidebar";
+import type { Workspace } from "@/lib/workspaces";
 import { deleteAccountAction } from "./actions";
 
 interface SettingsClientProps {
@@ -31,6 +32,8 @@ interface SettingsClientProps {
   companyName: string;
   email: string;
   lastSignInAt: string | null;
+  workspaces: Workspace[];
+  activeWorkspaceId: number;
 }
 
 type TabId = "profile" | "password" | "security";
@@ -40,6 +43,8 @@ export default function SettingsClient({
   companyName,
   email,
   lastSignInAt,
+  workspaces,
+  activeWorkspaceId,
 }: SettingsClientProps) {
   const router = useRouter();
   const supabase = createClient();
@@ -234,6 +239,8 @@ export default function SettingsClient({
         activeRoute="/dashboard/settings"
         sidebarOpen={sidebarOpen}
         onClose={() => setSidebarOpen(false)}
+        workspaces={workspaces}
+        activeWorkspaceId={activeWorkspaceId}
       />
 
       {/* Main Content */}
