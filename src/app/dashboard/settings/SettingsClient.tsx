@@ -27,7 +27,9 @@ import {
 import { createClient } from "@/lib/supabase/client";
 import DashboardSidebar from "@/components/dashboard-sidebar";
 import NewWorkspaceModal from "@/components/new-workspace-modal";
+import ArchiveWorkspaceDialog from "@/components/archive-workspace-dialog";
 import type { Workspace, WorkspaceWithMeta } from "@/lib/workspaces";
+import { formatActiveCount } from "@/lib/format-arabic";
 import { deleteAccountAction } from "./actions";
 import { setWorkspaceAsDefault } from "./workspaces/actions";
 
@@ -39,18 +41,6 @@ interface SettingsClientProps {
   workspaces: Workspace[];
   activeWorkspaceId: number;
   workspacesWithCounts: WorkspaceWithMeta[];
-}
-
-/**
- * Arabic-correct pluralization for "N active accounts" sub-text.
- * Uses dual + plural forms (Arabic has distinct grammar for 0/1/2/3-10/11+).
- */
-function formatActiveCount(n: number): string {
-  if (n === 0) return "لا حسابات نشطة";
-  if (n === 1) return "حساب نشط واحد";
-  if (n === 2) return "حسابان نشطان";
-  if (n >= 3 && n <= 10) return `${n} حسابات نشطة`;
-  return `${n} حساباً نشطاً`;
 }
 
 type TabId = "profile" | "password" | "security";
@@ -79,6 +69,8 @@ export default function SettingsClient({
     string | null
   >(null);
   const [newWorkspaceOpen, setNewWorkspaceOpen] = useState(false);
+  const [workspaceToArchive, setWorkspaceToArchive] =
+    useState<Workspace | null>(null);
 
   const handleSetDefault = (id: number) => {
     setWorkspaceActionError(null);
@@ -414,12 +406,10 @@ export default function SettingsClient({
                         </button>
                       )}
                       {!w.is_default && (
-                        // TODO(phase-8): wire to ArchiveConfirmDialog
                         <button
                           type="button"
-                          disabled
-                          title="قريباً"
-                          className="text-sm text-red-600 hover:text-red-700 px-3 py-1.5 rounded hover:bg-red-50 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                          onClick={() => setWorkspaceToArchive(w)}
+                          className="text-sm text-red-600 hover:text-red-700 px-3 py-1.5 rounded hover:bg-red-50 transition"
                         >
                           أرشفة
                         </button>
@@ -865,6 +855,19 @@ export default function SettingsClient({
       <NewWorkspaceModal
         open={newWorkspaceOpen}
         onClose={() => setNewWorkspaceOpen(false)}
+      />
+
+      <ArchiveWorkspaceDialog
+        key={workspaceToArchive?.id ?? "closed"}
+        open={!!workspaceToArchive}
+        onClose={() => setWorkspaceToArchive(null)}
+        workspace={workspaceToArchive}
+        activeConnectionsCount={
+          workspaceToArchive
+            ? workspacesWithCounts.find((w) => w.id === workspaceToArchive.id)
+                ?.activeConnections ?? 0
+            : 0
+        }
       />
     </div>
   );
