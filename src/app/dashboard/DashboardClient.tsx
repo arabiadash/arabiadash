@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo } from "react";
 import Link from "next/link";
 import {
   TrendingUp,
@@ -19,14 +19,11 @@ import DashboardSidebar from "@/components/dashboard-sidebar";
 import DashboardEmptyState from "@/components/dashboard-empty-state";
 import type { Workspace, WorkspaceConnection } from "@/lib/workspaces";
 import {
-  mockPlatformPerformance,
-  platformNameToId,
-  getConnectedAdPlatforms,
-} from "@/lib/mock-data";
-import {
   useInsights,
   dateRangeValueToOptions,
 } from "@/lib/hooks/use-insights";
+import { useProviderInsights } from "@/lib/hooks/use-provider-insights";
+import type { UnifiedInsight } from "@/lib/ads/types";
 import { useCurrency } from "@/lib/contexts/currency-context";
 import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
 import { useElementHeight } from "@/lib/hooks/useElementHeight";
@@ -35,7 +32,6 @@ import {
   computeDelta,
 } from "@/lib/period-comparison";
 import {
-  formatAndConvert,
   formatCurrency as formatCurrencyWithSymbol,
   convertCurrency,
   CURRENCY_LABELS,
@@ -130,10 +126,23 @@ export default function DashboardClient({
     [connections]
   );
 
+  // Google is multi-account: the active workspace can have N active Google
+  // connections (entry #5 from the architecture notes). useProviderInsights
+  // fans out one API call per account in parallel; empty array → skip.
+  const googleAccountIds = useMemo(
+    () =>
+      connections
+        .filter((c) => c.platform === "google")
+        .map((c) => c.account_id),
+    [connections]
+  );
+
   // Date range (persisted to localStorage, synced cross-tab)
   const [dateRange, setDateRange] = useDateRangeStorage();
 
-  // KPI insights — single aggregate row for the selected range
+  // KPI insights — Meta (single account) + Google (multi-account).
+  // Both feed the same `aggregated` useMemo below, which handles
+  // multi-currency merging at the row level.
   const {
     insights,
     loading: insightsLoading,
@@ -145,8 +154,13 @@ export default function DashboardClient({
     accountId: metaAccountId,
     skip: !metaAccountId,
   });
+  const googleInsights = useProviderInsights({
+    provider: "google",
+    accountIds: googleAccountIds,
+    ...dateRangeValueToOptions(dateRange),
+    level: "account",
+  });
   const { currency } = useCurrency();
-  const [accountCurrency, setAccountCurrency] = useState<Currency>("USD");
 
   // Measure each chart's wrapper height so we can pass an explicit pixel
   // value to ResponsiveContainer. Avoids Recharts' `width(-1)/height(-1)`
@@ -155,44 +169,73 @@ export default function DashboardClient({
   const [platformRef, platformHeight] = useElementHeight<HTMLDivElement>();
   const [roasRef, roasHeight] = useElementHeight<HTMLDivElement>();
 
-  useEffect(() => {
-    // When metaAccountId is undefined (no Meta in this workspace), skip
-    // the fetch. The previous accountCurrency value persists — that's
-    // fine because the useInsights skip means no insights render either,
-    // so no number is being converted.
-    //
-    // Important: this depends on useInsights skipping when metaAccountId
-    // is undefined. If that guard is removed, stale currency could
-    // surface in conversions.
-    if (!metaAccountId) return;
-    fetch(`/api/ads/account?provider=meta&account_id=${metaAccountId}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        const c = data?.currency;
-        if (c === "USD" || c === "SAR") {
-          setAccountCurrency(c);
-        }
-      })
-      .catch(() => {});
-  }, [metaAccountId]);
-
-  // Aggregate UnifiedInsight[] into totals + recalculated ROAS.
-  // Range='30d' typically returns one row, but reduce handles N rows safely.
+  // Aggregate UnifiedInsight[] across Meta + Google into KPI totals.
+  //
+  // Multi-currency handling:
+  //   - Rows in USD/SAR: converted to the user's display currency, summed
+  //   - Rows in other currencies (AED, EGP, EUR, …): grouped by currency
+  //     and surfaced as side-totals via `unsupportedTotals` so the UI
+  //     can show "+ 5,000 AED" badges next to the main number.
+  //   - `isMixed` flag tells the UI when to render those badges.
+  //
+  // Phase 4.9 will add live exchange rates to fold unsupported currencies
+  // into the main aggregate. Until then we never silently drop or
+  // misconvert — every dirham/pound stays visible to the user.
+  //
+  // TODO(phase-4.9): when all data is in unsupported currency (supported
+  // totals = 0 but isMixed = true), the KPI cards render "0.00 ر.س" with
+  // badges underneath — technically accurate (supported portion is 0)
+  // but misleading at-a-glance. Real fix is live FX so we can fold AED/
+  // EGP/etc. into the main aggregate. Until then, consider rendering "—"
+  // for the main value in this specific case.
   const aggregated = useMemo(() => {
-    if (insights.length === 0) return null;
-    const totals = insights.reduce(
-      (acc, ins) => ({
-        spend: acc.spend + ins.spend,
-        revenue: acc.revenue + ins.revenue,
-        purchases: acc.purchases + ins.purchases,
-      }),
+    const allInsights = [...insights, ...googleInsights.insights];
+    if (allInsights.length === 0) return null;
+
+    const supportedRows = allInsights.filter((ins) => {
+      const c = ins.currency;
+      return !c || c === "USD" || c === "SAR";
+    });
+    const unsupportedRows = allInsights.filter((ins) => {
+      const c = ins.currency;
+      return c && c !== "USD" && c !== "SAR";
+    });
+
+    const totals = supportedRows.reduce(
+      (acc, ins) => {
+        const src = (ins.currency as Currency) || "USD";
+        return {
+          spend: acc.spend + convertCurrency(ins.spend, src, currency),
+          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
+          purchases: acc.purchases + ins.purchases,
+        };
+      },
       { spend: 0, revenue: 0, purchases: 0 }
     );
+
+    const unsupportedByCurrency = unsupportedRows.reduce(
+      (acc, ins) => {
+        const c = ins.currency as string;
+        if (!acc[c]) acc[c] = { spend: 0, revenue: 0, purchases: 0 };
+        acc[c].spend += ins.spend;
+        acc[c].revenue += ins.revenue;
+        acc[c].purchases += ins.purchases;
+        return acc;
+      },
+      {} as Record<string, { spend: number; revenue: number; purchases: number }>
+    );
+
+    const unsupportedTotals = Object.entries(unsupportedByCurrency).map(
+      ([cur, vals]) => ({ currency: cur, ...vals })
+    );
+
     return {
       ...totals,
       roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
+      isMixed: unsupportedTotals.length > 0,
+      unsupportedTotals,
     };
-  }, [insights]);
+  }, [insights, googleInsights.insights, currency]);
 
   // Previous period for KPI delta comparison (null when lifetime)
   const previousPeriod = useMemo(
@@ -200,9 +243,9 @@ export default function DashboardClient({
     [dateRange]
   );
 
-  // Fetch previous period insights. When previousPeriod is null we still need
-  // a valid options object (useInsights doesn't support skip natively); the
-  // previousSummary guard below returns null so deltas are hidden in lifetime.
+  // Fetch previous period insights (Meta + Google). When previousPeriod is
+  // null we still need valid options objects; the previousSummary guard
+  // below returns null so deltas are hidden in lifetime mode.
   const { insights: previousInsights } = useInsights(
     previousPeriod
       ? {
@@ -218,15 +261,45 @@ export default function DashboardClient({
           skip: !metaAccountId,
         }
   );
+  const googlePreviousInsights = useProviderInsights(
+    previousPeriod
+      ? {
+          provider: "google",
+          accountIds: googleAccountIds,
+          customRange: previousPeriod,
+          level: "account",
+        }
+      : {
+          provider: "google",
+          accountIds: googleAccountIds,
+          range: "30d",
+          level: "account",
+        }
+  );
 
+  // Previous-period summary. Same multi-currency policy as `aggregated`:
+  // only USD/SAR rows feed the converted total. Unsupported currencies
+  // are silently dropped here — deltas would be meaningless across
+  // mismatched currency bases. Phase 4.9 fixes via live FX.
   const previousSummary = useMemo(() => {
     if (!previousPeriod) return null;
-    const totals = previousInsights.reduce(
-      (acc, i) => ({
-        spend: acc.spend + i.spend,
-        revenue: acc.revenue + i.revenue,
-        purchases: acc.purchases + i.purchases,
-      }),
+    const allPrevious = [
+      ...previousInsights,
+      ...googlePreviousInsights.insights,
+    ];
+    const supportedRows = allPrevious.filter((ins) => {
+      const c = ins.currency;
+      return !c || c === "USD" || c === "SAR";
+    });
+    const totals = supportedRows.reduce(
+      (acc, ins) => {
+        const src = (ins.currency as Currency) || "USD";
+        return {
+          spend: acc.spend + convertCurrency(ins.spend, src, currency),
+          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
+          purchases: acc.purchases + ins.purchases,
+        };
+      },
       { spend: 0, revenue: 0, purchases: 0 }
     );
     return {
@@ -235,7 +308,7 @@ export default function DashboardClient({
       purchases: totals.purchases,
       roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
     };
-  }, [previousInsights, previousPeriod]);
+  }, [previousInsights, googlePreviousInsights.insights, previousPeriod, currency]);
 
   // Smart time_increment: daily breakdown for non-lifetime ranges (all presets
   // except 'lifetime' are ≤ 90 days). Custom ranges check explicit length.
@@ -260,7 +333,8 @@ export default function DashboardClient({
       ? chartDayCount <= 90
       : chartDateRange.preset !== "lifetime";
 
-  // Chart insights — uses chartDateRange so lifetime falls back to 90d
+  // Chart insights — uses chartDateRange so lifetime falls back to 90d.
+  // Both providers feed displayChartData below, which merges by date.
   const { insights: chartInsights, loading: chartLoading } = useInsights({
     ...dateRangeValueToOptions(chartDateRange),
     level: "account",
@@ -268,75 +342,177 @@ export default function DashboardClient({
     accountId: metaAccountId,
     skip: !metaAccountId,
   });
+  const googleChartInsights = useProviderInsights({
+    provider: "google",
+    accountIds: googleAccountIds,
+    ...dateRangeValueToOptions(chartDateRange),
+    level: "account",
+    timeIncrement: chartShouldShowDaily ? 1 : undefined,
+  });
 
-  const displayChartData = useMemo(
-    () =>
-      chartInsights.map((insight) => ({
-        date: insight.dateStart,
+  // Merge Meta + Google daily breakdowns by date. Per-row currency:
+  //   - USD/SAR or missing (cached pre-C0): convert to display currency
+  //   - Unsupported (AED, EGP, …): row dropped from the chart (Phase 4.9 fix)
+  // ROAS is recomputed from the merged daily totals, not averaged from rows.
+  const displayChartData = useMemo(() => {
+    type Row = { date: string; spend: number; revenue: number };
+    const byDate = new Map<string, Row>();
+
+    const addRow = (insight: UnifiedInsight) => {
+      const c = insight.currency;
+      const isSupported = !c || c === "USD" || c === "SAR";
+      if (!isSupported) return; // unsupported currency — drop from chart
+
+      const src = (c as Currency) || "USD";
+      const sp = convertCurrency(insight.spend, src, currency);
+      const rv = convertCurrency(insight.revenue, src, currency);
+
+      const existing = byDate.get(insight.dateStart);
+      if (existing) {
+        existing.spend += sp;
+        existing.revenue += rv;
+      } else {
+        byDate.set(insight.dateStart, {
+          date: insight.dateStart,
+          spend: sp,
+          revenue: rv,
+        });
+      }
+    };
+
+    chartInsights.forEach(addRow);
+    googleChartInsights.insights.forEach(addRow);
+
+    return Array.from(byDate.values())
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((row) => ({
+        date: row.date,
         dayLabel: chartShouldShowDaily
-          ? formatChartDayLabel(insight.dateStart, chartDayCount)
-          : insight.dateStart,
-        tooltipLabel: formatChartTooltipLabel(insight.dateStart),
-        roas: insight.roas,
-        displaySpend: convertCurrency(
-          insight.spend,
-          accountCurrency,
-          currency
-        ),
-        displayRevenue: convertCurrency(
-          insight.revenue,
-          accountCurrency,
-          currency
-        ),
-      })),
-    [
-      chartInsights,
-      chartShouldShowDaily,
-      chartDayCount,
-      accountCurrency,
-      currency,
-    ]
-  );
+          ? formatChartDayLabel(row.date, chartDayCount)
+          : row.date,
+        tooltipLabel: formatChartTooltipLabel(row.date),
+        roas: row.spend > 0 ? row.revenue / row.spend : 0,
+        displaySpend: row.spend,
+        displayRevenue: row.revenue,
+      }));
+  }, [
+    chartInsights,
+    googleChartInsights.insights,
+    chartShouldShowDaily,
+    chartDayCount,
+    currency,
+  ]);
 
   // Check if user has any connections
   const hasConnections = connectedPlatforms.length > 0;
 
-  // Filter Platform Performance mock data by connected ad platforms.
-  // Only used when there are 2+ connected platforms (chart hidden otherwise).
-  const connectedAdPlatforms = useMemo(
-    () => getConnectedAdPlatforms(connectedPlatforms),
-    [connectedPlatforms]
-  );
+  // Real platform-by-platform performance computed from live data.
+  //
+  // Per-row currency conversion: only USD/SAR/missing rows feed each
+  // provider's totals. Rows in other currencies are dropped from the
+  // chart aggregates but `hasUnsupported: true` marks the bar so the
+  // tooltip can surface a note (Phase 4.9 will universalize via FX).
+  //
+  // ROAS recomputed from each provider's totals (not averaged from rows).
+  const platformPerformance = useMemo(() => {
+    type Bar = {
+      name: string;
+      spend: number;
+      revenue: number;
+      roas: number;
+      hasUnsupported?: boolean;
+    };
+    const items: Bar[] = [];
 
-  const filteredPlatformPerformance = useMemo(
-    () =>
-      mockPlatformPerformance.filter((p) =>
-        connectedAdPlatforms.includes(platformNameToId(p.name))
-      ),
-    [connectedAdPlatforms]
-  );
+    const buildBar = (
+      name: string,
+      providerInsights: UnifiedInsight[]
+    ): Bar | null => {
+      if (providerInsights.length === 0) return null;
 
-  // Real KPI cards from aggregated insights (Meta-only for now)
+      const supported = providerInsights.filter((i) => {
+        const c = i.currency;
+        return !c || c === "USD" || c === "SAR";
+      });
+      const hasUnsupported = providerInsights.some(
+        (i) => i.currency && i.currency !== "USD" && i.currency !== "SAR"
+      );
+
+      const totals = supported.reduce(
+        (acc, i) => {
+          const src = (i.currency as Currency) || "USD";
+          return {
+            spend: acc.spend + convertCurrency(i.spend, src, currency),
+            revenue:
+              acc.revenue + convertCurrency(i.revenue, src, currency),
+          };
+        },
+        { spend: 0, revenue: 0 }
+      );
+
+      return {
+        name,
+        ...totals,
+        roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
+        hasUnsupported: hasUnsupported || undefined,
+      };
+    };
+
+    const meta = buildBar("Meta", insights);
+    if (meta) items.push(meta);
+    const google = buildBar("Google", googleInsights.insights);
+    if (google) items.push(google);
+
+    return items;
+  }, [insights, googleInsights.insights, currency]);
+
+  // Real KPI cards from aggregated insights (Meta + Google after Phase 4.7).
+  //
+  // `aggregated.spend` / `.revenue` are already in the display currency
+  // (converted during aggregation), so we use formatCurrencyWithSymbol —
+  // NOT formatAndConvert, which would double-convert.
+  //
+  // `unsupportedBadges` carry per-currency raw totals (AED, EGP, …) so the
+  // UI can render "+ 5,000 AED" alongside the main number. ROAS has no
+  // badges — mixing currencies in a ratio is meaningless.
   const kpiCards = useMemo(() => {
     if (!aggregated) return [];
+
+    const formatBadge = (amount: number, currencyCode: string): string =>
+      `+ ${amount.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${currencyCode}`;
+
+    const spendBadges = aggregated.isMixed
+      ? aggregated.unsupportedTotals.map((u) => formatBadge(u.spend, u.currency))
+      : undefined;
+    const revenueBadges = aggregated.isMixed
+      ? aggregated.unsupportedTotals.map((u) => formatBadge(u.revenue, u.currency))
+      : undefined;
+    const purchasesBadges = aggregated.isMixed
+      ? aggregated.unsupportedTotals.map(
+          (u) => `+ ${u.purchases.toLocaleString("en-US")} (${u.currency})`
+        )
+      : undefined;
+
     return [
       {
         label: "إجمالي الإنفاق الإعلاني",
-        value: formatAndConvert(aggregated.spend, accountCurrency, currency),
+        value: formatCurrencyWithSymbol(aggregated.spend, currency),
         icon: DollarSign,
         color: "indigo",
         delta: previousSummary
           ? computeDelta(aggregated.spend, previousSummary.spend)
           : null,
+        unsupportedBadges: spendBadges,
       },
       {
         label: "إجمالي الإيرادات",
-        value: formatAndConvert(aggregated.revenue, accountCurrency, currency),
+        value: formatCurrencyWithSymbol(aggregated.revenue, currency),
         icon: ShoppingCart,
         color: "green",
         delta: previousSummary
           ? computeDelta(aggregated.revenue, previousSummary.revenue)
           : null,
+        unsupportedBadges: revenueBadges,
       },
       {
         label: "العائد على الإعلان (ROAS)",
@@ -346,6 +522,7 @@ export default function DashboardClient({
         delta: previousSummary
           ? computeDelta(aggregated.roas, previousSummary.roas)
           : null,
+        unsupportedBadges: undefined as string[] | undefined,
       },
       {
         label: "عدد المبيعات",
@@ -355,9 +532,15 @@ export default function DashboardClient({
         delta: previousSummary
           ? computeDelta(aggregated.purchases, previousSummary.purchases)
           : null,
+        unsupportedBadges: purchasesBadges,
       },
     ];
-  }, [aggregated, accountCurrency, currency, previousSummary]);
+  }, [aggregated, currency, previousSummary]);
+
+  // Combined loading: both providers in flight count as loading.
+  // Used by the KPI skeleton + chart skeleton to avoid flicker when
+  // one provider returns much faster than the other.
+  const combinedLoading = insightsLoading || googleInsights.loading;
 
   const initial = fullName.charAt(0).toUpperCase();
 
@@ -443,33 +626,38 @@ export default function DashboardClient({
             </div>
           ) : (
             <>
-          {/* Stats Grid - Real Meta data */}
+          {/* Stats Grid - Real Meta + Google data */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-4 sm:mb-8">
-            {noConnection ? (
+            {/* Empty card only when BOTH providers are absent — a
+                Google-only workspace skips this and renders its KPIs.
+                hasConnections=false routes to <DashboardEmptyState />
+                higher up, so this branch is the "ads-platform empty"
+                sub-case (e.g. workspace has only Salla/Zid connected). */}
+            {noConnection && googleAccountIds.length === 0 ? (
               <div className="col-span-2 lg:col-span-4 bg-white border border-gray-100 rounded-xl p-6 sm:p-8 text-center">
                 <div className="w-12 h-12 mx-auto bg-indigo-50 rounded-xl flex items-center justify-center mb-3">
                   <Link2 className="w-6 h-6 text-indigo-600" />
                 </div>
                 <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-2">
-                  اربط حساب Meta لعرض المؤشرات الفعلية
+                  اربط حساب إعلانات لعرض المؤشرات الفعلية
                 </h3>
                 <p className="text-sm text-gray-600 mb-4">
-                  ستظهر هنا بيانات الإنفاق والإيرادات والـ ROAS من حسابك على
-                  Meta Ads
+                  ستظهر هنا بيانات الإنفاق والإيرادات والـ ROAS من حساباتك
+                  على Meta Ads أو Google Ads
                 </p>
                 <Link
                   href="/dashboard/connections"
                   className="inline-flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-5 py-2.5 rounded-lg font-semibold hover:shadow-lg transition"
                 >
                   <Plus className="w-5 h-5" />
-                  ربط Meta
+                  ربط منصة
                 </Link>
               </div>
             ) : insightsError ? (
               <div className="col-span-2 lg:col-span-4 bg-red-50 border border-red-200 rounded-xl p-4 text-red-700 text-sm text-center">
                 تعذّر جلب البيانات من Meta. حاول تحديث الصفحة.
               </div>
-            ) : insightsLoading || !aggregated ? (
+            ) : combinedLoading || !aggregated ? (
               [0, 1, 2, 3].map((i) => (
                 <div
                   key={i}
@@ -532,6 +720,27 @@ export default function DashboardClient({
                         {stat.value}
                       </span>
                     </div>
+
+                    {/* Unsupported-currency side-totals — only present
+                        when the workspace has accounts in currencies
+                        outside USD/SAR (AED, EGP, EUR, …). Phase 4.9
+                        will fold these into the main total via live FX. */}
+                    {stat.unsupportedBadges &&
+                      stat.unsupportedBadges.length > 0 && (
+                        <div
+                          className="flex flex-col gap-0.5 mt-1"
+                          dir="ltr"
+                        >
+                          {stat.unsupportedBadges.map((badge, j) => (
+                            <span
+                              key={j}
+                              className="text-[10px] sm:text-xs text-gray-500"
+                            >
+                              {badge}
+                            </span>
+                          ))}
+                        </div>
+                      )}
 
                     {showDelta ? (
                       <div
@@ -708,8 +917,12 @@ export default function DashboardClient({
                     : "lg:grid-cols-1"
                 }`}
               >
-                {/* Platform Performance — hidden when only 1 platform connected */}
-                {connectedPlatforms.length > 1 && (
+                {/* Platform Performance — hidden when fewer than 2
+                    providers returned data. Data-driven (not based on
+                    `connections`) so a workspace with Meta + Google
+                    connected but only Meta returning data shows nothing
+                    until the second provider populates. */}
+                {platformPerformance.length > 1 && (
                   <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6">
                     <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
                       الأداء حسب المنصة
@@ -720,7 +933,7 @@ export default function DashboardClient({
                     <div ref={platformRef} dir="ltr" className="h-52 sm:h-64">
                       {platformHeight > 0 && (
                       <ResponsiveContainer width="100%" height={platformHeight}>
-                        <BarChart data={filteredPlatformPerformance}>
+                        <BarChart data={platformPerformance}>
                           <CartesianGrid
                             strokeDasharray="3 3"
                             stroke="#f3f4f6"

@@ -30,6 +30,16 @@ export interface UnifiedInsight {
   campaignName?: string;
   provider: AdProvider;
 
+  /**
+   * Source currency from the originating ad account. Set by the adapter
+   * from accountInfo.currency. NO fallback — raw value (USD, SAR, AED,
+   * EGP, etc.). Callers handle conversion/display.
+   *
+   * Optional for backward compatibility: rows cached before this field
+   * was introduced lack it. Consumers fall back to "USD" when missing.
+   */
+  currency?: string;
+
   // Performance metrics (all numbers, not strings)
   spend: number;
   impressions: number;

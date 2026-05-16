@@ -233,6 +233,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     p: TimeSeriesPoint
   ): UnifiedInsight => ({
     provider: "google",
+    currency: this.accountInfo.currency,
     spend: p.spend,
     impressions: p.impressions,
     clicks: p.clicks,
@@ -272,6 +273,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     dateTo: string
   ): UnifiedInsight => ({
     provider: "google",
+    currency: this.accountInfo.currency,
     spend: totals.spend,
     impressions: totals.impressions,
     clicks: totals.clicks,
@@ -307,6 +309,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     campaignId: c.id,
     campaignName: c.name,
     provider: "google",
+    currency: this.accountInfo.currency,
     spend: c.spend,
     impressions: c.impressions,
     clicks: c.clicks,

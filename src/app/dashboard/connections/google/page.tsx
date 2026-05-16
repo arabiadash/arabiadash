@@ -1,6 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
-import { ACTIVE_ACCOUNTS_LIMIT } from "@/lib/plans";
+import { getUserAccountsLimit } from "@/lib/plans";
 import GoogleConnectionsClient from "./GoogleConnectionsClient";
 import { getUserWorkspaces, resolveActiveWorkspace } from "@/lib/workspaces";
 
@@ -37,8 +37,8 @@ export default async function GoogleConnectionsPage({
   const fullName = user.user_metadata?.full_name || "مستخدم";
   const email = user.email || "";
 
-  // Parallel: Google connections + workspace data.
-  const [{ data: connectionsData }, workspaces, activeWorkspace] =
+  // Parallel: Google connections + workspace data + account limit.
+  const [{ data: connectionsData }, workspaces, activeWorkspace, limit] =
     await Promise.all([
       supabase
         .from("connections")
@@ -48,6 +48,7 @@ export default async function GoogleConnectionsPage({
         .order("id", { ascending: true }),
       getUserWorkspaces(supabase, user.id),
       resolveActiveWorkspace(supabase, user.id, params.workspace),
+      getUserAccountsLimit(user.id),
     ]);
 
   const accounts: GoogleAccountRow[] = (connectionsData ?? []).map((row) => {
@@ -82,7 +83,7 @@ export default async function GoogleConnectionsPage({
       fullName={fullName}
       email={email}
       accounts={accounts}
-      limit={ACTIVE_ACCOUNTS_LIMIT}
+      limit={limit}
       workspaces={workspaces}
       activeWorkspaceId={activeWorkspace.id}
     />
