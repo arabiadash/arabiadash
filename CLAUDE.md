@@ -106,7 +106,8 @@ Use these instead of asking the user to open dashboards or take screenshots.
 - Ad accounts from different workspaces NEVER blend in dashboard/reports.
 
 ### Connections (Approach C)
-- OAuth callbacks save all ad accounts as `status='pending'`.
+- OAuth callbacks save new ad accounts as `status='pending'`.
+- **On re-OAuth, callbacks preserve `workspace_id`, `status`, `connected_at`, and `account_name` (provider-dependent) for existing rows.** Only `access_token` and `metadata` refresh. See ADR-006. This pattern is mandatory for all future platform callbacks (TikTok, Snapchat, Salla, Zid).
 - User manually activates each account from UI.
 - Plan limit: **3 active accounts per platform** (Meta and Google counted separately).
 - Hard-coded in `src/lib/plans.ts`. Billing tier wiring deferred to Phase 10.

@@ -112,7 +112,7 @@ export async function GET(request: NextRequest) {
     // their feet.
     const { data: existingRows, error: existingError } = await adminClient
       .from("connections")
-      .select("account_id, status")
+      .select("account_id, status, workspace_id")
       .eq("user_id", user.id)
       .eq("platform", "meta");
 
@@ -127,7 +127,7 @@ export async function GET(request: NextRequest) {
     }
 
     const existingByAccountId = new Map(
-      (existingRows ?? []).map((r) => [r.account_id, r.status])
+      (existingRows ?? []).map((r) => [r.account_id, r])
     );
 
     // Resolve the workspace this connection belongs to.
@@ -177,13 +177,16 @@ export async function GET(request: NextRequest) {
     const nowIso = new Date().toISOString();
 
     const rowsToUpsert = adAccounts.map((account) => {
-      const previousStatus = existingByAccountId.get(account.id);
+      const existing = existingByAccountId.get(account.id);
       // Existing row → keep its status. New row → start as pending.
-      const status = previousStatus ?? "pending";
+      const status = existing?.status ?? "pending";
 
       return {
         user_id: user.id,
-        workspace_id: workspaceId,
+        // Preserve workspace assignment for existing rows — re-OAuth
+        // refreshes tokens, it doesn't move accounts between workspaces.
+        // Mirrors the Google callback fix for the same latent issue.
+        workspace_id: existing?.workspace_id ?? workspaceId,
         platform: "meta",
         account_id: account.id,
         account_name: account.name,
