@@ -236,33 +236,101 @@ API-level filter يحمي حتى لو client يـ misuse الـ endpoint.
 
 
 
-\### 6. Phase 4.3 deferred leak surface (KNOWN, documented)
+\### 6. Phase 4.3 deferred leak surface (CLOSED in Phase 4.3)
 
 
 
-نفس الـ leak pattern موجود في 3 sites إضافية، كلهم في ReportsClient — مش Phase 4.2 scope:
+نفس الـ leak pattern كان موجود في 3 sites إضافية في ReportsClient (مش Phase 4.2 scope وقت ما كُتب الـ ADR الأول). كلها أُغلقت في Phase 4.3:
 
 
 
-\- `/api/ads/campaigns?provider=meta` (ReportsClient.tsx:1185, inline fetch)
+\- `/api/ads/campaigns?provider=meta` — \*\*CLOSED\*\* in Phase 4.3 commits 1 (API يقبل account_id) + 5 (ReportsClient inline fetch يمرّره + يـ skip)
 
-\- `/api/ads/creatives?provider=meta` (via `useAds` hook, ReportsClient.tsx:1134)
+\- `/api/ads/creatives?provider=meta` — \*\*CLOSED\*\* in Phase 4.3 commits 3 (useAds يقبل accountId + skip) + 5 (ReportsClient passes them)
 
-\- `/api/ads/account?provider=meta` (ReportsClient.tsx:1174 — separate call site من Dashboard)
-
-
-
-كلها vulnerable لنفس الـ leak. سـ يتم معالجتها في Phase 4.3 (Reports refactor 
-
-per-workspace) باتباع نفس الـ pattern:
-
-\- API يقبل optional `account_id`
-
-\- Client passes it + skips when undefined
+\- `/api/ads/account?provider=meta` (Reports call site، منفصل عن Dashboard) — \*\*CLOSED\*\* in Phase 4.3 commit 5
 
 
 
-\### 7. Future ADR-005 candidate: server-side workspace enforcement
+الـ API يقبل `account_id` في كل الـ Meta endpoints الآن. كل الـ 6 Meta call 
+
+sites في ReportsClient + الـ 4 في DashboardClient تمرّر `account_id` وتـ skip 
+
+عند الـ no-Meta scenario.
+
+
+
+\### 7. Lessons from Phase 4.3 — useInsights retrofit
+
+
+
+أثناء planning Phase 4.3، اكتشفنا gap في Phase 4.2's `useInsights` skip 
+
+implementation:
+
+
+
+\- Phase 4.2 (commit 90dc55b) أضاف الـ `skip` check فقط داخل `useEffect`
+
+\- الـ `refresh()` function exposed (callback wrapping `doFetch(true)`) يـ bypass هذا الـ check
+
+\- نتيجة: لو caller يـ destructure `refresh` ويستدعيه عند skip=true → الـ fetch يـ fire → leak يعود
+
+
+
+\#### Status في Phase 4.2 production: dormant
+
+
+
+\- DashboardClient ما يـ destructure `refresh` من useInsights — الـ leak surface غير reachable من UI
+
+\- ReportsClient (post-Phase 4.3) ما يـ destructure `refresh` من useInsights — نفس الحالة
+
+\- النتيجة: لا production leak فعلي، لكن الـ gap fragile (الـ caller التالي قد يـ destructure refresh)
+
+
+
+\#### Phase 4.3 retrofit (commit 2)
+
+
+
+أضاف `if (skip) return;` في بداية `doFetch` + `skip` في `useCallback` deps. الـ effect:
+
+\- useEffect path: ما زال يحمي (existing belt-and-suspenders)
+
+\- refresh path: الآن محمي (doFetch يـ no-op عند skip)
+
+
+
+\#### Pattern established
+
+
+
+`useAds` (Phase 4.3 commit 3) implements الـ pattern من البداية:
+
+\- skip check في `doFetch` (not just useEffect)
+
+\- Synthetic skip return يـ expose `refresh` (safe — doFetch no-op)
+
+
+
+\#### Rule لـ future hooks
+
+
+
+Client-side skip checks لازم تكون داخل الـ fetch function، مش فقط في الـ useEffect. الـ exposed mutation functions (refresh, refetch, etc.) لازم تـ honor الـ skip flag بنفس الطريقة.
+
+
+
+\### 8. Future ADR-005 candidate: server-side workspace enforcement
+
+
+
+\*\*Still applicable after Phase 4.3.\*\* Phase 4.3 closed the known leak surface 
+
+at the client + API layers (account_id filter + skip flag)، لكن الـ defense 
+
+ما زال يـ rely على clients يـ pass الـ `account_id` الصحيح.
 
 
 
