@@ -141,6 +141,13 @@ export function useInsights(
 
   const doFetch = useCallback(
     async (forceRefresh: boolean): Promise<void> => {
+      // Defense-in-depth: also guard inside doFetch (not just useEffect).
+      // Without this, a caller that destructures and triggers `refresh()`
+      // would bypass the skip check — refresh→doFetch(true) doesn't go
+      // through the useEffect path. Phase 4.2 shipped with skip only in
+      // useEffect; this retrofit closes the latent refresh-path leak.
+      if (skip) return;
+
       const token = ++reqTokenRef.current;
       setLoading(true);
       setError(null);
@@ -187,7 +194,7 @@ export function useInsights(
         if (token === reqTokenRef.current) setLoading(false);
       }
     },
-    [buildParams]
+    [buildParams, skip]
   );
 
   useEffect(() => {

@@ -14,6 +14,22 @@ interface UseAdsOptions {
   range?: DateRangeValue;
   customRange?: { since: string; until: string };
   provider?: AdProvider;
+  /**
+   * Workspace-scoped account ID. Optional for single-account providers (Meta
+   * picks the user's first active connection if omitted), required for
+   * multi-account providers. Including it in the URL also acts as a
+   * cache-scope: switching workspaces changes `accountId`, which forces a
+   * re-fetch instead of showing stale data from the previous workspace.
+   */
+  accountId?: string;
+  /**
+   * Bypass the fetch entirely and return a synthetic "no connection" state.
+   * Required to prevent cross-workspace data leak: without `accountId`,
+   * the API's maybeSingle() fallback would return ads from another
+   * workspace's Meta connection. Callers pass `skip: !accountId` for the
+   * affected provider. Matches the useInsights skip pattern.
+   */
+  skip?: boolean;
 }
 
 interface UseAdsReturn {
@@ -42,6 +58,8 @@ export function useAds(options: UseAdsOptions): UseAdsReturn {
   const [rateLimited, setRateLimited] = useState(false);
 
   const provider = options.provider ?? "meta";
+  const accountId = options.accountId;
+  const skip = options.skip ?? false;
   const customSince = options.customRange?.since;
   const customUntil = options.customRange?.until;
   const rangeType = options.range?.type;
@@ -67,11 +85,13 @@ export function useAds(options: UseAdsOptions): UseAdsReturn {
       } else {
         params.set("range", "30d");
       }
+      if (accountId) params.set("account_id", accountId);
       if (forceRefresh) params.set("refresh", "true");
       return params;
     },
     [
       provider,
+      accountId,
       customSince,
       customUntil,
       rangeType,
@@ -86,6 +106,11 @@ export function useAds(options: UseAdsOptions): UseAdsReturn {
 
   const doFetch = useCallback(
     async (forceRefresh: boolean): Promise<void> => {
+      // Defense-in-depth: guard inside doFetch (not just useEffect) so
+      // refresh() — which calls doFetch directly — also respects skip.
+      // Mirrors the useInsights pattern after its Phase 4.3 retrofit.
+      if (skip) return;
+
       const token = ++reqTokenRef.current;
       setLoading(true);
       setError(null);
@@ -129,14 +154,31 @@ export function useAds(options: UseAdsOptions): UseAdsReturn {
         if (token === reqTokenRef.current) setLoading(false);
       }
     },
-    [buildParams]
+    [buildParams, skip]
   );
 
   useEffect(() => {
+    if (skip) return; // paused — no fetch (see `skip` JSDoc)
     void doFetch(false);
-  }, [doFetch]);
+  }, [doFetch, skip]);
 
   const refresh = useCallback(() => doFetch(true), [doFetch]);
+
+  // When skip is on, surface a "no connection in this workspace" shape
+  // regardless of any internal state left over from a previous unskipped
+  // run. refresh is still exposed but is a no-op (doFetch checks skip).
+  if (skip) {
+    return {
+      ads: [],
+      loading: false,
+      error: null,
+      source: null,
+      fetchedAt: null,
+      revalidating: false,
+      rateLimited: false,
+      refresh,
+    };
+  }
 
   return {
     ads,
