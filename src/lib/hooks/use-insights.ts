@@ -36,6 +36,17 @@ export interface UseInsightsOptions {
   level?: "account" | "campaign";
   provider?: AdProvider;
   timeIncrement?: TimeIncrement;
+  /**
+   * Workspace-scoped account ID. Optional for single-account providers (Meta
+   * picks the user's first active connection if omitted), required for
+   * multi-account providers (Google, TikTok, Snapchat — the server rejects
+   * the request with `account_id_required` otherwise).
+   *
+   * Including it in the URL also acts as a cache-scope: switching workspaces
+   * changes `accountId`, which forces a re-fetch instead of showing stale
+   * data from the previous workspace.
+   */
+  accountId?: string;
 }
 
 /**
@@ -62,6 +73,7 @@ export function useInsights(
     level = "account",
     provider = "meta",
     timeIncrement,
+    accountId,
   } = options;
 
   const [insights, setInsights] = useState<UnifiedInsight[]>([]);
@@ -101,13 +113,17 @@ export function useInsights(
         params.set("time_increment", String(timeIncrement));
       }
 
+      if (accountId) {
+        params.set("account_id", accountId);
+      }
+
       if (forceRefresh) {
         params.set("refresh", "true");
       }
 
       return params;
     },
-    [provider, level, customSince, customUntil, range, timeIncrement]
+    [provider, level, customSince, customUntil, range, timeIncrement, accountId]
   );
 
   const reqTokenRef = useRef(0);

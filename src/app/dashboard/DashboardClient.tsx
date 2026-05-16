@@ -16,7 +16,7 @@ import {
   ArrowDown,
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
-import type { Workspace } from "@/lib/workspaces";
+import type { Workspace, WorkspaceConnection } from "@/lib/workspaces";
 import {
   mockPlatformPerformance,
   platformNameToId,
@@ -64,7 +64,13 @@ interface DashboardClientProps {
   fullName: string;
   companyName: string;
   email: string;
-  connectedPlatforms: string[];
+  /**
+   * Active connections scoped to the active workspace (filtered server-side
+   * in page.tsx via getActiveConnectionsForWorkspace). The dashboard derives
+   * `connectedPlatforms` from this for legacy UI bits, and picks the Meta
+   * account_id from it to scope the useInsights queries.
+   */
+  connections: WorkspaceConnection[];
   workspaces: Workspace[];
   activeWorkspaceId: number;
 }
@@ -99,11 +105,29 @@ export default function DashboardClient({
   fullName,
   companyName,
   email,
-  connectedPlatforms,
+  connections,
   workspaces,
   activeWorkspaceId,
 }: DashboardClientProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Derived from the workspace-scoped connections. Keeping the existing
+  // `connectedPlatforms` shape used throughout the JSX avoids touching
+  // every usage site — the underlying data still flows from the server.
+  const connectedPlatforms = useMemo(
+    () => Array.from(new Set(connections.map((c) => c.platform))),
+    [connections]
+  );
+
+  // Meta is single-account: the active workspace has at most one Meta
+  // connection. We pass its account_id to useInsights so the API picks
+  // exactly that connection — important after Phase 4.2 because the
+  // user may have Meta connections in multiple workspaces.
+  const metaAccountId = useMemo(
+    () =>
+      connections.find((c) => c.platform === "meta")?.account_id ?? undefined,
+    [connections]
+  );
 
   // Date range (persisted to localStorage, synced cross-tab)
   const [dateRange, setDateRange] = useDateRangeStorage();
@@ -117,6 +141,7 @@ export default function DashboardClient({
   } = useInsights({
     ...dateRangeValueToOptions(dateRange),
     level: "account",
+    accountId: metaAccountId,
   });
   const { currency } = useCurrency();
   const [accountCurrency, setAccountCurrency] = useState<Currency>("USD");
@@ -169,8 +194,8 @@ export default function DashboardClient({
   // previousSummary guard below returns null so deltas are hidden in lifetime.
   const { insights: previousInsights } = useInsights(
     previousPeriod
-      ? { customRange: previousPeriod, level: "account" }
-      : { range: "30d", level: "account" }
+      ? { customRange: previousPeriod, level: "account", accountId: metaAccountId }
+      : { range: "30d", level: "account", accountId: metaAccountId }
   );
 
   const previousSummary = useMemo(() => {
@@ -219,6 +244,7 @@ export default function DashboardClient({
     ...dateRangeValueToOptions(chartDateRange),
     level: "account",
     timeIncrement: chartShouldShowDaily ? 1 : undefined,
+    accountId: metaAccountId,
   });
 
   const displayChartData = useMemo(
