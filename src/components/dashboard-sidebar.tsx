@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import WorkspaceSwitcher from "./workspace-switcher";
+import TrialBadge from "./trial-badge";
 import type { Workspace } from "@/lib/workspaces";
 
 interface DashboardSidebarProps {
@@ -162,6 +163,7 @@ export default function DashboardSidebar({
               <p className="text-xs text-gray-500 truncate">{email}</p>
             </div>
           </div>
+          <TrialBadge />
           <button
             onClick={handleSignOut}
             disabled={signingOut}

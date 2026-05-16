@@ -114,29 +114,20 @@ export default function ConnectionsClient({
     // Meta uses real OAuth flow — redirect to init route, which sets state
     // cookie and redirects to Facebook's OAuth dialog.
     if (platformId === "meta") {
-      window.location.assign("/api/auth/meta/init");
+      window.location.assign(`/api/auth/meta/init?workspace=${activeWorkspaceId}`);
       return;
     }
 
     // Legacy path for TikTok/Snapchat — no real OAuth yet (Phase 7/8). We
     // insert a placeholder row so the UI can flip into the "connected"
     // state. Real account_id + access_token arrive when those flows ship.
-    const { data: workspace } = await supabase
-      .from("workspaces")
-      .select("id")
-      .eq("user_id", user.id)
-      .eq("is_default", true)
-      .maybeSingle();
-
-    if (!workspace) {
-      setConnecting(null);
-      showError("تعذّر العثور على مساحة العمل. حاول مرة أخرى.");
-      return;
-    }
-
+    //
+    // workspace_id is the active workspace (from the prop, set server-side
+    // via resolveActiveWorkspace). No DB lookup needed — the server already
+    // validated ownership + non-archived before passing it down.
     const { error } = await supabase.from("connections").insert({
       user_id: user.id,
-      workspace_id: workspace.id,
+      workspace_id: activeWorkspaceId,
       platform: platformId,
       account_id: `placeholder_${platformId}_${crypto.randomUUID()}`,
       access_token: "placeholder",
@@ -397,7 +388,7 @@ export default function ConnectionsClient({
                       // Google with no connections — kick off OAuth
                       <button
                         onClick={() => {
-                          window.location.assign("/api/google-ads/auth");
+                          window.location.assign(`/api/google-ads/auth?workspace=${activeWorkspaceId}`);
                         }}
                         className="w-full bg-gradient-to-r from-red-500 to-orange-500 text-white py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg transition flex items-center justify-center gap-2"
                       >
@@ -429,7 +420,7 @@ export default function ConnectionsClient({
                       // Meta with no connections — kick off OAuth (Facebook blue)
                       <button
                         onClick={() => {
-                          window.location.assign("/api/auth/meta/init");
+                          window.location.assign(`/api/auth/meta/init?workspace=${activeWorkspaceId}`);
                         }}
                         className="w-full bg-gradient-to-r from-blue-600 to-blue-700 text-white py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg transition flex items-center justify-center gap-2"
                       >

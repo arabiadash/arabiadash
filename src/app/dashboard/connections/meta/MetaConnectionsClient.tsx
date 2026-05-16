@@ -126,7 +126,7 @@ export default function MetaConnectionsClient({
   };
 
   const handleConnectNew = () => {
-    window.location.assign("/api/auth/meta/init");
+    window.location.assign(`/api/auth/meta/init?workspace=${activeWorkspaceId}`);
   };
 
   return (

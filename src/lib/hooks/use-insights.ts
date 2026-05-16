@@ -36,6 +36,27 @@ export interface UseInsightsOptions {
   level?: "account" | "campaign";
   provider?: AdProvider;
   timeIncrement?: TimeIncrement;
+  /**
+   * Workspace-scoped account ID. Optional for single-account providers (Meta
+   * picks the user's first active connection if omitted), required for
+   * multi-account providers (Google, TikTok, Snapchat — the server rejects
+   * the request with `account_id_required` otherwise).
+   *
+   * Including it in the URL also acts as a cache-scope: switching workspaces
+   * changes `accountId`, which forces a re-fetch instead of showing stale
+   * data from the previous workspace.
+   */
+  accountId?: string;
+  /**
+   * Bypass the fetch entirely and return a synthetic "no connection" state.
+   *
+   * Required to prevent cross-workspace data leak for single-account
+   * providers like Meta: without `accountId`, the API picks the user's
+   * first active Meta connection across ALL workspaces, so switching to a
+   * workspace with no Meta would show another workspace's data. Callers
+   * pass `skip: !accountId` for the affected provider.
+   */
+  skip?: boolean;
 }
 
 /**
@@ -62,6 +83,8 @@ export function useInsights(
     level = "account",
     provider = "meta",
     timeIncrement,
+    accountId,
+    skip = false,
   } = options;
 
   const [insights, setInsights] = useState<UnifiedInsight[]>([]);
@@ -101,13 +124,17 @@ export function useInsights(
         params.set("time_increment", String(timeIncrement));
       }
 
+      if (accountId) {
+        params.set("account_id", accountId);
+      }
+
       if (forceRefresh) {
         params.set("refresh", "true");
       }
 
       return params;
     },
-    [provider, level, customSince, customUntil, range, timeIncrement]
+    [provider, level, customSince, customUntil, range, timeIncrement, accountId]
   );
 
   const reqTokenRef = useRef(0);
@@ -164,10 +191,30 @@ export function useInsights(
   );
 
   useEffect(() => {
+    if (skip) return; // paused — no fetch (see `skip` JSDoc)
     void doFetch(false);
-  }, [doFetch]);
+  }, [doFetch, skip]);
 
   const refresh = useCallback(() => doFetch(true), [doFetch]);
+
+  // When skip is on, surface a "no Meta connection in this workspace" shape
+  // regardless of any internal state left over from a previous unskipped
+  // run. The UI's existing noConnection branch already handles this — it
+  // renders the "connect Meta" CTA card.
+  if (skip) {
+    return {
+      insights: [],
+      loading: false,
+      error: null,
+      cached: false,
+      noConnection: true,
+      source: null,
+      fetchedAt: null,
+      revalidating: false,
+      rateLimited: false,
+      refresh,
+    };
+  }
 
   return {
     insights,

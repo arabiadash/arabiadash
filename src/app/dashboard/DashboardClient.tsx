@@ -16,7 +16,8 @@ import {
   ArrowDown,
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
-import type { Workspace } from "@/lib/workspaces";
+import DashboardEmptyState from "@/components/dashboard-empty-state";
+import type { Workspace, WorkspaceConnection } from "@/lib/workspaces";
 import {
   mockPlatformPerformance,
   platformNameToId,
@@ -64,7 +65,13 @@ interface DashboardClientProps {
   fullName: string;
   companyName: string;
   email: string;
-  connectedPlatforms: string[];
+  /**
+   * Active connections scoped to the active workspace (filtered server-side
+   * in page.tsx via getActiveConnectionsForWorkspace). The dashboard derives
+   * `connectedPlatforms` from this for legacy UI bits, and picks the Meta
+   * account_id from it to scope the useInsights queries.
+   */
+  connections: WorkspaceConnection[];
   workspaces: Workspace[];
   activeWorkspaceId: number;
 }
@@ -99,11 +106,29 @@ export default function DashboardClient({
   fullName,
   companyName,
   email,
-  connectedPlatforms,
+  connections,
   workspaces,
   activeWorkspaceId,
 }: DashboardClientProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Derived from the workspace-scoped connections. Keeping the existing
+  // `connectedPlatforms` shape used throughout the JSX avoids touching
+  // every usage site — the underlying data still flows from the server.
+  const connectedPlatforms = useMemo(
+    () => Array.from(new Set(connections.map((c) => c.platform))),
+    [connections]
+  );
+
+  // Meta is single-account: the active workspace has at most one Meta
+  // connection. We pass its account_id to useInsights so the API picks
+  // exactly that connection — important after Phase 4.2 because the
+  // user may have Meta connections in multiple workspaces.
+  const metaAccountId = useMemo(
+    () =>
+      connections.find((c) => c.platform === "meta")?.account_id ?? undefined,
+    [connections]
+  );
 
   // Date range (persisted to localStorage, synced cross-tab)
   const [dateRange, setDateRange] = useDateRangeStorage();
@@ -117,6 +142,8 @@ export default function DashboardClient({
   } = useInsights({
     ...dateRangeValueToOptions(dateRange),
     level: "account",
+    accountId: metaAccountId,
+    skip: !metaAccountId,
   });
   const { currency } = useCurrency();
   const [accountCurrency, setAccountCurrency] = useState<Currency>("USD");
@@ -129,7 +156,16 @@ export default function DashboardClient({
   const [roasRef, roasHeight] = useElementHeight<HTMLDivElement>();
 
   useEffect(() => {
-    fetch("/api/ads/account?provider=meta")
+    // When metaAccountId is undefined (no Meta in this workspace), skip
+    // the fetch. The previous accountCurrency value persists — that's
+    // fine because the useInsights skip means no insights render either,
+    // so no number is being converted.
+    //
+    // Important: this depends on useInsights skipping when metaAccountId
+    // is undefined. If that guard is removed, stale currency could
+    // surface in conversions.
+    if (!metaAccountId) return;
+    fetch(`/api/ads/account?provider=meta&account_id=${metaAccountId}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         const c = data?.currency;
@@ -138,7 +174,7 @@ export default function DashboardClient({
         }
       })
       .catch(() => {});
-  }, []);
+  }, [metaAccountId]);
 
   // Aggregate UnifiedInsight[] into totals + recalculated ROAS.
   // Range='30d' typically returns one row, but reduce handles N rows safely.
@@ -169,8 +205,18 @@ export default function DashboardClient({
   // previousSummary guard below returns null so deltas are hidden in lifetime.
   const { insights: previousInsights } = useInsights(
     previousPeriod
-      ? { customRange: previousPeriod, level: "account" }
-      : { range: "30d", level: "account" }
+      ? {
+          customRange: previousPeriod,
+          level: "account",
+          accountId: metaAccountId,
+          skip: !metaAccountId,
+        }
+      : {
+          range: "30d",
+          level: "account",
+          accountId: metaAccountId,
+          skip: !metaAccountId,
+        }
   );
 
   const previousSummary = useMemo(() => {
@@ -219,6 +265,8 @@ export default function DashboardClient({
     ...dateRangeValueToOptions(chartDateRange),
     level: "account",
     timeIncrement: chartShouldShowDaily ? 1 : undefined,
+    accountId: metaAccountId,
+    skip: !metaAccountId,
   });
 
   const displayChartData = useMemo(
@@ -385,34 +433,16 @@ export default function DashboardClient({
             </div>
           </div>
 
-          {/* Empty State (only if no connections) */}
-          {!hasConnections && (
-            <div className="bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-100 rounded-2xl p-5 sm:p-8 mb-4 sm:mb-8">
-              <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-                <div className="flex items-start gap-4">
-                  <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center flex-shrink-0">
-                    <Link2 className="w-6 h-6 text-indigo-600" />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-bold text-gray-900 mb-1">
-                      ابدأ بربط منصاتك الإعلانية
-                    </h3>
-                    <p className="text-gray-600 text-sm">
-                      اربط Meta Ads و Google Ads ومتجرك على سلة لرؤية بياناتك الفعلية
-                    </p>
-                  </div>
-                </div>
-                <Link
-                  href="/dashboard/connections"
-                  className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-5 py-2.5 rounded-lg font-semibold hover:shadow-lg transition flex items-center gap-2 whitespace-nowrap"
-                >
-                  <Plus className="w-5 h-5" />
-                  ربط منصة
-                </Link>
-              </div>
+          {/* When the workspace has zero connections, the dashboard
+              collapses to a single CTA — no contextual Meta empty card
+              stacked, no read-only onboarding visualization. Stats Grid
+              and Charts live in the else branch. */}
+          {!hasConnections ? (
+            <div className="mb-4 sm:mb-8">
+              <DashboardEmptyState />
             </div>
-          )}
-
+          ) : (
+            <>
           {/* Stats Grid - Real Meta data */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-4 sm:mb-8">
             {noConnection ? (
@@ -527,9 +557,8 @@ export default function DashboardClient({
             )}
           </div>
 
-          {/* Charts Section - Only show if has connections */}
-          {hasConnections && (
-            <>
+          {/* Charts Section */}
+          <>
               {/* Performance Chart - Real Meta data */}
               <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
                 <div className="flex items-center justify-between mb-3 sm:mb-6">
@@ -821,96 +850,7 @@ export default function DashboardClient({
 
               {/* Top Campaigns table moved to /dashboard/reports */}
             </>
-          )}
-
-          {/* Two Column Layout - Quick Setup (only if no connections) */}
-          {!hasConnections && (
-            <div className="grid lg:grid-cols-2 gap-6">
-              <div className="bg-white border border-gray-100 rounded-xl p-6">
-                <h3 className="text-lg font-bold text-gray-900 mb-4">
-                  خطوات البدء
-                </h3>
-                <div className="space-y-3">
-                  {[
-                    {
-                      title: "أكدت إيميلك",
-                      description: "تم تأكيد حسابك بنجاح",
-                      completed: true,
-                    },
-                    {
-                      title: "اربط منصة إعلانية",
-                      description: "ابدأ بـ Meta Ads أو Google Ads",
-                      completed: false,
-                    },
-                    {
-                      title: "اربط متجرك",
-                      description: "سلة، زد، أو شوبيفاي",
-                      completed: false,
-                    },
-                    {
-                      title: "شاهد تقاريرك الأولى",
-                      description: "البيانات تتحدث كل ساعة",
-                      completed: false,
-                    },
-                  ].map((step, i) => (
-                    <div
-                      key={i}
-                      className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-50 transition"
-                    >
-                      <div
-                        className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 ${
-                          step.completed
-                            ? "bg-green-100 text-green-600"
-                            : "bg-gray-100 text-gray-400"
-                        }`}
-                      >
-                        {step.completed ? (
-                          <span className="text-sm">✓</span>
-                        ) : (
-                          <span className="text-xs font-bold">{i + 1}</span>
-                        )}
-                      </div>
-                      <div className="flex-1">
-                        <p className="font-semibold text-sm text-gray-900">
-                          {step.title}
-                        </p>
-                        <p className="text-xs text-gray-500">{step.description}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="bg-white border border-gray-100 rounded-xl p-6">
-                <h3 className="text-lg font-bold text-gray-900 mb-4">
-                  معلومات الحساب
-                </h3>
-                <div className="space-y-4">
-                  <div>
-                    <p className="text-xs text-gray-500 mb-1">الاسم الكامل</p>
-                    <p className="font-semibold text-gray-900">{fullName}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500 mb-1">البريد الإلكتروني</p>
-                    <p className="font-semibold text-gray-900" dir="ltr">
-                      {email}
-                    </p>
-                  </div>
-                  {companyName && (
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">الشركة</p>
-                      <p className="font-semibold text-gray-900">{companyName}</p>
-                    </div>
-                  )}
-                  <div>
-                    <p className="text-xs text-gray-500 mb-1">الباقة</p>
-                    <span className="inline-block bg-indigo-100 text-indigo-700 text-xs font-semibold px-2 py-1 rounded">
-                      تجربة مجانية - 14 يوم
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
+            </>
           )}
         </main>
       </div>

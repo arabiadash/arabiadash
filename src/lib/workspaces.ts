@@ -18,6 +18,16 @@ export type Workspace = Pick<
 export type WorkspaceWithMeta = Workspace & { activeConnections: number };
 
 /**
+ * Slim connection shape used by the dashboard. Carries enough to drive
+ * the data queries (`account_id` for API calls, `platform` for routing,
+ * `account_name` for the UI labels) without dragging the full row.
+ */
+export type WorkspaceConnection = Pick<
+  Database["public"]["Tables"]["connections"]["Row"],
+  "id" | "platform" | "account_id" | "account_name" | "status"
+>;
+
+/**
  * Get the user's default workspace ID.
  *
  * Every user has exactly one default workspace (enforced by partial unique
@@ -82,6 +92,48 @@ export async function getUserWorkspaces(
     if (a.is_default !== b.is_default) return a.is_default ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
+}
+
+/**
+ * List active connections scoped to a workspace, optionally filtered by
+ * platform. Drives the dashboard's per-workspace data queries.
+ *
+ * `user_id` is filtered explicitly even though RLS would catch it — keeps
+ * the intent obvious at the call site and matches the partial index
+ * (user_id, workspace_id, status) for query planning.
+ *
+ * Returns [] on DB error rather than throwing — the dashboard renders an
+ * empty state in that case, which is the same UX as a workspace with no
+ * connections.
+ */
+export async function getActiveConnectionsForWorkspace(
+  supabase: SupabaseClient<Database>,
+  userId: string,
+  workspaceId: number,
+  platform?: "meta" | "google"
+): Promise<WorkspaceConnection[]> {
+  let query = supabase
+    .from("connections")
+    .select("id, platform, account_id, account_name, status")
+    .eq("user_id", userId)
+    .eq("workspace_id", workspaceId)
+    .eq("status", "active");
+
+  if (platform) {
+    query = query.eq("platform", platform);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    console.error("[workspaces/getActiveConnectionsForWorkspace] DB error:", {
+      message: error.message,
+      code: error.code,
+    });
+    return [];
+  }
+
+  return data ?? [];
 }
 
 /**
