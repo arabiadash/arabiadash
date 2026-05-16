@@ -219,6 +219,7 @@ export class MetaAdapter implements AdProviderAdapter {
     campaignId: insight.campaign_id,
     campaignName: insight.campaign_name,
     provider: "meta",
+    currency: this.accountInfo?.currency,
     spend: getSpend(insight),
     impressions: getImpressions(insight),
     clicks: getClicks(insight),
