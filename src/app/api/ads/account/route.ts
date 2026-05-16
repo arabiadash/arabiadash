@@ -15,6 +15,15 @@ export async function GET(request: NextRequest) {
     const provider = (request.nextUrl.searchParams.get("provider") ||
       "meta") as AdProvider;
 
+    // Optional account_id — when provided, scopes the adapter lookup to a
+    // specific connection. Without it the adapter falls back to maybeSingle()
+    // across all the user's active connections for the provider, which is
+    // why callers passing a workspace-scoped account_id matters: it
+    // prevents cross-workspace leakage for single-account providers like
+    // Meta. Matches the /api/ads/insights pattern.
+    const accountId =
+      request.nextUrl.searchParams.get("account_id") ?? undefined;
+
     if (!VALID_PROVIDERS.includes(provider)) {
       return NextResponse.json(
         { error: "invalid_provider", supported: VALID_PROVIDERS },
@@ -31,7 +40,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
 
-    const adapter = await getAdapterForProvider(user.id, provider);
+    const adapter = await getAdapterForProvider(user.id, provider, accountId);
     if (!adapter) {
       return NextResponse.json(
         { error: "no_connection", provider },

@@ -156,7 +156,16 @@ export default function DashboardClient({
   const [roasRef, roasHeight] = useElementHeight<HTMLDivElement>();
 
   useEffect(() => {
-    fetch("/api/ads/account?provider=meta")
+    // When metaAccountId is undefined (no Meta in this workspace), skip
+    // the fetch. The previous accountCurrency value persists — that's
+    // fine because the useInsights skip means no insights render either,
+    // so no number is being converted.
+    //
+    // Important: this depends on useInsights skipping when metaAccountId
+    // is undefined. If that guard is removed, stale currency could
+    // surface in conversions.
+    if (!metaAccountId) return;
+    fetch(`/api/ads/account?provider=meta&account_id=${metaAccountId}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         const c = data?.currency;
@@ -165,7 +174,7 @@ export default function DashboardClient({
         }
       })
       .catch(() => {});
-  }, []);
+  }, [metaAccountId]);
 
   // Aggregate UnifiedInsight[] into totals + recalculated ROAS.
   // Range='30d' typically returns one row, but reduce handles N rows safely.
