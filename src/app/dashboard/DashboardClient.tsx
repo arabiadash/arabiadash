@@ -19,11 +19,6 @@ import DashboardSidebar from "@/components/dashboard-sidebar";
 import DashboardEmptyState from "@/components/dashboard-empty-state";
 import type { Workspace, WorkspaceConnection } from "@/lib/workspaces";
 import {
-  mockPlatformPerformance,
-  platformNameToId,
-  getConnectedAdPlatforms,
-} from "@/lib/mock-data";
-import {
   useInsights,
   dateRangeValueToOptions,
 } from "@/lib/hooks/use-insights";
@@ -434,20 +429,65 @@ export default function DashboardClient({
   // Check if user has any connections
   const hasConnections = connectedPlatforms.length > 0;
 
-  // Filter Platform Performance mock data by connected ad platforms.
-  // Only used when there are 2+ connected platforms (chart hidden otherwise).
-  const connectedAdPlatforms = useMemo(
-    () => getConnectedAdPlatforms(connectedPlatforms),
-    [connectedPlatforms]
-  );
+  // Real platform-by-platform performance computed from live data.
+  //
+  // Per-row currency conversion: only USD/SAR/missing rows feed each
+  // provider's totals. Rows in other currencies are dropped from the
+  // chart aggregates but `hasUnsupported: true` marks the bar so the
+  // tooltip can surface a note (Phase 4.9 will universalize via FX).
+  //
+  // ROAS recomputed from each provider's totals (not averaged from rows).
+  const platformPerformance = useMemo(() => {
+    type Bar = {
+      name: string;
+      spend: number;
+      revenue: number;
+      roas: number;
+      hasUnsupported?: boolean;
+    };
+    const items: Bar[] = [];
 
-  const filteredPlatformPerformance = useMemo(
-    () =>
-      mockPlatformPerformance.filter((p) =>
-        connectedAdPlatforms.includes(platformNameToId(p.name))
-      ),
-    [connectedAdPlatforms]
-  );
+    const buildBar = (
+      name: string,
+      providerInsights: UnifiedInsight[]
+    ): Bar | null => {
+      if (providerInsights.length === 0) return null;
+
+      const supported = providerInsights.filter((i) => {
+        const c = i.currency;
+        return !c || c === "USD" || c === "SAR";
+      });
+      const hasUnsupported = providerInsights.some(
+        (i) => i.currency && i.currency !== "USD" && i.currency !== "SAR"
+      );
+
+      const totals = supported.reduce(
+        (acc, i) => {
+          const src = (i.currency as Currency) || "USD";
+          return {
+            spend: acc.spend + convertCurrency(i.spend, src, currency),
+            revenue:
+              acc.revenue + convertCurrency(i.revenue, src, currency),
+          };
+        },
+        { spend: 0, revenue: 0 }
+      );
+
+      return {
+        name,
+        ...totals,
+        roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
+        hasUnsupported: hasUnsupported || undefined,
+      };
+    };
+
+    const meta = buildBar("Meta", insights);
+    if (meta) items.push(meta);
+    const google = buildBar("Google", googleInsights.insights);
+    if (google) items.push(google);
+
+    return items;
+  }, [insights, googleInsights.insights, currency]);
 
   // Real KPI cards from aggregated insights (Meta + Google after Phase 4.7).
   //
@@ -900,8 +940,12 @@ export default function DashboardClient({
                     : "lg:grid-cols-1"
                 }`}
               >
-                {/* Platform Performance — hidden when only 1 platform connected */}
-                {connectedPlatforms.length > 1 && (
+                {/* Platform Performance — hidden when fewer than 2
+                    providers returned data. Data-driven (not based on
+                    `connections`) so a workspace with Meta + Google
+                    connected but only Meta returning data shows nothing
+                    until the second provider populates. */}
+                {platformPerformance.length > 1 && (
                   <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6">
                     <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-1">
                       الأداء حسب المنصة
@@ -912,7 +956,7 @@ export default function DashboardClient({
                     <div ref={platformRef} dir="ltr" className="h-52 sm:h-64">
                       {platformHeight > 0 && (
                       <ResponsiveContainer width="100%" height={platformHeight}>
-                        <BarChart data={filteredPlatformPerformance}>
+                        <BarChart data={platformPerformance}>
                           <CartesianGrid
                             strokeDasharray="3 3"
                             stroke="#f3f4f6"
