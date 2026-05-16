@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo } from "react";
 import Link from "next/link";
 import {
   TrendingUp,
@@ -161,7 +161,6 @@ export default function DashboardClient({
     level: "account",
   });
   const { currency } = useCurrency();
-  const [accountCurrency, setAccountCurrency] = useState<Currency>("USD");
 
   // Measure each chart's wrapper height so we can pass an explicit pixel
   // value to ResponsiveContainer. Avoids Recharts' `width(-1)/height(-1)`
@@ -169,27 +168,6 @@ export default function DashboardClient({
   const [perfRef, perfHeight] = useElementHeight<HTMLDivElement>();
   const [platformRef, platformHeight] = useElementHeight<HTMLDivElement>();
   const [roasRef, roasHeight] = useElementHeight<HTMLDivElement>();
-
-  useEffect(() => {
-    // When metaAccountId is undefined (no Meta in this workspace), skip
-    // the fetch. The previous accountCurrency value persists — that's
-    // fine because the useInsights skip means no insights render either,
-    // so no number is being converted.
-    //
-    // Important: this depends on useInsights skipping when metaAccountId
-    // is undefined. If that guard is removed, stale currency could
-    // surface in conversions.
-    if (!metaAccountId) return;
-    fetch(`/api/ads/account?provider=meta&account_id=${metaAccountId}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        const c = data?.currency;
-        if (c === "USD" || c === "SAR") {
-          setAccountCurrency(c);
-        }
-      })
-      .catch(() => {});
-  }, [metaAccountId]);
 
   // Aggregate UnifiedInsight[] across Meta + Google into KPI totals.
   //
@@ -385,7 +363,7 @@ export default function DashboardClient({
       const isSupported = !c || c === "USD" || c === "SAR";
       if (!isSupported) return; // unsupported currency — drop from chart
 
-      const src = (c as Currency) || accountCurrency || "USD";
+      const src = (c as Currency) || "USD";
       const sp = convertCurrency(insight.spend, src, currency);
       const rv = convertCurrency(insight.revenue, src, currency);
 
@@ -422,7 +400,6 @@ export default function DashboardClient({
     googleChartInsights.insights,
     chartShouldShowDaily,
     chartDayCount,
-    accountCurrency,
     currency,
   ]);
 
