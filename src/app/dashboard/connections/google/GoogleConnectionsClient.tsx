@@ -96,7 +96,7 @@ export default function GoogleConnectionsClient({
   };
 
   const handleConnectNew = () => {
-    window.location.assign("/api/google-ads/auth");
+    window.location.assign(`/api/google-ads/auth?workspace=${activeWorkspaceId}`);
   };
 
   return (

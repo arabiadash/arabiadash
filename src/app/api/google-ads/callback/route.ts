@@ -89,10 +89,40 @@ export async function GET(request: NextRequest) {
       Date.now() + tokens.expires_in * 1000
     ).toISOString();
 
-    // Every new connection row needs a workspace_id (NOT NULL). Until the
-    // workspace switcher lands in Phase 4.4b, new rows go into the user's
-    // default workspace.
-    const workspaceId = await getDefaultWorkspaceId(adminClient, user.id);
+    // Resolve the workspace this connection belongs to.
+    //
+    //   1) Read the workspace cookie set by /api/google-ads/auth.
+    //   2) Validate: numeric, owned by this user, not archived. RLS would
+    //      catch ownership but we use the admin client here, so the eq()
+    //      filters are load-bearing.
+    //   3) Fall back to the user's default workspace if the cookie was
+    //      missing or didn't validate. Defense-in-depth — never trust a
+    //      raw cookie value as a foreign key.
+    const workspaceCookie = cookieStore.get("google_ads_oauth_workspace")?.value;
+    const requestedId = workspaceCookie ? Number(workspaceCookie) : null;
+    let workspaceId: number | null = null;
+
+    if (
+      requestedId !== null &&
+      Number.isInteger(requestedId) &&
+      requestedId > 0
+    ) {
+      const { data: ownedWorkspace } = await adminClient
+        .from("workspaces")
+        .select("id")
+        .eq("id", requestedId)
+        .eq("user_id", user.id)
+        .is("archived_at", null)
+        .maybeSingle();
+      if (ownedWorkspace) workspaceId = ownedWorkspace.id;
+    }
+
+    workspaceId ??= await getDefaultWorkspaceId(adminClient, user.id);
+
+    // Consume the workspace cookie either way — keeps the user's browser
+    // clean and prevents a stale value from biasing the next OAuth flow.
+    cookieStore.delete("google_ads_oauth_workspace");
+
     if (!workspaceId) {
       return errorRedirect(request, "internal_error");
     }

@@ -28,13 +28,22 @@ export async function GET(request: NextRequest) {
     // because Google's callback is a cross-site top-level redirect; strict
     // would drop the cookie on return.
     const cookieStore = await cookies();
-    cookieStore.set("google_ads_oauth_state", state, {
+    const cookieOpts = {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
+      sameSite: "lax" as const,
       maxAge: 600,
       path: "/",
-    });
+    };
+    cookieStore.set("google_ads_oauth_state", state, cookieOpts);
+
+    // 3b. Carry the active workspace through the OAuth roundtrip. Digit-only
+    // values only — the callback validates ownership + non-archived before
+    // trusting it, and falls back to the default workspace otherwise.
+    const workspaceParam = request.nextUrl.searchParams.get("workspace");
+    if (workspaceParam && /^\d+$/.test(workspaceParam)) {
+      cookieStore.set("google_ads_oauth_workspace", workspaceParam, cookieOpts);
+    }
 
     // 4. Build the consent URL and bounce the user to Google.
     const authUrl = getGoogleAdsOAuthUrl(state);

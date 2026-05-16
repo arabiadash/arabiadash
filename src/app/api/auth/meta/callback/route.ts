@@ -130,13 +130,43 @@ export async function GET(request: NextRequest) {
       (existingRows ?? []).map((r) => [r.account_id, r.status])
     );
 
-    // Every new connection row needs a workspace_id (NOT NULL). Until the
-    // workspace switcher lands in Phase 4.4b, new rows go into the user's
-    // default workspace.
-    const workspaceId = await getDefaultWorkspaceId(adminClient, user.id);
+    // Resolve the workspace this connection belongs to.
+    //
+    //   1) Read the workspace cookie set by /api/auth/meta/init.
+    //   2) Validate: numeric, owned by this user, not archived. RLS would
+    //      catch ownership but we use the admin client here, so the eq()
+    //      filters are load-bearing.
+    //   3) Fall back to the user's default workspace if the cookie was
+    //      missing or didn't validate. Defense-in-depth — never trust a
+    //      raw cookie value as a foreign key.
+    const workspaceCookie = cookieStore.get("meta_oauth_workspace")?.value;
+    const requestedId = workspaceCookie ? Number(workspaceCookie) : null;
+    let workspaceId: number | null = null;
+
+    if (
+      requestedId !== null &&
+      Number.isInteger(requestedId) &&
+      requestedId > 0
+    ) {
+      const { data: ownedWorkspace } = await adminClient
+        .from("workspaces")
+        .select("id")
+        .eq("id", requestedId)
+        .eq("user_id", user.id)
+        .is("archived_at", null)
+        .maybeSingle();
+      if (ownedWorkspace) workspaceId = ownedWorkspace.id;
+    }
+
+    workspaceId ??= await getDefaultWorkspaceId(adminClient, user.id);
+
+    // Consume the workspace cookie either way — keeps the user's browser
+    // clean and prevents a stale value from biasing the next OAuth flow.
+    cookieStore.delete("meta_oauth_workspace");
+
     if (!workspaceId) {
       console.error(
-        "[meta/callback] No default workspace for user:",
+        "[meta/callback] No workspace resolvable for user:",
         user.id
       );
       return NextResponse.redirect(
