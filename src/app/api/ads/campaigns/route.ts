@@ -20,6 +20,14 @@ export async function GET(request: NextRequest) {
     const provider = (request.nextUrl.searchParams.get("provider") ||
       "meta") as AdProvider;
 
+    // Optional account_id — when provided, scopes the adapter + cache lookup
+    // to a specific connection. Without it the adapter falls back to
+    // maybeSingle() across the user's active connections, which leaks
+    // cross-workspace data for single-account providers like Meta.
+    // Matches the /api/ads/insights and /api/ads/account pattern.
+    const accountId =
+      request.nextUrl.searchParams.get("account_id") ?? undefined;
+
     if (!VALID_PROVIDERS.includes(provider)) {
       return NextResponse.json(
         { error: "invalid_provider", supported: VALID_PROVIDERS },
@@ -36,7 +44,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
 
-    const adapter = await getAdapterForProvider(user.id, provider);
+    const adapter = await getAdapterForProvider(user.id, provider, accountId);
     if (!adapter) {
       return NextResponse.json(
         { error: "no_connection", provider },
@@ -44,13 +52,18 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const { data: connection } = await supabase
+    let connectionQuery = supabase
       .from("connections")
       .select("id")
       .eq("user_id", user.id)
       .eq("platform", provider)
-      .eq("status", "active")
-      .maybeSingle();
+      .eq("status", "active");
+
+    if (accountId) {
+      connectionQuery = connectionQuery.eq("account_id", accountId);
+    }
+
+    const { data: connection } = await connectionQuery.maybeSingle();
 
     if (!connection) {
       return NextResponse.json({ error: "no_connection" }, { status: 404 });
