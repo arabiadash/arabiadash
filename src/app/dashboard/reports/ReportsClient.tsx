@@ -1156,7 +1156,11 @@ export default function ReportsClient({
     revalidating: adsRevalidating,
     rateLimited: adsRateLimited,
     refresh: refreshAds,
-  } = useAds({ range: dateRange });
+  } = useAds({
+    range: dateRange,
+    accountId: metaAccountId,
+    skip: !metaAccountId,
+  });
 
   // Manual refresh button has a 30s cooldown to avoid hammering Meta.
   const [lastRefreshAt, setLastRefreshAt] = useState<number>(0);
@@ -1195,19 +1199,30 @@ export default function ReportsClient({
   const activeAds = useMemo(() => ads, [ads]);
 
   // Fetch account currency
+  //
+  // When metaAccountId is undefined (no Meta in this workspace), skip the
+  // fetch. The previous accountCurrency value persists — same trade-off
+  // as DashboardClient: useInsights/useAds skip means no Meta numbers
+  // render, so stale source currency is inert.
+  //
+  // Important: this depends on the Meta data hooks (useInsights, useAds)
+  // skipping when metaAccountId is undefined. If those guards are
+  // removed, stale currency could surface in conversions.
   useEffect(() => {
-    fetch("/api/ads/account?provider=meta")
+    if (!metaAccountId) return;
+    fetch(`/api/ads/account?provider=meta&account_id=${metaAccountId}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         const c = data?.currency;
         if (c === "USD" || c === "SAR") setAccountCurrency(c);
       })
       .catch(() => {});
-  }, []);
+  }, [metaAccountId]);
 
   // Fetch campaigns (for status JOIN)
   useEffect(() => {
-    fetch("/api/ads/campaigns?provider=meta")
+    if (!metaAccountId) return;
+    fetch(`/api/ads/campaigns?provider=meta&account_id=${metaAccountId}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.data && Array.isArray(data.data)) {
@@ -1215,7 +1230,7 @@ export default function ReportsClient({
         }
       })
       .catch((err) => console.error("[reports/campaigns] Error:", err));
-  }, []);
+  }, [metaAccountId]);
 
   const statusMap = useMemo(
     () =>
@@ -1257,6 +1272,8 @@ export default function ReportsClient({
   } = useInsights({
     ...dateRangeValueToOptions(dateRange),
     level: "campaign",
+    accountId: metaAccountId,
+    skip: !metaAccountId,
   });
 
   // Insights for chart (account level + daily breakdown when applicable,
@@ -1265,6 +1282,8 @@ export default function ReportsClient({
     ...dateRangeValueToOptions(chartDateRange),
     level: "account",
     timeIncrement: chartShouldShowDaily ? 1 : undefined,
+    accountId: metaAccountId,
+    skip: !metaAccountId,
   });
 
   // Apply search → status filter → sort
@@ -1370,14 +1389,25 @@ export default function ReportsClient({
     [dateRange]
   );
 
-  // Fetch previous period insights for KPI deltas. When previousPeriod is null
-  // we still need a valid options object (useInsights doesn't support skip
-  // natively); previousSummary below guards on previousPeriod and returns null,
-  // so the deltas are hidden in lifetime mode.
+  // Fetch previous period insights for KPI deltas. When previousPeriod is
+  // null we still need a valid options object; previousSummary below guards
+  // on previousPeriod and returns null, so deltas are hidden in lifetime
+  // mode. skip also bypasses the fetch when the workspace has no Meta
+  // (Phase 4.3) — accountCurrency stays stale but conversions don't run.
   const { insights: previousInsights } = useInsights(
     previousPeriod
-      ? { customRange: previousPeriod, level: "campaign" }
-      : { range: "30d", level: "campaign" }
+      ? {
+          customRange: previousPeriod,
+          level: "campaign",
+          accountId: metaAccountId,
+          skip: !metaAccountId,
+        }
+      : {
+          range: "30d",
+          level: "campaign",
+          accountId: metaAccountId,
+          skip: !metaAccountId,
+        }
   );
 
   const summary = useMemo(() => {
