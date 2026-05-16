@@ -433,16 +433,16 @@ export default function DashboardClient({
             </div>
           </div>
 
-          {/* Empty state — workspace has zero active connections.
-              Replaces 28 lines of inline JSX with the shared
-              DashboardEmptyState so the shape can be reused by reports
-              and other surfaces in later phases. */}
-          {!hasConnections && (
+          {/* When the workspace has zero connections, the dashboard
+              collapses to a single CTA — no contextual Meta empty card
+              stacked, no read-only onboarding visualization. Stats Grid
+              and Charts live in the else branch. */}
+          {!hasConnections ? (
             <div className="mb-4 sm:mb-8">
               <DashboardEmptyState />
             </div>
-          )}
-
+          ) : (
+            <>
           {/* Stats Grid - Real Meta data */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-4 sm:mb-8">
             {noConnection ? (
@@ -557,9 +557,8 @@ export default function DashboardClient({
             )}
           </div>
 
-          {/* Charts Section - Only show if has connections */}
-          {hasConnections && (
-            <>
+          {/* Charts Section */}
+          <>
               {/* Performance Chart - Real Meta data */}
               <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
                 <div className="flex items-center justify-between mb-3 sm:mb-6">
@@ -851,96 +850,7 @@ export default function DashboardClient({
 
               {/* Top Campaigns table moved to /dashboard/reports */}
             </>
-          )}
-
-          {/* Two Column Layout - Quick Setup (only if no connections) */}
-          {!hasConnections && (
-            <div className="grid lg:grid-cols-2 gap-6">
-              <div className="bg-white border border-gray-100 rounded-xl p-6">
-                <h3 className="text-lg font-bold text-gray-900 mb-4">
-                  خطوات البدء
-                </h3>
-                <div className="space-y-3">
-                  {[
-                    {
-                      title: "أكدت إيميلك",
-                      description: "تم تأكيد حسابك بنجاح",
-                      completed: true,
-                    },
-                    {
-                      title: "اربط منصة إعلانية",
-                      description: "ابدأ بـ Meta Ads أو Google Ads",
-                      completed: false,
-                    },
-                    {
-                      title: "اربط متجرك",
-                      description: "سلة، زد، أو شوبيفاي",
-                      completed: false,
-                    },
-                    {
-                      title: "شاهد تقاريرك الأولى",
-                      description: "البيانات تتحدث كل ساعة",
-                      completed: false,
-                    },
-                  ].map((step, i) => (
-                    <div
-                      key={i}
-                      className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-50 transition"
-                    >
-                      <div
-                        className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 ${
-                          step.completed
-                            ? "bg-green-100 text-green-600"
-                            : "bg-gray-100 text-gray-400"
-                        }`}
-                      >
-                        {step.completed ? (
-                          <span className="text-sm">✓</span>
-                        ) : (
-                          <span className="text-xs font-bold">{i + 1}</span>
-                        )}
-                      </div>
-                      <div className="flex-1">
-                        <p className="font-semibold text-sm text-gray-900">
-                          {step.title}
-                        </p>
-                        <p className="text-xs text-gray-500">{step.description}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="bg-white border border-gray-100 rounded-xl p-6">
-                <h3 className="text-lg font-bold text-gray-900 mb-4">
-                  معلومات الحساب
-                </h3>
-                <div className="space-y-4">
-                  <div>
-                    <p className="text-xs text-gray-500 mb-1">الاسم الكامل</p>
-                    <p className="font-semibold text-gray-900">{fullName}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500 mb-1">البريد الإلكتروني</p>
-                    <p className="font-semibold text-gray-900" dir="ltr">
-                      {email}
-                    </p>
-                  </div>
-                  {companyName && (
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">الشركة</p>
-                      <p className="font-semibold text-gray-900">{companyName}</p>
-                    </div>
-                  )}
-                  <div>
-                    <p className="text-xs text-gray-500 mb-1">الباقة</p>
-                    <span className="inline-block bg-indigo-100 text-indigo-700 text-xs font-semibold px-2 py-1 rounded">
-                      تجربة مجانية - 14 يوم
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
+            </>
           )}
         </main>
       </div>
