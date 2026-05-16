@@ -143,6 +143,7 @@ export default function DashboardClient({
     ...dateRangeValueToOptions(dateRange),
     level: "account",
     accountId: metaAccountId,
+    skip: !metaAccountId,
   });
   const { currency } = useCurrency();
   const [accountCurrency, setAccountCurrency] = useState<Currency>("USD");
@@ -195,8 +196,18 @@ export default function DashboardClient({
   // previousSummary guard below returns null so deltas are hidden in lifetime.
   const { insights: previousInsights } = useInsights(
     previousPeriod
-      ? { customRange: previousPeriod, level: "account", accountId: metaAccountId }
-      : { range: "30d", level: "account", accountId: metaAccountId }
+      ? {
+          customRange: previousPeriod,
+          level: "account",
+          accountId: metaAccountId,
+          skip: !metaAccountId,
+        }
+      : {
+          range: "30d",
+          level: "account",
+          accountId: metaAccountId,
+          skip: !metaAccountId,
+        }
   );
 
   const previousSummary = useMemo(() => {
@@ -246,6 +257,7 @@ export default function DashboardClient({
     level: "account",
     timeIncrement: chartShouldShowDaily ? 1 : undefined,
     accountId: metaAccountId,
+    skip: !metaAccountId,
   });
 
   const displayChartData = useMemo(

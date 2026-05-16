@@ -47,6 +47,16 @@ export interface UseInsightsOptions {
    * data from the previous workspace.
    */
   accountId?: string;
+  /**
+   * Bypass the fetch entirely and return a synthetic "no connection" state.
+   *
+   * Required to prevent cross-workspace data leak for single-account
+   * providers like Meta: without `accountId`, the API picks the user's
+   * first active Meta connection across ALL workspaces, so switching to a
+   * workspace with no Meta would show another workspace's data. Callers
+   * pass `skip: !accountId` for the affected provider.
+   */
+  skip?: boolean;
 }
 
 /**
@@ -74,6 +84,7 @@ export function useInsights(
     provider = "meta",
     timeIncrement,
     accountId,
+    skip = false,
   } = options;
 
   const [insights, setInsights] = useState<UnifiedInsight[]>([]);
@@ -180,10 +191,30 @@ export function useInsights(
   );
 
   useEffect(() => {
+    if (skip) return; // paused — no fetch (see `skip` JSDoc)
     void doFetch(false);
-  }, [doFetch]);
+  }, [doFetch, skip]);
 
   const refresh = useCallback(() => doFetch(true), [doFetch]);
+
+  // When skip is on, surface a "no Meta connection in this workspace" shape
+  // regardless of any internal state left over from a previous unskipped
+  // run. The UI's existing noConnection branch already handles this — it
+  // renders the "connect Meta" CTA card.
+  if (skip) {
+    return {
+      insights: [],
+      loading: false,
+      error: null,
+      cached: false,
+      noConnection: true,
+      source: null,
+      fetchedAt: null,
+      revalidating: false,
+      rateLimited: false,
+      refresh,
+    };
+  }
 
   return {
     insights,
