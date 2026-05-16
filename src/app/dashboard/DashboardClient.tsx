@@ -16,6 +16,7 @@ import {
   ArrowDown,
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
+import DashboardEmptyState from "@/components/dashboard-empty-state";
 import type { Workspace, WorkspaceConnection } from "@/lib/workspaces";
 import {
   mockPlatformPerformance,
@@ -411,31 +412,13 @@ export default function DashboardClient({
             </div>
           </div>
 
-          {/* Empty State (only if no connections) */}
+          {/* Empty state — workspace has zero active connections.
+              Replaces 28 lines of inline JSX with the shared
+              DashboardEmptyState so the shape can be reused by reports
+              and other surfaces in later phases. */}
           {!hasConnections && (
-            <div className="bg-gradient-to-br from-indigo-50 to-purple-50 border border-indigo-100 rounded-2xl p-5 sm:p-8 mb-4 sm:mb-8">
-              <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-                <div className="flex items-start gap-4">
-                  <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center flex-shrink-0">
-                    <Link2 className="w-6 h-6 text-indigo-600" />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-bold text-gray-900 mb-1">
-                      ابدأ بربط منصاتك الإعلانية
-                    </h3>
-                    <p className="text-gray-600 text-sm">
-                      اربط Meta Ads و Google Ads ومتجرك على سلة لرؤية بياناتك الفعلية
-                    </p>
-                  </div>
-                </div>
-                <Link
-                  href="/dashboard/connections"
-                  className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-5 py-2.5 rounded-lg font-semibold hover:shadow-lg transition flex items-center gap-2 whitespace-nowrap"
-                >
-                  <Plus className="w-5 h-5" />
-                  ربط منصة
-                </Link>
-              </div>
+            <div className="mb-4 sm:mb-8">
+              <DashboardEmptyState />
             </div>
           )}
 
