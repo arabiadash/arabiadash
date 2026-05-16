@@ -28,7 +28,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
-import type { Workspace } from "@/lib/workspaces";
+import type { Workspace, WorkspaceConnection } from "@/lib/workspaces";
 import {
   useInsights,
   dateRangeValueToOptions,
@@ -72,7 +72,13 @@ interface ReportsClientProps {
   fullName: string;
   companyName: string;
   email: string;
-  connectedPlatforms: string[];
+  /**
+   * Active connections scoped to the active workspace (filtered server-side
+   * in page.tsx via getActiveConnectionsForWorkspace). ReportsClient derives
+   * `connectedPlatforms` from this for the existing UI bits, and picks the
+   * Meta account_id from it to scope all 6 Meta data fetches.
+   */
+  connections: WorkspaceConnection[];
   workspaces: Workspace[];
   activeWorkspaceId: number;
 }
@@ -1084,11 +1090,30 @@ function StatusBadge({ status }: { status?: string }) {
 export default function ReportsClient({
   fullName,
   email,
-  connectedPlatforms,
+  connections,
   workspaces,
   activeWorkspaceId,
 }: ReportsClientProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Derived from the workspace-scoped connections. Keeping the existing
+  // `connectedPlatforms` shape used throughout the JSX avoids touching
+  // every usage site — the underlying data still flows from the server.
+  const connectedPlatforms = useMemo(
+    () => Array.from(new Set(connections.map((c) => c.platform))),
+    [connections]
+  );
+
+  // Meta is single-account: the active workspace has at most one Meta
+  // connection. We pass its account_id to all Meta data fetches so the
+  // API picks exactly that connection — important after Phase 4.3 because
+  // the user may have Meta connections in multiple workspaces. Wired into
+  // the 6 Meta call sites in the next commit.
+  const metaAccountId = useMemo(
+    () =>
+      connections.find((c) => c.platform === "meta")?.account_id ?? undefined,
+    [connections]
+  );
 
   const [dateRange, setDateRange] = useDateRangeStorage();
 

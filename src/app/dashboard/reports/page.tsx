@@ -1,7 +1,11 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
 import ReportsClient from "./ReportsClient";
-import { getUserWorkspaces, resolveActiveWorkspace } from "@/lib/workspaces";
+import {
+  getActiveConnectionsForWorkspace,
+  getUserWorkspaces,
+  resolveActiveWorkspace,
+} from "@/lib/workspaces";
 
 type PageProps = {
   searchParams: Promise<{ [k: string]: string | string[] | undefined }>;
@@ -23,22 +27,44 @@ export default async function ReportsPage({ searchParams }: PageProps) {
   const companyName = user.user_metadata?.company_name || "";
   const email = user.email || "";
 
-  // Parallel: connections list + workspace data.
-  const [{ data: connectionsData }, workspaces, activeWorkspace] =
-    await Promise.all([
-      supabase.from("connections").select("platform").eq("status", "active"),
-      getUserWorkspaces(supabase, user.id),
-      resolveActiveWorkspace(supabase, user.id, params.workspace),
-    ]);
+  // First wave: workspace list (for switcher) + active workspace resolution.
+  // Both run in parallel; resolveActiveWorkspace re-fetches workspaces
+  // internally — accepted in exchange for parallel wall-time.
+  const [workspaces, activeWorkspace] = await Promise.all([
+    getUserWorkspaces(supabase, user.id),
+    resolveActiveWorkspace(supabase, user.id, params.workspace),
+  ]);
 
-  const connectedPlatforms = (connectionsData ?? []).map((c) => c.platform);
+  // Second wave: connections scoped to the active workspace. Cannot
+  // parallelize with the first wave — needs activeWorkspace.id.
+  const connections = await getActiveConnectionsForWorkspace(
+    supabase,
+    user.id,
+    activeWorkspace.id
+  );
+
+  // Meta is architecturally single-account (factory.ts excludes it from
+  // MULTI_ACCOUNT_PROVIDERS). If a workspace somehow ends up with >1 active
+  // Meta connection, ReportsClient silently picks the first and ignores
+  // the rest — surface that in server logs so we notice if it starts
+  // happening in production. Mirrors the dashboard/page.tsx pattern.
+  const metaActiveCount = connections.filter(
+    (c) => c.platform === "meta"
+  ).length;
+  if (metaActiveCount > 1) {
+    console.warn(
+      `[reports] user=${user.id} workspace=${activeWorkspace.id} ` +
+        `metaActiveCount=${metaActiveCount} — using first only. ` +
+        `Multi-account Meta aggregation deferred.`
+    );
+  }
 
   return (
     <ReportsClient
       fullName={fullName}
       companyName={companyName}
       email={email}
-      connectedPlatforms={connectedPlatforms}
+      connections={connections}
       workspaces={workspaces}
       activeWorkspaceId={activeWorkspace.id}
     />
