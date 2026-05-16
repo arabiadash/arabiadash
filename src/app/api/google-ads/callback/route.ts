@@ -127,24 +127,60 @@ export async function GET(request: NextRequest) {
       return errorRedirect(request, "internal_error");
     }
 
+    // Pre-fetch existing rows to preserve user decisions on re-OAuth.
+    // OAuth re-entry should refresh tokens, not relocate accounts or
+    // reset activation state. Without this, a user re-OAuthing in
+    // workspace B would yank all their accounts (including active ones
+    // in workspace A) into workspace B as pending — wiping prior config.
+    const { data: existingRows, error: existingError } = await adminClient
+      .from("connections")
+      .select("account_id, workspace_id, status, account_name, connected_at")
+      .eq("user_id", user.id)
+      .eq("platform", "google");
+
+    if (existingError) {
+      console.error(
+        "[google-ads/callback] Failed to load existing rows:",
+        existingError
+      );
+      return errorRedirect(request, "internal_error");
+    }
+
+    const existingByAccountId = new Map(
+      (existingRows ?? []).map((r) => [r.account_id, r])
+    );
+
+    const nowIso = new Date().toISOString();
+
     const { error: upsertError } = await adminClient
       .from("connections")
       .upsert(
-        customerIds.map((customerId) => ({
-          user_id: user.id,
-          workspace_id: workspaceId,
-          platform: "google",
-          account_id: customerId,
-          account_name: null,
-          // refresh_token stored in access_token (column is provider-agnostic).
-          access_token: tokens.refresh_token,
-          status: "pending",
-          metadata: {
-            expires_at: expiresAt,
-            google_access_token: tokens.access_token,
-          },
-          connected_at: new Date().toISOString(),
-        })),
+        customerIds.map((customerId) => {
+          const existing = existingByAccountId.get(customerId);
+          return {
+            user_id: user.id,
+            // Preserve workspace assignment for existing rows — re-OAuth
+            // refreshes tokens, it doesn't move accounts between workspaces.
+            workspace_id: existing?.workspace_id ?? workspaceId,
+            platform: "google",
+            account_id: customerId,
+            // Preserve any name enriched by sync-accounts on prior runs.
+            account_name: existing?.account_name ?? null,
+            // refresh_token stored in access_token (column is provider-agnostic).
+            // Always refresh — re-OAuth's primary purpose.
+            access_token: tokens.refresh_token,
+            // Preserve activation state — user already decided which
+            // accounts to activate; don't reset to pending on re-OAuth.
+            status: existing?.status ?? "pending",
+            metadata: {
+              expires_at: expiresAt,
+              google_access_token: tokens.access_token,
+            },
+            // Preserve original connection timestamp for accurate
+            // "connected since" semantics.
+            connected_at: existing?.connected_at ?? nowIso,
+          };
+        }),
         { onConflict: "user_id,platform,account_id" }
       );
 
