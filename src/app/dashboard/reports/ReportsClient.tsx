@@ -1308,6 +1308,14 @@ export default function ReportsClient({
     skip: !metaAccountId,
   });
 
+  const googleChartInsights = useProviderInsights({
+    provider: "google",
+    accountIds: googleAccountIds,
+    ...dateRangeValueToOptions(chartDateRange),
+    level: "account",
+    timeIncrement: chartShouldShowDaily ? 1 : undefined,
+  });
+
   // Apply search → status filter → sort
   const processedInsights = useMemo(() => {
     let result = [...insights];
