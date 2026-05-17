@@ -134,28 +134,23 @@ export async function canAddMoreAccounts(
   };
 }
 
-// =====================================================================
-// Backward-compat: deprecated exports for callers that haven't migrated
-// to canAddMoreAccounts yet. C10 rebuilds the connections pages and
-// removes these. Until then, keeping them avoids a massive C1 diff.
-// =====================================================================
-
-/** @deprecated Use getUserPlanLimits().workspaces */
+/**
+ * Workspaces limit — separate concern from account limits, but lives
+ * here because it's also plan-tier-driven. workspaces/actions.ts uses
+ * this for the create-workspace gate. Kept as a top-level export rather
+ * than going through canAddMoreAccounts because the workspace creation
+ * check is sync-friendly (just compare against a constant for now).
+ *
+ * Currently Infinity (matches PLAN_LIMITS.trial.workspaces) — Phase 10
+ * billing will lower this when subscriptions exist.
+ */
 export const WORKSPACE_LIMIT = PLAN_LIMITS.trial.workspaces;
 
-/** @deprecated Use canAddMoreAccounts() — see PlanLimits service */
-export const ACTIVE_ACCOUNTS_LIMIT = 3;
-
-/** @deprecated Use canAddMoreAccounts() */
-export async function getUserAccountsLimit(userId: string): Promise<number> {
-  const tier = await getUserTier(userId);
-  return PLAN_LIMITS[tier].totalAccounts;
-}
-
 /**
- * Standard error shape for limit-reached scenarios. Preserved for the
- * existing `/api/ads/connections/[id]` PATCH route which the frontend
- * parses for `message`/`current`/`limit`.
+ * Standard error shape for account-limit-reached scenarios. Used by the
+ * /api/ads/connections/[id] PATCH route — the frontend parses `message`
+ * + `current` + `limit` to render a clear "you're at your plan cap"
+ * toast.
  */
 export interface AccountLimitError {
   error: "limit_reached";

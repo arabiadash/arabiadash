@@ -1,8 +1,10 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
-import { getUserAccountsLimit } from "@/lib/plans";
 import GoogleConnectionsClient from "./GoogleConnectionsClient";
 import { getUserWorkspaces, resolveActiveWorkspace } from "@/lib/workspaces";
+import { canAddMoreAccounts } from "@/lib/plans";
+import { createClient as createAdminClient } from "@supabase/supabase-js";
+import type { Database } from "@/lib/supabase/database.types";
 
 export const dynamic = "force-dynamic";
 
@@ -10,10 +12,8 @@ export interface GoogleAccountRow {
   id: number;
   account_id: string;
   account_name: string | null;
-  status: "active" | "pending" | "expired" | "revoked" | "error";
   is_manager: boolean;
   currency: string | null;
-  manager_customer_id: string | null;
 }
 
 type PageProps = {
@@ -37,18 +37,28 @@ export default async function GoogleConnectionsPage({
   const fullName = user.user_metadata?.full_name || "مستخدم";
   const email = user.email || "";
 
-  // Parallel: Google connections + workspace data + account limit.
-  const [{ data: connectionsData }, workspaces, activeWorkspace, limit] =
+  // Active-only — pending rows are residual from the legacy "show
+  // everything" flow. The new selector establishes intent, so only
+  // the user's explicitly-chosen accounts surface here. C11's migration
+  // sweeps the old pending rows.
+  const adminClient = createAdminClient<Database>(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { persistSession: false } }
+  );
+
+  const [{ data: connectionsData }, workspaces, activeWorkspace, planCheck] =
     await Promise.all([
       supabase
         .from("connections")
-        .select("id, account_id, account_name, status, metadata")
+        .select("id, account_id, account_name, metadata")
         .eq("user_id", user.id)
         .eq("platform", "google")
+        .eq("status", "active")
         .order("id", { ascending: true }),
       getUserWorkspaces(supabase, user.id),
       resolveActiveWorkspace(supabase, user.id, params.workspace),
-      getUserAccountsLimit(user.id),
+      canAddMoreAccounts(adminClient, user.id, 0),
     ]);
 
   const accounts: GoogleAccountRow[] = (connectionsData ?? []).map((row) => {
@@ -56,17 +66,14 @@ export default async function GoogleConnectionsPage({
       (row.metadata as {
         is_manager?: boolean;
         currency?: string;
-        manager_customer_id?: string | null;
       }) || {};
 
     return {
       id: row.id,
       account_id: row.account_id,
       account_name: row.account_name,
-      status: row.status as GoogleAccountRow["status"],
       is_manager: metadata.is_manager ?? false,
       currency: metadata.currency ?? null,
-      manager_customer_id: metadata.manager_customer_id ?? null,
     };
   });
 
@@ -83,7 +90,9 @@ export default async function GoogleConnectionsPage({
       fullName={fullName}
       email={email}
       accounts={accounts}
-      limit={limit}
+      planLimit={planCheck.limit}
+      planTier={planCheck.tier}
+      planCurrent={planCheck.current}
       workspaces={workspaces}
       activeWorkspaceId={activeWorkspace.id}
     />
