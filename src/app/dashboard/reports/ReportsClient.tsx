@@ -1146,6 +1146,10 @@ export default function ReportsClient({
     "campaigns"
   );
 
+  // Outer platform tab (Phase 4.8 M1). Defaults to Meta; auto-switches to
+  // Google when the workspace has no Meta connection but has Google.
+  const [platformTab, setPlatformTab] = useState<"meta" | "google">("meta");
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const saved = localStorage.getItem("arabiadash:reportsTab");
@@ -1158,6 +1162,12 @@ export default function ReportsClient({
     if (typeof window === "undefined") return;
     localStorage.setItem("arabiadash:reportsTab", activeTab);
   }, [activeTab]);
+
+  useEffect(() => {
+    if (!metaAccountId && googleAccountIds.length > 0) {
+      setPlatformTab("google");
+    }
+  }, [metaAccountId, googleAccountIds.length]);
 
   // Ads (for the Creatives tab + tab badge count). Same dateRange as the rest.
   const {
@@ -2065,45 +2075,77 @@ export default function ReportsClient({
               </div>
 
 
-              {/* Reports Tabs (Campaigns + Creatives) */}
+              {/* Outer: Platform tabs (Phase 4.8 M1) */}
               <div className="bg-white border border-gray-100 rounded-xl overflow-hidden mb-4 sm:mb-6">
                 <div className="border-b border-gray-100 px-4 sm:px-6 pt-4 sm:pt-6">
                   <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => setActiveTab("campaigns")}
-                      className={`px-4 py-2.5 text-sm font-medium border-b-2 transition -mb-px ${
-                        activeTab === "campaigns"
-                          ? "border-indigo-600 text-indigo-600"
-                          : "border-transparent text-gray-500 hover:text-gray-700"
-                      }`}
-                    >
-                      الحملات
-                      {insights.length > 0 && (
-                        <span className="mr-2 px-1.5 py-0.5 bg-gray-100 rounded text-xs">
-                          {insights.length}
-                        </span>
-                      )}
-                    </button>
-                    <button
-                      onClick={() => setActiveTab("creatives")}
-                      className={`px-4 py-2.5 text-sm font-medium border-b-2 transition -mb-px ${
-                        activeTab === "creatives"
-                          ? "border-indigo-600 text-indigo-600"
-                          : "border-transparent text-gray-500 hover:text-gray-700"
-                      }`}
-                    >
-                      الإبداعات
-                      {ads.length > 0 && (
-                        <span className="mr-2 px-1.5 py-0.5 bg-gray-100 rounded text-xs">
-                          {ads.length}
-                        </span>
-                      )}
-                    </button>
+                    {metaAccountId && (
+                      <button
+                        onClick={() => setPlatformTab("meta")}
+                        className={`px-5 py-3 text-base font-bold border-b-2 transition -mb-px ${
+                          platformTab === "meta"
+                            ? "border-indigo-600 text-indigo-600"
+                            : "border-transparent text-gray-500 hover:text-gray-700"
+                        }`}
+                      >
+                        📘 Meta
+                      </button>
+                    )}
+                    {googleAccountIds.length > 0 && (
+                      <button
+                        onClick={() => setPlatformTab("google")}
+                        className={`px-5 py-3 text-base font-bold border-b-2 transition -mb-px ${
+                          platformTab === "google"
+                            ? "border-indigo-600 text-indigo-600"
+                            : "border-transparent text-gray-500 hover:text-gray-700"
+                        }`}
+                      >
+                        🔵 Google
+                      </button>
+                    )}
                   </div>
                 </div>
 
                 <div className="p-4 sm:p-6">
-                  {activeTab === "campaigns" ? (
+                  {platformTab === "meta" && (
+                    <div>
+                      {/* Inner: Campaigns/Creatives tabs */}
+                      <div className="border-b border-gray-100 mb-4">
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => setActiveTab("campaigns")}
+                            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition -mb-px ${
+                              activeTab === "campaigns"
+                                ? "border-indigo-600 text-indigo-600"
+                                : "border-transparent text-gray-500 hover:text-gray-700"
+                            }`}
+                          >
+                            الحملات
+                            {insights.length > 0 && (
+                              <span className="mr-2 px-1.5 py-0.5 bg-gray-100 rounded text-xs">
+                                {insights.length}
+                              </span>
+                            )}
+                          </button>
+                          <button
+                            onClick={() => setActiveTab("creatives")}
+                            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition -mb-px ${
+                              activeTab === "creatives"
+                                ? "border-indigo-600 text-indigo-600"
+                                : "border-transparent text-gray-500 hover:text-gray-700"
+                            }`}
+                          >
+                            الإبداعات
+                            {ads.length > 0 && (
+                              <span className="mr-2 px-1.5 py-0.5 bg-gray-100 rounded text-xs">
+                                {ads.length}
+                              </span>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      {activeTab === "campaigns" ? (
                     <>
                 {insightsLoading ? (
                   <div className="space-y-2">
@@ -2542,6 +2584,14 @@ export default function ReportsClient({
                         displayCurrency={currency}
                       />
                     </>
+                  )}
+                    </div>
+                  )}
+
+                  {platformTab === "google" && (
+                    <div className="text-center py-12 text-gray-400">
+                      قريباً: تفاصيل حسابات Google
+                    </div>
                   )}
                 </div>
               </div>
