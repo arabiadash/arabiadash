@@ -42,6 +42,21 @@ const META_ERROR_MESSAGES: Record<string, string> = {
   meta_callback_failed: "حدث خطأ غير متوقع أثناء الربط. حاول مرة أخرى.",
 };
 
+// Google Ads error reasons — surfaced by /api/google-ads/auth and the
+// OAuth callback via `?google_ads=error&reason=<code>`. The two added
+// for ADR-009 C7 (workspace integrity) are the workspace_* ones; the
+// rest are pre-existing reasons emitted by the callback route that now
+// finally get user-visible messages instead of a silent URL bar.
+const GOOGLE_ADS_ERROR_MESSAGES: Record<string, string> = {
+  workspace_required: "الرجاء اختيار مساحة عمل قبل ربط Google.",
+  invalid_workspace: "مساحة العمل المختارة غير صالحة.",
+  expired_session: "انتهت صلاحية جلسة الربط. حاول مرة أخرى.",
+  csrf_mismatch: "حدث خطأ في التحقق من الجلسة. حاول مرة أخرى.",
+  missing_params: "حدث خطأ في عملية الربط. حاول مرة أخرى.",
+  no_accounts: "لم يتم العثور على حسابات Google Ads مرتبطة بحسابك.",
+  internal_error: "حدث خطأ غير متوقع أثناء الربط. حاول مرة أخرى.",
+};
+
 export default function ConnectionsClient({
   fullName,
   companyName,
@@ -69,12 +84,16 @@ export default function ConnectionsClient({
     setConnectedPlatforms(initialConnections);
   }, [initialConnections]);
 
-  // Handle OAuth callback redirect (?success=... or ?error=...)
+  // Handle OAuth callback redirect:
+  //   - Meta: ?success=meta_connected or ?error=<code>
+  //   - Google: ?google_ads=success&count=N or ?google_ads=error&reason=<code>
   useEffect(() => {
     const success = searchParams.get("success");
     const errorCode = searchParams.get("error");
+    const googleAds = searchParams.get("google_ads");
+    const googleReason = searchParams.get("reason");
 
-    if (!success && !errorCode) return;
+    if (!success && !errorCode && !googleAds) return;
 
     if (success === "meta_connected") {
       setShowSuccess("meta");
@@ -83,6 +102,16 @@ export default function ConnectionsClient({
     } else if (errorCode) {
       const msg =
         META_ERROR_MESSAGES[errorCode] ?? "حدث خطأ. حاول مرة أخرى.";
+      setErrorMessage(msg);
+      setTimeout(() => setErrorMessage(null), 4000);
+    } else if (googleAds === "success") {
+      setShowSuccess("google");
+      setTimeout(() => setShowSuccess(null), 3000);
+      router.refresh();
+    } else if (googleAds === "error") {
+      const msg =
+        (googleReason && GOOGLE_ADS_ERROR_MESSAGES[googleReason]) ??
+        "حدث خطأ أثناء ربط Google. حاول مرة أخرى.";
       setErrorMessage(msg);
       setTimeout(() => setErrorMessage(null), 4000);
     }
