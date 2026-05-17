@@ -6,6 +6,7 @@ import type { Database } from "@/lib/supabase/database.types";
 import {
   exchangeCodeForTokens,
   getAccessibleCustomers,
+  getEnrichedCustomerClients,
 } from "@/lib/google-ads/oauth";
 import { getDefaultWorkspaceId } from "@/lib/workspaces";
 import { syncGoogleAccountsForUser } from "@/lib/google-ads/sync-accounts-logic";
@@ -63,11 +64,24 @@ export async function GET(request: NextRequest) {
     const tokens = await exchangeCodeForTokens(code);
 
     // 6. Discover which Google Ads accounts this user can access.
-    const customerIds = await getAccessibleCustomers(tokens.refresh_token);
+    // Hybrid approach (ADR-009):
+    //   - listAccessibleCustomers: baseline of all accessible IDs,
+    //     including standalone (non-MCC-linked) accounts.
+    //   - getEnrichedCustomerClients: customer_client GAQL from MCC
+    //     context — returns names+status+currency for MCC-linked
+    //     accounts in ANY status (CANCELED/CLOSED included, where the
+    //     per-customer descriptive_name query would fail).
+    // Run in parallel; the merge happens in the upsert map below.
+    const [customerIds, enrichedClients] = await Promise.all([
+      getAccessibleCustomers(tokens.refresh_token),
+      getEnrichedCustomerClients(tokens.refresh_token),
+    ]);
 
     if (customerIds.length === 0) {
       return errorRedirect(request, "no_accounts");
     }
+
+    const enrichmentMap = new Map(enrichedClients.map((c) => [c.id, c]));
 
     // 7. Persist one row per accessible account into the unified connections
     // table. Service role required because we write tokens the user's session
@@ -158,6 +172,7 @@ export async function GET(request: NextRequest) {
       .upsert(
         customerIds.map((customerId) => {
           const existing = existingByAccountId.get(customerId);
+          const enriched = enrichmentMap.get(customerId);
           return {
             user_id: user.id,
             // Preserve workspace assignment for existing rows — re-OAuth
@@ -165,8 +180,15 @@ export async function GET(request: NextRequest) {
             workspace_id: existing?.workspace_id ?? workspaceId,
             platform: "google",
             account_id: customerId,
-            // Preserve any name enriched by sync-accounts on prior runs.
-            account_name: existing?.account_name ?? null,
+            // Prefer the enriched (customer_client) name when available —
+            // it works for CANCELED/CLOSED accounts where sync-accounts
+            // would fail. Otherwise preserve any name from a prior sync,
+            // and fall back to null (the auto-sync below may fill it
+            // later for standalone accounts not in enrichmentMap).
+            account_name:
+              enriched?.descriptive_name ??
+              existing?.account_name ??
+              null,
             // refresh_token stored in access_token (column is provider-agnostic).
             // Always refresh — re-OAuth's primary purpose.
             access_token: tokens.refresh_token,
@@ -176,6 +198,17 @@ export async function GET(request: NextRequest) {
             metadata: {
               expires_at: expiresAt,
               google_access_token: tokens.access_token,
+              // Enrichment fields from customer_client query. Populated
+              // only when this account appeared in the MCC-context query
+              // (i.e. MCC-linked). Standalone accounts fall through to
+              // the sync-accounts auto-trigger below.
+              ...(enriched && {
+                currency: enriched.currency_code,
+                timezone_name: enriched.time_zone,
+                google_account_status: enriched.status,
+                is_manager: enriched.manager,
+                is_test_account: enriched.test_account,
+              }),
             },
             // Preserve original connection timestamp for accurate
             // "connected since" semantics.
