@@ -39,59 +39,20 @@ export async function GET() {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
     }
 
-    console.log("[discover-debug] auth user:", {
-      user_id: user.id,
-      email: user.email,
-    });
-
     const adminClient = createClient<Database>(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!,
       { auth: { persistSession: false } }
     );
 
-    // Try the specific query
-    const { data: credential, error: credError } = await adminClient
+    // Refresh token lives in platform_credentials (one row per user/platform).
+    // OAuth callback writes it; we read it here.
+    const { data: credential } = await adminClient
       .from("platform_credentials")
       .select("refresh_token")
       .eq("user_id", user.id)
       .eq("platform", "google")
       .maybeSingle();
-
-    console.log("[discover-debug] credential query:", {
-      has_data: !!credential,
-      has_token: !!credential?.refresh_token,
-      token_preview: credential?.refresh_token?.slice(0, 10) ?? null,
-      error: credError
-        ? {
-            message: credError.message,
-            code: credError.code,
-            details: credError.details,
-          }
-        : null,
-    });
-
-    // Also try counting all rows for this user
-    const { data: allCreds, error: countErr } = await adminClient
-      .from("platform_credentials")
-      .select("user_id, platform")
-      .eq("user_id", user.id);
-
-    console.log("[discover-debug] all creds for user:", {
-      count: allCreds?.length ?? 0,
-      rows: allCreds,
-      error: countErr ? { message: countErr.message, code: countErr.code } : null,
-    });
-
-    // Try without any filter — just see all rows
-    const { data: allRows } = await adminClient
-      .from("platform_credentials")
-      .select("user_id, platform");
-
-    console.log("[discover-debug] ALL rows in platform_credentials:", {
-      count: allRows?.length ?? 0,
-      sample: allRows?.slice(0, 3),
-    });
 
     if (!credential?.refresh_token) {
       return NextResponse.json(
