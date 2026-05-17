@@ -1115,6 +1115,17 @@ export default function ReportsClient({
     [connections]
   );
 
+  // Google is multi-account: the active workspace can have N active Google
+  // connections. useProviderInsights fans out one API call per account in
+  // parallel; empty array → skip. Mirrors DashboardClient pattern.
+  const googleAccountIds = useMemo(
+    () =>
+      connections
+        .filter((c) => c.platform === "google")
+        .map((c) => c.account_id),
+    [connections]
+  );
+
   const [dateRange, setDateRange] = useDateRangeStorage();
 
   const { currency } = useCurrency();
