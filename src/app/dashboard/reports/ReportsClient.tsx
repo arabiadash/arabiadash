@@ -23,11 +23,10 @@ import {
   ChevronUp,
   ChevronDown,
   ChevronsUpDown,
-  ArrowUp,
-  ArrowDown,
   RefreshCw,
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
+import KpiCard, { type KpiCardProps } from "@/components/reports/KpiCard";
 import type { Workspace, WorkspaceConnection } from "@/lib/workspaces";
 import {
   useInsights,
@@ -1147,6 +1146,10 @@ export default function ReportsClient({
     "campaigns"
   );
 
+  // Outer platform tab (Phase 4.8 M1). Defaults to Meta; auto-switches to
+  // Google when the workspace has no Meta connection but has Google.
+  const [platformTab, setPlatformTab] = useState<"meta" | "google">("meta");
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const saved = localStorage.getItem("arabiadash:reportsTab");
@@ -1159,6 +1162,12 @@ export default function ReportsClient({
     if (typeof window === "undefined") return;
     localStorage.setItem("arabiadash:reportsTab", activeTab);
   }, [activeTab]);
+
+  useEffect(() => {
+    if (!metaAccountId && googleAccountIds.length > 0) {
+      setPlatformTab("google");
+    }
+  }, [metaAccountId, googleAccountIds.length]);
 
   // Ads (for the Creatives tab + tab badge count). Same dateRange as the rest.
   const {
@@ -1598,6 +1607,197 @@ export default function ReportsClient({
     currency,
   ]);
 
+  // Meta-only KPIs (excludes Google). Drives the Meta platform tab's
+  // mini KPI strip. Same supported-currency policy as `aggregated`.
+  const metaAggregated = useMemo(() => {
+    if (insights.length === 0) return null;
+    const supportedRows = insights.filter((ins) => {
+      const c = ins.currency;
+      return !c || c === "USD" || c === "SAR";
+    });
+    const totals = supportedRows.reduce(
+      (acc, ins) => {
+        const src = (ins.currency as Currency) || "USD";
+        return {
+          spend: acc.spend + convertCurrency(ins.spend, src, currency),
+          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
+          purchases: acc.purchases + ins.purchases,
+        };
+      },
+      { spend: 0, revenue: 0, purchases: 0 }
+    );
+    return {
+      spend: totals.spend,
+      revenue: totals.revenue,
+      roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
+      purchases: totals.purchases,
+    };
+  }, [insights, currency]);
+
+  // Meta-only chart data — daily breakdown, same currency policy.
+  const metaChartData = useMemo(() => {
+    type Row = { date: string; spend: number; revenue: number };
+    const byDate = new Map<string, Row>();
+
+    chartInsights.forEach((insight) => {
+      const c = insight.currency;
+      const isSupported = !c || c === "USD" || c === "SAR";
+      if (!isSupported) return;
+
+      const src = (c as Currency) || "USD";
+      const sp = convertCurrency(insight.spend, src, currency);
+      const rv = convertCurrency(insight.revenue, src, currency);
+
+      const existing = byDate.get(insight.dateStart);
+      if (existing) {
+        existing.spend += sp;
+        existing.revenue += rv;
+      } else {
+        byDate.set(insight.dateStart, {
+          date: insight.dateStart,
+          spend: sp,
+          revenue: rv,
+        });
+      }
+    });
+
+    return Array.from(byDate.values())
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((row) => ({
+        date: row.date,
+        dayLabel: chartShouldShowDaily
+          ? formatChartDayLabel(row.date, chartDayCount)
+          : row.date,
+        tooltipLabel: formatChartTooltipLabel(row.date),
+        displaySpend: row.spend,
+        displayRevenue: row.revenue,
+      }));
+  }, [chartInsights, chartShouldShowDaily, chartDayCount, currency]);
+
+  // Google-only KPIs. "purchases" here is semantically Google's
+  // conversions metric (form fills, calls, page views, etc.) — labeled
+  // "تحويلات" in the UI to disambiguate from Meta e-commerce purchases.
+  // See #15 for the full semantic discussion.
+  const googleAggregated = useMemo(() => {
+    if (googleInsights.insights.length === 0) return null;
+    const supportedRows = googleInsights.insights.filter((ins) => {
+      const c = ins.currency;
+      return !c || c === "USD" || c === "SAR";
+    });
+    const totals = supportedRows.reduce(
+      (acc, ins) => {
+        const src = (ins.currency as Currency) || "USD";
+        return {
+          spend: acc.spend + convertCurrency(ins.spend, src, currency),
+          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
+          purchases: acc.purchases + ins.purchases,
+        };
+      },
+      { spend: 0, revenue: 0, purchases: 0 }
+    );
+    return {
+      spend: totals.spend,
+      revenue: totals.revenue,
+      roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
+      conversions: totals.purchases,
+    };
+  }, [googleInsights.insights, currency]);
+
+  // Google-only chart data — daily breakdown, same currency policy.
+  const googleChartData = useMemo(() => {
+    type Row = { date: string; spend: number; revenue: number };
+    const byDate = new Map<string, Row>();
+
+    googleChartInsights.insights.forEach((insight) => {
+      const c = insight.currency;
+      const isSupported = !c || c === "USD" || c === "SAR";
+      if (!isSupported) return;
+
+      const src = (c as Currency) || "USD";
+      const sp = convertCurrency(insight.spend, src, currency);
+      const rv = convertCurrency(insight.revenue, src, currency);
+
+      const existing = byDate.get(insight.dateStart);
+      if (existing) {
+        existing.spend += sp;
+        existing.revenue += rv;
+      } else {
+        byDate.set(insight.dateStart, {
+          date: insight.dateStart,
+          spend: sp,
+          revenue: rv,
+        });
+      }
+    });
+
+    return Array.from(byDate.values())
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((row) => ({
+        date: row.date,
+        dayLabel: chartShouldShowDaily
+          ? formatChartDayLabel(row.date, chartDayCount)
+          : row.date,
+        tooltipLabel: formatChartTooltipLabel(row.date),
+        displaySpend: row.spend,
+        displayRevenue: row.revenue,
+      }));
+  }, [googleChartInsights.insights, chartShouldShowDaily, chartDayCount, currency]);
+
+  // Per-account breakdown for the Google tab. Groups insights by accountId,
+  // computes per-account totals + ROAS. Sorted by spend desc so the biggest
+  // spenders appear first — that's the row most actionable for budget
+  // decisions. `hasUnsupported` flags accounts with non-USD/SAR data so the
+  // UI can surface a note (those rows are excluded from the displayed totals).
+  const googleAccountsBreakdown = useMemo(() => {
+    type AccountRow = {
+      accountId: string;
+      spend: number;
+      revenue: number;
+      roas: number;
+      conversions: number;
+      hasUnsupported: boolean;
+    };
+
+    const byAccount = new Map<string, AccountRow>();
+
+    googleInsights.insights.forEach((insight) => {
+      const accId = insight.accountId;
+      if (!accId) return;
+
+      const c = insight.currency;
+      const isSupported = !c || c === "USD" || c === "SAR";
+
+      if (!byAccount.has(accId)) {
+        byAccount.set(accId, {
+          accountId: accId,
+          spend: 0,
+          revenue: 0,
+          roas: 0,
+          conversions: 0,
+          hasUnsupported: false,
+        });
+      }
+
+      const row = byAccount.get(accId)!;
+
+      if (!isSupported) {
+        row.hasUnsupported = true;
+        return;
+      }
+
+      const src = (c as Currency) || "USD";
+      row.spend += convertCurrency(insight.spend, src, currency);
+      row.revenue += convertCurrency(insight.revenue, src, currency);
+      row.conversions += insight.purchases;
+    });
+
+    byAccount.forEach((row) => {
+      row.roas = row.spend > 0 ? row.revenue / row.spend : 0;
+    });
+
+    return Array.from(byAccount.values()).sort((a, b) => b.spend - a.spend);
+  }, [googleInsights.insights, currency]);
+
   // Real KPI cards from aggregated insights (Meta + Google after M2).
   //
   // `aggregated.spend` / `.revenue` are already in the display currency
@@ -1672,7 +1872,7 @@ export default function ReportsClient({
         unsupportedBadges: undefined as string[] | undefined,
       },
       {
-        label: "عدد المبيعات",
+        label: "عدد المبيعات*",
         value: aggregated.purchases.toLocaleString("en-US"),
         icon: Users,
         color: "blue",
@@ -1681,6 +1881,7 @@ export default function ReportsClient({
           : null,
         deltaInverse: false,
         unsupportedBadges: purchasesBadges,
+        footnote: "يشمل تحويلات Google",
       },
       {
         label: "متوسط قيمة الطلب",
@@ -1906,107 +2107,20 @@ export default function ReportsClient({
                         <div className="h-5 bg-gray-200 rounded w-1/2"></div>
                       </div>
                     ))
-                  : kpiCards.map((stat, i) => {
-                      const colorClasses: Record<string, string> = {
-                        indigo: "bg-indigo-50 text-indigo-600",
-                        green: "bg-green-50 text-green-600",
-                        emerald: "bg-emerald-50 text-emerald-600",
-                        purple: "bg-purple-50 text-purple-600",
-                        blue: "bg-blue-50 text-blue-600",
-                        pink: "bg-pink-50 text-pink-600",
-                      };
-
-                      const showDelta = stat.delta && stat.delta.isFinite;
-                      const deltaValue = stat.delta?.value ?? 0;
-                      const isNegligible =
-                        showDelta && Math.abs(deltaValue) < 0.1;
-                      const deltaIsPositive = stat.deltaInverse
-                        ? deltaValue < 0
-                        : deltaValue > 0;
-                      const deltaColor = !showDelta
-                        ? "text-gray-400"
-                        : isNegligible
-                          ? "text-gray-500"
-                          : deltaIsPositive
-                            ? "text-green-600"
-                            : "text-red-600";
-                      const DeltaIcon =
-                        !showDelta || isNegligible
-                          ? null
-                          : deltaValue > 0
-                            ? ArrowUp
-                            : ArrowDown;
-
-                      return (
-                        <div
-                          key={i}
-                          className="bg-white border border-gray-100 rounded-xl p-3 sm:p-4 hover:shadow-md transition"
-                        >
-                          <div className="flex items-center justify-between mb-2 sm:mb-3">
-                            <div
-                              className={`w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center ${
-                                colorClasses[stat.color]
-                              }`}
-                            >
-                              <stat.icon className="w-4 h-4" />
-                            </div>
-                          </div>
-                          <p className="text-xs text-gray-600 mb-1 truncate">
-                            {stat.label}
-                          </p>
-                          <div
-                            className="flex items-baseline gap-1 flex-wrap mb-1"
-                            dir="ltr"
-                          >
-                            <span className="text-base sm:text-lg font-bold text-gray-900">
-                              {stat.value}
-                            </span>
-                          </div>
-
-                          {/* Unsupported-currency side-totals — only present
-                              when the workspace has accounts in currencies
-                              outside USD/SAR (AED, EGP, EUR, …). Phase 4.9
-                              will fold these into the main total via live FX. */}
-                          {stat.unsupportedBadges &&
-                            stat.unsupportedBadges.length > 0 && (
-                              <div
-                                className="flex flex-col gap-0.5 mb-1"
-                                dir="ltr"
-                              >
-                                {stat.unsupportedBadges.map((badge, j) => (
-                                  <span
-                                    key={j}
-                                    className="text-[10px] sm:text-xs text-gray-500"
-                                  >
-                                    {badge}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-
-                          {showDelta ? (
-                            <div
-                              className={`flex items-center gap-0.5 text-[10px] sm:text-xs ${deltaColor}`}
-                              dir="ltr"
-                            >
-                              {DeltaIcon && (
-                                <DeltaIcon className="w-3 h-3" />
-                              )}
-                              <span className="font-semibold">
-                                {Math.abs(deltaValue).toFixed(1)}%
-                              </span>
-                              <span className="text-gray-400 mr-1">
-                                vs السابقة
-                              </span>
-                            </div>
-                          ) : previousPeriod ? (
-                            <div className="text-[10px] sm:text-xs text-gray-400">
-                              — vs السابقة
-                            </div>
-                          ) : null}
-                        </div>
-                      );
-                    })}
+                  : kpiCards.map((stat, i) => (
+                      <KpiCard
+                        key={i}
+                        label={stat.label}
+                        value={stat.value}
+                        icon={stat.icon}
+                        color={stat.color as KpiCardProps["color"]}
+                        delta={stat.delta}
+                        deltaInverse={stat.deltaInverse}
+                        unsupportedBadges={stat.unsupportedBadges}
+                        footnote={stat.footnote}
+                        previousPeriod={previousPeriod}
+                      />
+                    ))}
               </div>
 
               {/* Main Chart - Spend vs Revenue */}
@@ -2152,45 +2266,153 @@ export default function ReportsClient({
               </div>
 
 
-              {/* Reports Tabs (Campaigns + Creatives) */}
+              {/* Outer: Platform tabs (Phase 4.8 M1) */}
               <div className="bg-white border border-gray-100 rounded-xl overflow-hidden mb-4 sm:mb-6">
                 <div className="border-b border-gray-100 px-4 sm:px-6 pt-4 sm:pt-6">
                   <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => setActiveTab("campaigns")}
-                      className={`px-4 py-2.5 text-sm font-medium border-b-2 transition -mb-px ${
-                        activeTab === "campaigns"
-                          ? "border-indigo-600 text-indigo-600"
-                          : "border-transparent text-gray-500 hover:text-gray-700"
-                      }`}
-                    >
-                      الحملات
-                      {insights.length > 0 && (
-                        <span className="mr-2 px-1.5 py-0.5 bg-gray-100 rounded text-xs">
-                          {insights.length}
-                        </span>
-                      )}
-                    </button>
-                    <button
-                      onClick={() => setActiveTab("creatives")}
-                      className={`px-4 py-2.5 text-sm font-medium border-b-2 transition -mb-px ${
-                        activeTab === "creatives"
-                          ? "border-indigo-600 text-indigo-600"
-                          : "border-transparent text-gray-500 hover:text-gray-700"
-                      }`}
-                    >
-                      الإبداعات
-                      {ads.length > 0 && (
-                        <span className="mr-2 px-1.5 py-0.5 bg-gray-100 rounded text-xs">
-                          {ads.length}
-                        </span>
-                      )}
-                    </button>
+                    {metaAccountId && (
+                      <button
+                        onClick={() => setPlatformTab("meta")}
+                        className={`px-5 py-3 text-base font-bold border-b-2 transition -mb-px ${
+                          platformTab === "meta"
+                            ? "border-indigo-600 text-indigo-600"
+                            : "border-transparent text-gray-500 hover:text-gray-700"
+                        }`}
+                      >
+                        📘 Meta
+                      </button>
+                    )}
+                    {googleAccountIds.length > 0 && (
+                      <button
+                        onClick={() => setPlatformTab("google")}
+                        className={`px-5 py-3 text-base font-bold border-b-2 transition -mb-px ${
+                          platformTab === "google"
+                            ? "border-indigo-600 text-indigo-600"
+                            : "border-transparent text-gray-500 hover:text-gray-700"
+                        }`}
+                      >
+                        🔵 Google
+                      </button>
+                    )}
                   </div>
                 </div>
 
                 <div className="p-4 sm:p-6">
-                  {activeTab === "campaigns" ? (
+                  {platformTab === "meta" && (
+                    <div>
+                      {/* Meta mini KPIs */}
+                      {metaAggregated && (
+                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                          <KpiCard
+                            size="mini"
+                            label="إنفاق Meta"
+                            value={formatCurrencyWithSymbol(metaAggregated.spend, currency)}
+                            icon={DollarSign}
+                            color="indigo"
+                          />
+                          <KpiCard
+                            size="mini"
+                            label="إيرادات Meta"
+                            value={formatCurrencyWithSymbol(metaAggregated.revenue, currency)}
+                            icon={ShoppingCart}
+                            color="green"
+                          />
+                          <KpiCard
+                            size="mini"
+                            label="ROAS Meta"
+                            value={`${metaAggregated.roas.toFixed(2)}x`}
+                            icon={Target}
+                            color="purple"
+                          />
+                          <KpiCard
+                            size="mini"
+                            label="مبيعات Meta"
+                            value={metaAggregated.purchases.toLocaleString("en-US")}
+                            icon={Users}
+                            color="blue"
+                          />
+                        </div>
+                      )}
+
+                      {/* Meta chart */}
+                      {metaChartData.length > 0 && (
+                        <div className="border border-gray-100 rounded-lg p-3 sm:p-4 mb-4">
+                          <h4 className="text-sm font-bold text-gray-900 mb-2">
+                            أداء Meta — الإنفاق مقابل الإيرادات
+                          </h4>
+                          <div dir="ltr" className="h-48 sm:h-56">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <AreaChart data={metaChartData}>
+                                <defs>
+                                  <linearGradient id="colorMetaRev" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
+                                    <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                                  </linearGradient>
+                                  <linearGradient id="colorMetaSpd" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#6366f1" stopOpacity={0.4} />
+                                    <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
+                                  </linearGradient>
+                                </defs>
+                                <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+                                <XAxis dataKey="dayLabel" stroke="#9ca3af" fontSize={11} />
+                                <YAxis stroke="#9ca3af" fontSize={11} />
+                                <Tooltip
+                                  contentStyle={{ backgroundColor: "white", border: "1px solid #e5e7eb", borderRadius: "8px" }}
+                                  labelFormatter={(label, payload) => {
+                                    const data = payload?.[0]?.payload as { tooltipLabel?: string } | undefined;
+                                    return data?.tooltipLabel ?? label;
+                                  }}
+                                  formatter={(value, name) => {
+                                    const num = typeof value === "number" ? value : 0;
+                                    return [formatCurrencyWithSymbol(num, currency), name as string];
+                                  }}
+                                />
+                                <Legend />
+                                <Area type="monotone" dataKey="displayRevenue" name="الإيرادات" stroke="#10b981" fillOpacity={1} fill="url(#colorMetaRev)" />
+                                <Area type="monotone" dataKey="displaySpend" name="الإنفاق" stroke="#6366f1" fillOpacity={1} fill="url(#colorMetaSpd)" />
+                              </AreaChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Inner: Campaigns/Creatives tabs */}
+                      <div className="border-b border-gray-100 mb-4">
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => setActiveTab("campaigns")}
+                            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition -mb-px ${
+                              activeTab === "campaigns"
+                                ? "border-indigo-600 text-indigo-600"
+                                : "border-transparent text-gray-500 hover:text-gray-700"
+                            }`}
+                          >
+                            الحملات
+                            {insights.length > 0 && (
+                              <span className="mr-2 px-1.5 py-0.5 bg-gray-100 rounded text-xs">
+                                {insights.length}
+                              </span>
+                            )}
+                          </button>
+                          <button
+                            onClick={() => setActiveTab("creatives")}
+                            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition -mb-px ${
+                              activeTab === "creatives"
+                                ? "border-indigo-600 text-indigo-600"
+                                : "border-transparent text-gray-500 hover:text-gray-700"
+                            }`}
+                          >
+                            الإبداعات
+                            {ads.length > 0 && (
+                              <span className="mr-2 px-1.5 py-0.5 bg-gray-100 rounded text-xs">
+                                {ads.length}
+                              </span>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      {activeTab === "campaigns" ? (
                     <>
                 {insightsLoading ? (
                   <div className="space-y-2">
@@ -2629,6 +2851,139 @@ export default function ReportsClient({
                         displayCurrency={currency}
                       />
                     </>
+                  )}
+                    </div>
+                  )}
+
+                  {platformTab === "google" && (
+                    <div>
+                      {/* Google mini KPIs */}
+                      {googleAggregated && (
+                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                          <KpiCard
+                            size="mini"
+                            label="إنفاق Google"
+                            value={formatCurrencyWithSymbol(googleAggregated.spend, currency)}
+                            icon={DollarSign}
+                            color="indigo"
+                          />
+                          <KpiCard
+                            size="mini"
+                            label="إيرادات Google"
+                            value={formatCurrencyWithSymbol(googleAggregated.revenue, currency)}
+                            icon={ShoppingCart}
+                            color="green"
+                          />
+                          <KpiCard
+                            size="mini"
+                            label="ROAS Google"
+                            value={`${googleAggregated.roas.toFixed(2)}x`}
+                            icon={Target}
+                            color="purple"
+                          />
+                          <KpiCard
+                            size="mini"
+                            label="تحويلات Google"
+                            value={googleAggregated.conversions.toLocaleString("en-US")}
+                            icon={Users}
+                            color="blue"
+                          />
+                        </div>
+                      )}
+
+                      {/* Google chart */}
+                      {googleChartData.length > 0 && (
+                        <div className="border border-gray-100 rounded-lg p-3 sm:p-4 mb-4">
+                          <h4 className="text-sm font-bold text-gray-900 mb-2">
+                            أداء Google — الإنفاق مقابل الإيرادات
+                          </h4>
+                          <div dir="ltr" className="h-48 sm:h-56">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <AreaChart data={googleChartData}>
+                                <defs>
+                                  <linearGradient id="colorGoogleRev" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
+                                    <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                                  </linearGradient>
+                                  <linearGradient id="colorGoogleSpd" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#6366f1" stopOpacity={0.4} />
+                                    <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
+                                  </linearGradient>
+                                </defs>
+                                <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+                                <XAxis dataKey="dayLabel" stroke="#9ca3af" fontSize={11} />
+                                <YAxis stroke="#9ca3af" fontSize={11} />
+                                <Tooltip
+                                  contentStyle={{ backgroundColor: "white", border: "1px solid #e5e7eb", borderRadius: "8px" }}
+                                  labelFormatter={(label, payload) => {
+                                    const data = payload?.[0]?.payload as { tooltipLabel?: string } | undefined;
+                                    return data?.tooltipLabel ?? label;
+                                  }}
+                                  formatter={(value, name) => {
+                                    const num = typeof value === "number" ? value : 0;
+                                    return [formatCurrencyWithSymbol(num, currency), name as string];
+                                  }}
+                                />
+                                <Legend />
+                                <Area type="monotone" dataKey="displayRevenue" name="الإيرادات" stroke="#10b981" fillOpacity={1} fill="url(#colorGoogleRev)" />
+                                <Area type="monotone" dataKey="displaySpend" name="الإنفاق" stroke="#6366f1" fillOpacity={1} fill="url(#colorGoogleSpd)" />
+                              </AreaChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Per-account breakdown */}
+                      {googleAccountsBreakdown.length > 0 && (
+                        <div className="border border-gray-100 rounded-lg p-3 sm:p-4">
+                          <h4 className="text-sm font-bold text-gray-900 mb-3">
+                            تفاصيل الحسابات
+                          </h4>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-sm">
+                              <thead className="text-xs text-gray-500 border-b border-gray-100">
+                                <tr>
+                                  <th className="text-right py-2 px-2 font-medium">الحساب</th>
+                                  <th className="text-right py-2 px-2 font-medium">الإنفاق</th>
+                                  <th className="text-right py-2 px-2 font-medium">الإيرادات</th>
+                                  <th className="text-right py-2 px-2 font-medium">ROAS</th>
+                                  <th className="text-right py-2 px-2 font-medium">التحويلات</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {googleAccountsBreakdown.map((row) => (
+                                  <tr key={row.accountId} className="border-b border-gray-50 hover:bg-gray-50 transition">
+                                    <td className="py-2 px-2 font-medium text-gray-900">
+                                      حساب {row.accountId}
+                                      {row.hasUnsupported && (
+                                        <span className="mr-1 text-[10px] text-amber-600">*</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2 px-2 text-gray-700">
+                                      {formatCurrencyWithSymbol(row.spend, currency)}
+                                    </td>
+                                    <td className="py-2 px-2 text-gray-900 font-medium">
+                                      {formatCurrencyWithSymbol(row.revenue, currency)}
+                                    </td>
+                                    <td className={`py-2 px-2 font-semibold ${getROASColor(row.roas)}`}>
+                                      {row.roas.toFixed(2)}x
+                                    </td>
+                                    <td className="py-2 px-2 text-gray-700">
+                                      {row.conversions.toLocaleString("en-US")}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                            {googleAccountsBreakdown.some((r) => r.hasUnsupported) && (
+                              <p className="text-[10px] text-amber-600 mt-2">
+                                * بعض البيانات بعملات غير مدعومة (تظهر بدون تحويل في الإجماليات)
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>

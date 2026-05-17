@@ -152,7 +152,15 @@ export function useProviderInsights(
         const allInsights: UnifiedInsight[] = [];
         let hadFailure = false;
 
-        for (const result of responses) {
+        // Iterate with index so we can stamp each response's source
+        // accountId onto its rows — the merge here loses request→row
+        // provenance otherwise, and downstream per-account breakdowns
+        // (Phase 4.8 M1 Google accounts table) need it. The Phase 4.7 D2
+        // "data self-describes" principle extended to provenance.
+        for (let idx = 0; idx < responses.length; idx++) {
+          const result = responses[idx];
+          const sourceAccountId = ids[idx];
+
           if (result.status === "rejected") {
             hadFailure = true;
             console.warn(
@@ -180,7 +188,12 @@ export function useProviderInsights(
           try {
             const data = await response.json();
             if (Array.isArray(data.data)) {
-              allInsights.push(...data.data);
+              allInsights.push(
+                ...data.data.map((row: UnifiedInsight) => ({
+                  ...row,
+                  accountId: sourceAccountId,
+                }))
+              );
             }
           } catch (parseErr) {
             hadFailure = true;
