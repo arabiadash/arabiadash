@@ -147,3 +147,105 @@ export async function getAccessibleCustomers(
     .map((name) => name.replace(/^customers\//, ""))
     .filter((id) => /^\d{10}$/.test(id));
 }
+
+export interface AccessibleCustomerDetails {
+  id: string;
+  descriptive_name: string | null;
+  currency_code: string | null;
+  time_zone: string | null;
+  status: "ENABLED" | "SUSPENDED" | "CANCELED" | "CLOSED" | "UNKNOWN" | null;
+  manager: boolean;
+  test_account: boolean;
+}
+
+/**
+ * Enriched account discovery via customer_client GAQL query from our
+ * MCC context. Returns names + status + currency for all accounts linked
+ * under our MCC, INCLUDING CANCELED and CLOSED accounts — where the
+ * per-customer `customer.descriptive_name` query (used by sync-accounts)
+ * fails because the Google Ads API refuses queries on terminated
+ * accounts even when the user has read access.
+ *
+ * Standalone accounts (admin-on-account, not linked to our MCC) will
+ * NOT appear in this result — that's a customer_client limitation, not
+ * a bug here. The OAuth callback merges this with listAccessibleCustomers
+ * so both paths are covered, and sync-accounts continues to handle
+ * standalone enrichment.
+ *
+ * Returns [] when:
+ *   - the user has no MCC-linked accounts
+ *   - the query fails for any reason (auth, transient, etc.)
+ *
+ * Callers should treat [] as "no enrichment available" and fall back —
+ * never throw, since this is enrichment, not the primary path.
+ */
+export async function getEnrichedCustomerClients(
+  refreshToken: string
+): Promise<AccessibleCustomerDetails[]> {
+  const clientId = requireEnv("GOOGLE_ADS_CLIENT_ID");
+  const clientSecret = requireEnv("GOOGLE_ADS_CLIENT_SECRET");
+  const developerToken = requireEnv("GOOGLE_ADS_DEVELOPER_TOKEN");
+  const mccId = requireEnv("GOOGLE_ADS_LOGIN_CUSTOMER_ID");
+
+  const api = new GoogleAdsApi({
+    client_id: clientId,
+    client_secret: clientSecret,
+    developer_token: developerToken,
+  });
+
+  try {
+    // Query from MCC context. customer_client.level: 0 = the manager
+    // itself, 1 = direct sub-accounts. `<= 1` is defensive; the merge
+    // in the callback only keeps IDs that also appear in
+    // listAccessibleCustomers, so the MCC's own row (level 0) is
+    // naturally filtered out for non-admin users.
+    const customer = api.Customer({
+      customer_id: mccId,
+      refresh_token: refreshToken,
+      login_customer_id: mccId,
+    });
+
+    const query = `
+      SELECT
+        customer_client.id,
+        customer_client.descriptive_name,
+        customer_client.currency_code,
+        customer_client.time_zone,
+        customer_client.status,
+        customer_client.manager,
+        customer_client.test_account
+      FROM customer_client
+      WHERE customer_client.level <= 1
+    `;
+
+    const rows = await customer.query(query);
+
+    return rows
+      .map((row) => {
+        const client = row.customer_client;
+        if (!client?.id) return null;
+        return {
+          id: String(client.id),
+          descriptive_name: client.descriptive_name ?? null,
+          currency_code: client.currency_code ?? null,
+          time_zone: client.time_zone ?? null,
+          // google-ads-api v23 returns the enum as a string name
+          // ("ENABLED" / "SUSPENDED" / "CANCELED" / "CLOSED" / "UNKNOWN").
+          // Cast is safe; defensive `?? null` covers undefined.
+          status:
+            (client.status as AccessibleCustomerDetails["status"]) ?? null,
+          manager: Boolean(client.manager),
+          test_account: Boolean(client.test_account),
+        };
+      })
+      .filter((r): r is AccessibleCustomerDetails => r !== null);
+  } catch (err) {
+    // Log but don't throw — caller falls back to listAccessibleCustomers
+    // baseline + sync-accounts auto-trigger for enrichment.
+    console.error(
+      "[oauth] getEnrichedCustomerClients failed:",
+      err instanceof Error ? err.message : "unknown"
+    );
+    return [];
+  }
+}
