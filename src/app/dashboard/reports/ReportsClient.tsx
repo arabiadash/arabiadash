@@ -57,6 +57,7 @@ import {
   type DateRangeValue,
   type UnifiedCampaign,
   type UnifiedAd,
+  type UnifiedInsight,
 } from "@/lib/ads/types";
 import {
   AreaChart,
@@ -1456,37 +1457,84 @@ export default function ReportsClient({
         }
   );
 
-  const summary = useMemo(() => {
-    const totals = insights.reduce(
-      (acc, i) => ({
-        spend: acc.spend + i.spend,
-        revenue: acc.revenue + i.revenue,
-        purchases: acc.purchases + i.purchases,
-      }),
+  const aggregated = useMemo(() => {
+    const allInsights = [...insights, ...googleInsights.insights];
+    if (allInsights.length === 0) return null;
+
+    const supportedRows = allInsights.filter((ins) => {
+      const c = ins.currency;
+      return !c || c === "USD" || c === "SAR";
+    });
+    const unsupportedRows = allInsights.filter((ins) => {
+      const c = ins.currency;
+      return c && c !== "USD" && c !== "SAR";
+    });
+
+    const totals = supportedRows.reduce(
+      (acc, ins) => {
+        const src = (ins.currency as Currency) || "USD";
+        return {
+          spend: acc.spend + convertCurrency(ins.spend, src, currency),
+          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
+          purchases: acc.purchases + ins.purchases,
+        };
+      },
       { spend: 0, revenue: 0, purchases: 0 }
     );
+
+    const unsupportedByCurrency = unsupportedRows.reduce(
+      (acc, ins) => {
+        const c = ins.currency as string;
+        if (!acc[c]) acc[c] = { spend: 0, revenue: 0, purchases: 0 };
+        acc[c].spend += ins.spend;
+        acc[c].revenue += ins.revenue;
+        acc[c].purchases += ins.purchases;
+        return acc;
+      },
+      {} as Record<string, { spend: number; revenue: number; purchases: number }>
+    );
+
+    const unsupportedTotals = Object.entries(unsupportedByCurrency).map(
+      ([cur, vals]) => ({ currency: cur, ...vals })
+    );
+
     return {
-      campaignsCount: insights.length,
+      campaignsCount: insights.length, // preserve Reports-specific count
       spend: totals.spend,
       revenue: totals.revenue,
       profit: totals.revenue - totals.spend,
       roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
       purchases: totals.purchases,
-      aov:
-        totals.purchases > 0 ? totals.revenue / totals.purchases : 0,
+      aov: totals.purchases > 0 ? totals.revenue / totals.purchases : 0,
+      isMixed: unsupportedTotals.length > 0,
+      unsupportedTotals,
     };
-  }, [insights]);
+  }, [insights, googleInsights.insights, currency]);
 
   // Previous period totals (for KPI deltas). Null when previousPeriod is null
-  // (lifetime) — KPI cards will hide their delta indicators.
+  // (lifetime) — KPI cards will hide their delta indicators. Same row-level
+  // currency policy as `aggregated`: only USD/SAR rows feed the converted
+  // total. Unsupported currencies silently dropped here — deltas across
+  // mismatched currency bases would be meaningless. Phase 4.9 fixes via FX.
   const previousSummary = useMemo(() => {
     if (!previousPeriod) return null;
-    const totals = previousInsights.reduce(
-      (acc, i) => ({
-        spend: acc.spend + i.spend,
-        revenue: acc.revenue + i.revenue,
-        purchases: acc.purchases + i.purchases,
-      }),
+    const allPrevious = [
+      ...previousInsights,
+      ...googlePreviousInsights.insights,
+    ];
+    const supportedRows = allPrevious.filter((ins) => {
+      const c = ins.currency;
+      return !c || c === "USD" || c === "SAR";
+    });
+    const totals = supportedRows.reduce(
+      (acc, ins) => {
+        const src = (ins.currency as Currency) || "USD";
+        return {
+          spend: acc.spend + convertCurrency(ins.spend, src, currency),
+          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
+          purchases: acc.purchases + ins.purchases,
+        };
+      },
       { spend: 0, revenue: 0, purchases: 0 }
     );
     return {
@@ -1495,34 +1543,60 @@ export default function ReportsClient({
       profit: totals.revenue - totals.spend,
       roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
       purchases: totals.purchases,
-      aov:
-        totals.purchases > 0 ? totals.revenue / totals.purchases : 0,
+      aov: totals.purchases > 0 ? totals.revenue / totals.purchases : 0,
     };
-  }, [previousInsights, previousPeriod]);
+  }, [previousInsights, googlePreviousInsights.insights, previousPeriod, currency]);
 
-  const displayChartData = useMemo(
-    () =>
-      chartInsights.map((i) => ({
-        date: i.dateStart,
+  // Merge Meta + Google daily breakdowns by date. Per-row currency:
+  //   - USD/SAR or missing (cached pre-C0): convert to display currency
+  //   - Unsupported (AED, EGP, …): row dropped from the chart (Phase 4.9 fix)
+  const displayChartData = useMemo(() => {
+    type Row = { date: string; spend: number; revenue: number };
+    const byDate = new Map<string, Row>();
+
+    const addRow = (insight: UnifiedInsight) => {
+      const c = insight.currency;
+      const isSupported = !c || c === "USD" || c === "SAR";
+      if (!isSupported) return;
+
+      const src = (c as Currency) || "USD";
+      const sp = convertCurrency(insight.spend, src, currency);
+      const rv = convertCurrency(insight.revenue, src, currency);
+
+      const existing = byDate.get(insight.dateStart);
+      if (existing) {
+        existing.spend += sp;
+        existing.revenue += rv;
+      } else {
+        byDate.set(insight.dateStart, {
+          date: insight.dateStart,
+          spend: sp,
+          revenue: rv,
+        });
+      }
+    };
+
+    chartInsights.forEach(addRow);
+    googleChartInsights.insights.forEach(addRow);
+
+    return Array.from(byDate.values())
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((row) => ({
+        date: row.date,
         dayLabel: chartShouldShowDaily
-          ? formatChartDayLabel(i.dateStart, chartDayCount)
-          : i.dateStart,
-        tooltipLabel: formatChartTooltipLabel(i.dateStart),
-        displaySpend: convertCurrency(i.spend, accountCurrency, currency),
-        displayRevenue: convertCurrency(
-          i.revenue,
-          accountCurrency,
-          currency
-        ),
-      })),
-    [
-      chartInsights,
-      chartShouldShowDaily,
-      chartDayCount,
-      accountCurrency,
-      currency,
-    ]
-  );
+          ? formatChartDayLabel(row.date, chartDayCount)
+          : row.date,
+        tooltipLabel: formatChartTooltipLabel(row.date),
+        displaySpend: row.spend,
+        displayRevenue: row.revenue,
+      }));
+  }, [
+    chartInsights,
+    googleChartInsights.insights,
+    chartShouldShowDaily,
+    chartDayCount,
+    currency,
+  ]);
 
   const handleExport = (format: "pdf" | "excel" | "email") => {
     alert(
