@@ -8,6 +8,7 @@ import {
   getAccessibleCustomers,
 } from "@/lib/google-ads/oauth";
 import { getDefaultWorkspaceId } from "@/lib/workspaces";
+import { syncGoogleAccountsForUser } from "@/lib/google-ads/sync-accounts-logic";
 
 export const dynamic = "force-dynamic";
 
@@ -187,6 +188,34 @@ export async function GET(request: NextRequest) {
     if (upsertError) {
       console.error("[google-ads/callback] DB upsert failed:", upsertError);
       return errorRedirect(request, "internal_error");
+    }
+
+    // 7b. Auto-populate metadata (currency, timezone_name, account_name)
+    // for the rows we just upserted. Without this, the connections live
+    // with metadata.currency = null until the user manually re-syncs —
+    // which was the root cause of the May 17 currency inflation bug.
+    //
+    // Failures here are non-fatal: per-account errors are logged, the
+    // OAuth flow completes either way, and the user can re-run sync
+    // manually from settings. The connections rows are already written;
+    // only their enrichment is at risk.
+    try {
+      const syncResults = await syncGoogleAccountsForUser(adminClient, user.id);
+      const failed = syncResults.filter((r) => r.status === "failed").length;
+      const skipped = syncResults.filter((r) => r.status === "skipped").length;
+      if (failed > 0 || skipped > 0) {
+        console.warn(
+          `[google-ads/callback] auto-sync partial: ${syncResults.length} total, ` +
+            `${failed} failed, ${skipped} skipped (user can re-sync manually)`
+        );
+      }
+    } catch (syncErr) {
+      console.error(
+        "[google-ads/callback] auto-sync threw:",
+        syncErr instanceof Error ? syncErr.message : "unknown"
+      );
+      // intentional: do NOT redirect to error — connections rows exist,
+      // user can re-sync manually.
     }
 
     // 8. Clear the temporary state cookie.

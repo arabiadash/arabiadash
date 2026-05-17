@@ -51,12 +51,37 @@ export async function getAdapterForProvider(
       manager_customer_id?: string | null;
     }) || {};
 
+  // Currency + timezone must come from sync-accounts. A missing currency
+  // would cause the adapter to mistag rows (e.g. SAR data labeled USD)
+  // and the frontend conversion would inflate values by the SAR-to-USD
+  // rate — exactly the May 17 production bug (Google connections that
+  // never ran sync-accounts had metadata.currency=null, the previous
+  // `|| "USD"` fallback then mistagged SAR data as USD, and the chart's
+  // USD→SAR conversion ×3.75 produced the inflated numbers).
+  //
+  // Throw loudly here instead of silently defaulting — the API route's
+  // outer try/catch returns 500, the frontend's useInsights surfaces a
+  // "fetch failed" state, and the developer logs name the exact
+  // connection that needs re-sync.
+  if (!metadata.currency) {
+    throw new Error(
+      `Connection ${connection.id} (${provider}/${connection.account_id}) ` +
+        `is missing currency in metadata. Run sync-accounts to populate it.`
+    );
+  }
+  if (!metadata.timezone_name) {
+    throw new Error(
+      `Connection ${connection.id} (${provider}/${connection.account_id}) ` +
+        `is missing timezone_name in metadata. Run sync-accounts to populate it.`
+    );
+  }
+
   switch (provider) {
     case "meta":
       return new MetaAdapter(connection.access_token, connection.account_id, {
         name: connection.account_name || "",
-        currency: metadata.currency || "USD",
-        timezone: metadata.timezone_name || "UTC",
+        currency: metadata.currency,
+        timezone: metadata.timezone_name,
       });
 
     case "google":
@@ -70,8 +95,8 @@ export async function getAdapterForProvider(
         connection.account_id,
         {
           name: connection.account_name || "",
-          currency: metadata.currency || "USD",
-          timezone: metadata.timezone_name || "UTC",
+          currency: metadata.currency,
+          timezone: metadata.timezone_name,
         },
         metadata.manager_customer_id ?? undefined
       );
