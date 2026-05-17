@@ -158,6 +158,11 @@ Reasoning:
 - Reports refactor needs Phase 4.8 tabs structure anyway
 - Pattern proven in Dashboard before applied to Reports
 
+**Status (May 17): COMPLETE.** Reports KPIs + main chart now aggregate
+Meta + Google data via the same row-level currency pattern as the Dashboard.
+Campaigns table + Creatives grid remain Meta-only, deferred to Phase 4.8
+tabs work per D6. Shipped in commits: 2d8c0c1, 5e1d8e4, aa999a3, b9cd3d2, 6586cb5.
+
 ### D6: Tabs + expanded metrics deferred to Phase 4.8
 
 Phase 4.7 M1 = data integration. Phase 4.8 = visualization restructure:
