@@ -31,6 +31,15 @@ export interface UnifiedInsight {
   provider: AdProvider;
 
   /**
+   * Source ad account ID. Stamped by multi-account hooks
+   * (`useProviderInsights`) when concatenating responses so per-account
+   * groupings (e.g. accounts-breakdown tables) survive the merge. Single-
+   * account hooks (`useInsights`) leave it undefined. Backward-compatible
+   * with cached rows from before this field was introduced.
+   */
+  accountId?: string;
+
+  /**
    * Source currency from the originating ad account. Set by the adapter
    * from accountInfo.currency. NO fallback — raw value (USD, SAR, AED,
    * EGP, etc.). Callers handle conversion/display.
