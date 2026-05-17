@@ -64,6 +64,28 @@ The selector hides accounts with status CANCELED, CLOSED, DISABLED. Users who ge
 
 - Backward-compat wrappers in plans.ts (ACTIVE_ACCOUNTS_LIMIT, getUserAccountsLimit, buildLimitError) are kept as @deprecated during the migration to support the old connections pages until C10 rebuilds them.
 
+## Migration permission gotcha
+
+New tables created in Supabase require explicit GRANT statements for the service_role to access them, even though service_role nominally bypasses RLS. The initial `2026-05-18-platform-credentials-table.sql` migration created the table + enabled RLS + added a SELECT policy for authenticated users, but did NOT include:
+
+```sql
+GRANT ALL ON platform_credentials TO service_role;
+GRANT USAGE ON SEQUENCE platform_credentials_id_seq TO service_role;
+```
+
+This caused the discover endpoint to fail with `permission denied for table platform_credentials` (Postgres error 42501) when admin clients tried to read tokens. Future schema migrations creating new tables MUST include these GRANTs.
+
+## Hybrid discovery follow-up needed
+
+Initial implementation uses `customer_client` GAQL query (MCC-scoped) for Google account discovery. This works for agency users whose accounts are linked under our MCC, but returns 0 results for standalone account owners (the user owns accounts directly, not via an MCC).
+
+For Saudi/Gulf market reality (mostly brand-owners with standalone Google Ads accounts, not agencies with MCCs), this is a blocking gap. Follow-up PR will add hybrid discovery:
+
+1. Try customer_client query first (MCC-linked accounts with full enrichment)
+2. Fallback to listAccessibleCustomers (standalone accounts) + per-account fetchCustomerDetails for name/currency/timezone
+
+Tracked as follow-up. Initial PR #21 establishes the selection architecture; the discovery layer evolves in PR #22.
+
 ## Consequences
 
 ### Positive
