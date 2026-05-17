@@ -16,7 +16,40 @@ import {
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
 import type { Workspace } from "@/lib/workspaces";
-import type { GoogleAccountRow } from "./page";
+import type { GoogleAccountRow, GoogleAccountStatus } from "./page";
+
+/**
+ * Map Google's 4 statuses to the 3 UI states (see ADR-009).
+ * CANCELED + CLOSED collapse to "ملغي" — users don't need to distinguish
+ * admin-reversible from permanent; both mean "can't run ads".
+ */
+function getStatusBadge(status: GoogleAccountStatus): {
+  label: string;
+  className: string;
+} {
+  switch (status) {
+    case "ENABLED":
+      return { label: "نشط", className: "bg-green-100 text-green-700" };
+    case "SUSPENDED":
+      return { label: "متوقف", className: "bg-yellow-100 text-yellow-700" };
+    case "CANCELED":
+    case "CLOSED":
+      return { label: "ملغي", className: "bg-red-100 text-red-700" };
+    default:
+      return { label: "غير معروف", className: "bg-gray-100 text-gray-600" };
+  }
+}
+
+/**
+ * Activation gate. ENABLED/SUSPENDED/UNKNOWN allow activation —
+ * UNKNOWN covers pre-enrichment connections (user can still try; the
+ * adapter will fail loudly if currency is missing per ADR-008).
+ * CANCELED/CLOSED accounts can't serve ads, so blocking saves user
+ * confusion later.
+ */
+function canActivateGoogleStatus(status: GoogleAccountStatus): boolean {
+  return status !== "CANCELED" && status !== "CLOSED";
+}
 
 interface GoogleConnectionsClientProps {
   fullName: string;
@@ -231,7 +264,12 @@ export default function GoogleConnectionsClient({
               {accounts.map((account) => {
                 const isActive = account.status === "active";
                 const isToggling = togglingId === account.id;
-                const canActivate = !limitReached || isActive;
+                const statusBadge = getStatusBadge(account.google_account_status);
+                const statusAllowsActivation = canActivateGoogleStatus(
+                  account.google_account_status
+                );
+                const canActivate =
+                  statusAllowsActivation && (!limitReached || isActive);
 
                 return (
                   <div
@@ -265,6 +303,11 @@ export default function GoogleConnectionsClient({
                             {account.account_name ||
                               `حساب ${account.account_id}`}
                           </h3>
+                          <span
+                            className={`text-xs font-semibold px-2 py-0.5 rounded ${statusBadge.className}`}
+                          >
+                            {statusBadge.label}
+                          </span>
                           {account.is_manager && (
                             <span className="bg-purple-50 text-purple-700 text-xs font-semibold px-2 py-0.5 rounded">
                               حساب إداري
@@ -309,6 +352,10 @@ export default function GoogleConnectionsClient({
                             <Circle className="w-4 h-4" />
                             إلغاء التفعيل
                           </>
+                        ) : !statusAllowsActivation ? (
+                          // Canceled/closed accounts can't run ads —
+                          // explicit "غير متاح" beats a grayed-out "تفعيل".
+                          <>غير متاح</>
                         ) : (
                           <>
                             <CheckCircle2 className="w-4 h-4" />

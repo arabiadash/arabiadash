@@ -6,6 +6,14 @@ import { getUserWorkspaces, resolveActiveWorkspace } from "@/lib/workspaces";
 
 export const dynamic = "force-dynamic";
 
+export type GoogleAccountStatus =
+  | "ENABLED"
+  | "SUSPENDED"
+  | "CANCELED"
+  | "CLOSED"
+  | "UNKNOWN"
+  | null;
+
 export interface GoogleAccountRow {
   id: number;
   account_id: string;
@@ -14,6 +22,10 @@ export interface GoogleAccountRow {
   is_manager: boolean;
   currency: string | null;
   manager_customer_id: string | null;
+  // From customer_client enrichment (ADR-009). Null when missing —
+  // either a standalone account, an existing pre-enrichment row, or
+  // the customer_client query failed during OAuth callback.
+  google_account_status: GoogleAccountStatus;
 }
 
 type PageProps = {
@@ -57,6 +69,7 @@ export default async function GoogleConnectionsPage({
         is_manager?: boolean;
         currency?: string;
         manager_customer_id?: string | null;
+        google_account_status?: GoogleAccountStatus;
       }) || {};
 
     return {
@@ -67,6 +80,7 @@ export default async function GoogleConnectionsPage({
       is_manager: metadata.is_manager ?? false,
       currency: metadata.currency ?? null,
       manager_customer_id: metadata.manager_customer_id ?? null,
+      google_account_status: metadata.google_account_status ?? null,
     };
   });
 
