@@ -40,6 +40,8 @@ const META_ERROR_MESSAGES: Record<string, string> = {
   meta_db_error: "تعذّر حفظ بيانات الربط. حاول مرة أخرى.",
   meta_init_failed: "تعذّر بدء عملية الربط. حاول مرة أخرى.",
   meta_callback_failed: "حدث خطأ غير متوقع أثناء الربط. حاول مرة أخرى.",
+  meta_workspace_required: "الرجاء اختيار مساحة عمل قبل ربط Meta.",
+  meta_invalid_workspace: "مساحة العمل المختارة غير صالحة.",
 };
 
 // Google Ads error reasons emitted by /api/google-ads/auth and the OAuth
