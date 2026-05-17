@@ -1607,6 +1607,73 @@ export default function ReportsClient({
     currency,
   ]);
 
+  // Meta-only KPIs (excludes Google). Drives the Meta platform tab's
+  // mini KPI strip. Same supported-currency policy as `aggregated`.
+  const metaAggregated = useMemo(() => {
+    if (insights.length === 0) return null;
+    const supportedRows = insights.filter((ins) => {
+      const c = ins.currency;
+      return !c || c === "USD" || c === "SAR";
+    });
+    const totals = supportedRows.reduce(
+      (acc, ins) => {
+        const src = (ins.currency as Currency) || "USD";
+        return {
+          spend: acc.spend + convertCurrency(ins.spend, src, currency),
+          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
+          purchases: acc.purchases + ins.purchases,
+        };
+      },
+      { spend: 0, revenue: 0, purchases: 0 }
+    );
+    return {
+      spend: totals.spend,
+      revenue: totals.revenue,
+      roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
+      purchases: totals.purchases,
+    };
+  }, [insights, currency]);
+
+  // Meta-only chart data — daily breakdown, same currency policy.
+  const metaChartData = useMemo(() => {
+    type Row = { date: string; spend: number; revenue: number };
+    const byDate = new Map<string, Row>();
+
+    chartInsights.forEach((insight) => {
+      const c = insight.currency;
+      const isSupported = !c || c === "USD" || c === "SAR";
+      if (!isSupported) return;
+
+      const src = (c as Currency) || "USD";
+      const sp = convertCurrency(insight.spend, src, currency);
+      const rv = convertCurrency(insight.revenue, src, currency);
+
+      const existing = byDate.get(insight.dateStart);
+      if (existing) {
+        existing.spend += sp;
+        existing.revenue += rv;
+      } else {
+        byDate.set(insight.dateStart, {
+          date: insight.dateStart,
+          spend: sp,
+          revenue: rv,
+        });
+      }
+    });
+
+    return Array.from(byDate.values())
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((row) => ({
+        date: row.date,
+        dayLabel: chartShouldShowDaily
+          ? formatChartDayLabel(row.date, chartDayCount)
+          : row.date,
+        tooltipLabel: formatChartTooltipLabel(row.date),
+        displaySpend: row.spend,
+        displayRevenue: row.revenue,
+      }));
+  }, [chartInsights, chartShouldShowDaily, chartDayCount, currency]);
+
   // Real KPI cards from aggregated insights (Meta + Google after M2).
   //
   // `aggregated.spend` / `.revenue` are already in the display currency
@@ -2109,6 +2176,82 @@ export default function ReportsClient({
                 <div className="p-4 sm:p-6">
                   {platformTab === "meta" && (
                     <div>
+                      {/* Meta mini KPIs */}
+                      {metaAggregated && (
+                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                          <KpiCard
+                            size="mini"
+                            label="إنفاق Meta"
+                            value={formatCurrencyWithSymbol(metaAggregated.spend, currency)}
+                            icon={DollarSign}
+                            color="indigo"
+                          />
+                          <KpiCard
+                            size="mini"
+                            label="إيرادات Meta"
+                            value={formatCurrencyWithSymbol(metaAggregated.revenue, currency)}
+                            icon={ShoppingCart}
+                            color="green"
+                          />
+                          <KpiCard
+                            size="mini"
+                            label="ROAS Meta"
+                            value={`${metaAggregated.roas.toFixed(2)}x`}
+                            icon={Target}
+                            color="purple"
+                          />
+                          <KpiCard
+                            size="mini"
+                            label="مبيعات Meta"
+                            value={metaAggregated.purchases.toLocaleString("en-US")}
+                            icon={Users}
+                            color="blue"
+                          />
+                        </div>
+                      )}
+
+                      {/* Meta chart */}
+                      {metaChartData.length > 0 && (
+                        <div className="border border-gray-100 rounded-lg p-3 sm:p-4 mb-4">
+                          <h4 className="text-sm font-bold text-gray-900 mb-2">
+                            أداء Meta — الإنفاق مقابل الإيرادات
+                          </h4>
+                          <div dir="ltr" className="h-48 sm:h-56">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <AreaChart data={metaChartData}>
+                                <defs>
+                                  <linearGradient id="colorMetaRev" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
+                                    <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                                  </linearGradient>
+                                  <linearGradient id="colorMetaSpd" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#6366f1" stopOpacity={0.4} />
+                                    <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
+                                  </linearGradient>
+                                </defs>
+                                <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+                                <XAxis dataKey="dayLabel" stroke="#9ca3af" fontSize={11} />
+                                <YAxis stroke="#9ca3af" fontSize={11} />
+                                <Tooltip
+                                  contentStyle={{ backgroundColor: "white", border: "1px solid #e5e7eb", borderRadius: "8px" }}
+                                  labelFormatter={(label, payload) => {
+                                    const data = payload?.[0]?.payload as { tooltipLabel?: string } | undefined;
+                                    return data?.tooltipLabel ?? label;
+                                  }}
+                                  formatter={(value, name) => {
+                                    const num = typeof value === "number" ? value : 0;
+                                    return [formatCurrencyWithSymbol(num, currency), name as string];
+                                  }}
+                                />
+                                <Legend />
+                                <Area type="monotone" dataKey="displayRevenue" name="الإيرادات" stroke="#10b981" fillOpacity={1} fill="url(#colorMetaRev)" />
+                                <Area type="monotone" dataKey="displaySpend" name="الإنفاق" stroke="#6366f1" fillOpacity={1} fill="url(#colorMetaSpd)" />
+                              </AreaChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                      )}
+
                       {/* Inner: Campaigns/Creatives tabs */}
                       <div className="border-b border-gray-100 mb-4">
                         <div className="flex items-center gap-1">
