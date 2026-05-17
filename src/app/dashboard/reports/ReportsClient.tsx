@@ -1672,7 +1672,7 @@ export default function ReportsClient({
         unsupportedBadges: undefined as string[] | undefined,
       },
       {
-        label: "عدد المبيعات",
+        label: "عدد المبيعات*",
         value: aggregated.purchases.toLocaleString("en-US"),
         icon: Users,
         color: "blue",
@@ -1681,6 +1681,7 @@ export default function ReportsClient({
           : null,
         deltaInverse: false,
         unsupportedBadges: purchasesBadges,
+        footnote: "يشمل تحويلات Google",
       },
       {
         label: "متوسط قيمة الطلب",
@@ -2004,6 +2005,12 @@ export default function ReportsClient({
                               — vs السابقة
                             </div>
                           ) : null}
+
+                          {stat.footnote && (
+                            <div className="text-[10px] text-gray-400 mt-1 italic">
+                              * {stat.footnote}
+                            </div>
+                          )}
                         </div>
                       );
                     })}
