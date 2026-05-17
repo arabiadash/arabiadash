@@ -147,3 +147,93 @@ export async function getAccessibleCustomers(
     .map((name) => name.replace(/^customers\//, ""))
     .filter((id) => /^\d{10}$/.test(id));
 }
+
+export interface AccessibleCustomerDetails {
+  id: string;
+  descriptive_name: string | null;
+  currency_code: string | null;
+  time_zone: string | null;
+  status: "ENABLED" | "SUSPENDED" | "CANCELED" | "CLOSED" | "UNKNOWN" | null;
+  manager: boolean;
+  test_account: boolean;
+}
+
+/**
+ * Enriched account discovery via customer_client GAQL query from our
+ * MCC context. Returns name + status + currency + timezone + manager
+ * flag for accounts linked under our MCC — INCLUDING CANCELED/CLOSED
+ * where the per-customer `customer.descriptive_name` query fails.
+ *
+ * Standalone accounts (admin-on-account, not linked to our MCC) will
+ * NOT appear in this result — callers can fall back to per-account
+ * queries via `fetchCustomerDetails` for those.
+ *
+ * Returns [] on failure (no auth, transient, etc.) — never throws,
+ * because this is enrichment, not the primary discovery path.
+ *
+ * Note: this helper was originally introduced in PR #20 (industry-
+ * standard pivot superseded that PR). Restored here in C2 because
+ * `/api/google-ads/discover` is its first consumer on this branch.
+ */
+export async function getEnrichedCustomerClients(
+  refreshToken: string
+): Promise<AccessibleCustomerDetails[]> {
+  const clientId = requireEnv("GOOGLE_ADS_CLIENT_ID");
+  const clientSecret = requireEnv("GOOGLE_ADS_CLIENT_SECRET");
+  const developerToken = requireEnv("GOOGLE_ADS_DEVELOPER_TOKEN");
+  const mccId = requireEnv("GOOGLE_ADS_LOGIN_CUSTOMER_ID");
+
+  const api = new GoogleAdsApi({
+    client_id: clientId,
+    client_secret: clientSecret,
+    developer_token: developerToken,
+  });
+
+  try {
+    const customer = api.Customer({
+      customer_id: mccId,
+      refresh_token: refreshToken,
+      login_customer_id: mccId,
+    });
+
+    const query = `
+      SELECT
+        customer_client.id,
+        customer_client.descriptive_name,
+        customer_client.currency_code,
+        customer_client.time_zone,
+        customer_client.status,
+        customer_client.manager,
+        customer_client.test_account
+      FROM customer_client
+      WHERE customer_client.level <= 1
+    `;
+
+    const rows = await customer.query(query);
+
+    return rows
+      .map((row) => {
+        const client = row.customer_client;
+        if (!client?.id) return null;
+        return {
+          id: String(client.id),
+          descriptive_name: client.descriptive_name ?? null,
+          currency_code: client.currency_code ?? null,
+          time_zone: client.time_zone ?? null,
+          // google-ads-api v23 returns the enum as a string name
+          // ("ENABLED" / "SUSPENDED" / "CANCELED" / "CLOSED" / "UNKNOWN").
+          status:
+            (client.status as AccessibleCustomerDetails["status"]) ?? null,
+          manager: Boolean(client.manager),
+          test_account: Boolean(client.test_account),
+        };
+      })
+      .filter((r): r is AccessibleCustomerDetails => r !== null);
+  } catch (err) {
+    console.error(
+      "[oauth] getEnrichedCustomerClients failed:",
+      err instanceof Error ? err.message : "unknown"
+    );
+    return [];
+  }
+}

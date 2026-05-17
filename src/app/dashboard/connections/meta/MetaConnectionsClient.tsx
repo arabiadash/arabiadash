@@ -1,18 +1,16 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowLeft,
   CheckCircle2,
-  Circle,
   Loader2,
   Plus,
   AlertCircle,
   Menu,
   Bell,
-  Search,
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
 import type { Workspace } from "@/lib/workspaces";
@@ -22,58 +20,52 @@ interface MetaConnectionsClientProps {
   fullName: string;
   email: string;
   accounts: MetaAccountRow[];
-  limit: number;
+  planLimit: number;
+  planTier: string;
+  planCurrent: number;
   workspaces: Workspace[];
   activeWorkspaceId: number;
 }
 
-// Meta account_status codes — see Meta Marketing API docs.
-const META_STATUS_LABELS: Record<
-  number,
-  { label: string; color: string }
-> = {
-  1: { label: "نشط", color: "text-green-600" },
-  2: { label: "مُعطّل", color: "text-red-600" },
-  3: { label: "محذوف", color: "text-gray-500" },
-  7: { label: "مُعلّق", color: "text-orange-600" },
-  9: { label: "قيد المراجعة", color: "text-yellow-600" },
-  100: { label: "قيد الإغلاق", color: "text-red-500" },
-  101: { label: "مُغلق", color: "text-gray-700" },
-  201: { label: "بانتظار شخصي", color: "text-blue-600" },
-  202: { label: "بانتظار طلب", color: "text-blue-600" },
+const TIER_LABELS: Record<string, string> = {
+  trial: "تجربة مجانية",
+  starter: "أساسية",
+  growth: "نمو",
+  agency: "وكالات",
 };
 
 export default function MetaConnectionsClient({
   fullName,
   email,
   accounts: initialAccounts,
-  limit,
+  planLimit,
+  planTier,
+  planCurrent,
   workspaces,
   activeWorkspaceId,
 }: MetaConnectionsClientProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [accounts, setAccounts] = useState<MetaAccountRow[]>(initialAccounts);
-  const [togglingId, setTogglingId] = useState<number | null>(null);
+  const [removingId, setRemovingId] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  const activeCount = accounts.filter((a) => a.status === "active").length;
-  const limitReached = activeCount >= limit;
-
   const initial = fullName.charAt(0).toUpperCase();
+  const tierLabel = TIER_LABELS[planTier] ?? planTier;
+  const limitIsFinite = Number.isFinite(planLimit);
+  const limitReached = limitIsFinite && planCurrent >= planLimit;
 
-  // Surface the success toast that the OAuth callback redirects with.
   useEffect(() => {
     const success = searchParams.get("success");
     const count = searchParams.get("count");
-
-    if (success === "meta_connected" && count) {
+    if (success === "accounts_added" && count) {
+      const n = parseInt(count, 10);
       setSuccessMessage(
-        `تم ربط ${count} حساب${parseInt(count) > 1 ? "ات" : ""} Meta بنجاح! فعّل اللي تريد عرضه في التقارير.`
+        `تم إضافة ${n} حساب${n > 1 ? "ات" : ""} Meta بنجاح.`
       );
-      setTimeout(() => setSuccessMessage(null), 6000);
+      setTimeout(() => setSuccessMessage(null), 5000);
       router.replace("/dashboard/connections/meta", { scroll: false });
     }
   }, [searchParams, router]);
@@ -83,49 +75,41 @@ export default function MetaConnectionsClient({
     setTimeout(() => setErrorMessage(null), 4000);
   };
 
-  const handleToggle = async (account: MetaAccountRow) => {
-    const isActivating = account.status !== "active";
-
-    if (isActivating && limitReached) {
-      showError(`الحد الأقصى ${limit} حسابات. ألغِ تفعيل حساب آخر أولاً.`);
-      return;
-    }
-
-    setTogglingId(account.id);
+  const handleRemove = async (account: MetaAccountRow) => {
+    setRemovingId(account.id);
     setErrorMessage(null);
-
     try {
       const response = await fetch(`/api/ads/connections/${account.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: isActivating ? "activate" : "deactivate",
-        }),
+        body: JSON.stringify({ action: "deactivate" }),
       });
-
-      const data = await response.json();
-
+      const data = await response.json().catch(() => ({}));
       if (!response.ok) {
-        showError(data.message || data.error || "تعذّر تحديث الحساب");
-        setTogglingId(null);
+        showError(data.message || data.error || "تعذّر إزالة الحساب");
+        setRemovingId(null);
         return;
       }
-
-      setAccounts((prev) =>
-        prev.map((a) =>
-          a.id === account.id
-            ? { ...a, status: isActivating ? "active" : "pending" }
-            : a
-        )
-      );
+      setAccounts((prev) => prev.filter((a) => a.id !== account.id));
+      router.refresh();
     } catch {
       showError("خطأ في الاتصال. حاول مرة أخرى.");
     } finally {
-      setTogglingId(null);
+      setRemovingId(null);
     }
   };
 
-  const handleConnectNew = () => {
+  const handleAddMore = () => {
+    window.location.assign(
+      `/dashboard/connections/meta/select?workspace=${activeWorkspaceId}`
+    );
+  };
+
+  // Meta uses the OAuth init route for the first-time flow (when zero
+  // accounts exist). After at least one account is connected, "Add more"
+  // skips OAuth (token already in platform_credentials) and goes straight
+  // to the selector.
+  const handleConnectFirstTime = () => {
     window.location.assign(`/api/auth/meta/init?workspace=${activeWorkspaceId}`);
   };
 
@@ -151,14 +135,6 @@ export default function MetaConnectionsClient({
               >
                 <Menu className="w-6 h-6" />
               </button>
-              <div className="hidden md:flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2 w-64">
-                <Search className="w-4 h-4 text-gray-400" />
-                <input
-                  type="text"
-                  placeholder="بحث..."
-                  className="bg-transparent border-none outline-none text-sm w-full"
-                />
-              </div>
             </div>
             <div className="flex items-center gap-3">
               <button className="relative p-2 hover:bg-gray-50 rounded-lg transition">
@@ -182,78 +158,97 @@ export default function MetaConnectionsClient({
             </Link>
             <div className="flex items-center gap-3 mb-2">
               <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
-                <span className="text-blue-600 font-bold text-lg">f</span>
+                <span className="text-blue-600 font-bold text-lg">M</span>
               </div>
               <h1 className="text-xl sm:text-2xl md:text-3xl font-bold text-gray-900">
-                إدارة حسابات Meta Ads
+                حسابات Meta Ads
               </h1>
             </div>
             <p className="text-sm sm:text-base text-gray-600">
-              فعّل حسابات Facebook و Instagram اللي تريد تشوف بياناتها في التقارير
+              الحسابات التي اخترتها لتظهر بياناتها في التقارير
             </p>
           </div>
 
-          {/* Success Toast (from OAuth callback) */}
-          {successMessage && (
-            <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-green-50 border border-green-200 text-green-700 px-6 py-3 rounded-lg shadow-lg flex items-center gap-2 max-w-xl">
-              <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
-              <span className="font-medium text-sm">{successMessage}</span>
-            </div>
-          )}
-
-          {/* Error Toast */}
           {errorMessage && (
             <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-red-50 border border-red-200 text-red-700 px-6 py-3 rounded-lg shadow-lg flex items-center gap-2">
               <AlertCircle className="w-5 h-5" />
               <span className="font-medium">{errorMessage}</span>
             </div>
           )}
+          {successMessage && (
+            <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-green-50 border border-green-200 text-green-700 px-6 py-3 rounded-lg shadow-lg flex items-center gap-2">
+              <CheckCircle2 className="w-5 h-5" />
+              <span className="font-medium">{successMessage}</span>
+            </div>
+          )}
 
-          {/* Stats Bar */}
           <div className="bg-white border border-gray-200 rounded-xl p-4 sm:p-6 mb-6">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
               <div>
-                <p className="text-sm text-gray-500 mb-1">الحسابات المفعّلة</p>
+                <p className="text-sm text-gray-500 mb-1">
+                  حسابات Meta المرتبطة
+                </p>
                 <p className="text-2xl font-bold text-gray-900">
-                  {activeCount}
-                  <span className="text-base font-normal text-gray-400">
-                    {" "}
-                    / {limit}
-                  </span>
+                  {accounts.length}
+                  {limitIsFinite && (
+                    <span className="text-base font-normal text-gray-400">
+                      {" "}
+                      / {planLimit} (جميع المنصات)
+                    </span>
+                  )}
+                </p>
+                <p className="text-xs text-gray-500 mt-1">
+                  خطتك: {tierLabel}
                 </p>
               </div>
 
-              <button
-                onClick={handleConnectNew}
-                className="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg transition flex items-center justify-center gap-2"
-              >
-                <Plus className="w-4 h-4" />
-                ربط حسابات Meta جديدة
-              </button>
+              {accounts.length > 0 ? (
+                <button
+                  onClick={handleAddMore}
+                  className="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg transition flex items-center justify-center gap-2"
+                >
+                  <Plus className="w-4 h-4" />
+                  إضافة حسابات أخرى
+                </button>
+              ) : (
+                <button
+                  onClick={handleConnectFirstTime}
+                  className="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-4 py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg transition flex items-center justify-center gap-2"
+                >
+                  <Plus className="w-4 h-4" />
+                  ربط حساب Meta
+                </button>
+              )}
             </div>
 
             {limitReached && (
               <div className="mt-4 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-sm text-amber-800">
-                <strong>وصلت للحد الأقصى ({limit} حسابات).</strong> لتفعيل حساب
-                آخر، ألغِ تفعيل واحد أولاً.
+                <strong>وصلت للحد الأقصى ({planLimit} حسابات).</strong>{" "}
+                لإضافة حساب آخر، أزِل واحداً من القائمة أو{" "}
+                <Link
+                  href="/dashboard/settings"
+                  className="underline font-semibold"
+                >
+                  رقّ خطتك
+                </Link>
+                .
               </div>
             )}
           </div>
 
-          {/* Accounts list / empty state */}
           {accounts.length === 0 ? (
             <div className="bg-white border border-gray-200 rounded-xl p-12 text-center">
-              <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                <span className="text-blue-600 font-bold text-2xl">f</span>
+              <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Plus className="w-8 h-8 text-gray-400" />
               </div>
               <h3 className="text-lg font-bold text-gray-900 mb-2">
-                لا توجد حسابات Meta مربوطة
+                لا توجد حسابات Meta مفعّلة
               </h3>
               <p className="text-sm text-gray-600 mb-6">
-                ابدأ بربط حساب Facebook Ads لرؤية بياناتك
+                ابدأ بربط حساب Meta لرؤية بياناتك
               </p>
               <button
-                onClick={handleConnectNew}
+                onClick={handleConnectFirstTime}
                 className="bg-gradient-to-r from-blue-600 to-blue-700 text-white px-6 py-3 rounded-lg font-semibold hover:shadow-lg transition inline-flex items-center gap-2"
               >
                 <Plus className="w-5 h-5" />
@@ -263,93 +258,49 @@ export default function MetaConnectionsClient({
           ) : (
             <div className="space-y-3">
               {accounts.map((account) => {
-                const isActive = account.status === "active";
-                const isToggling = togglingId === account.id;
-                const canActivate = !limitReached || isActive;
-                const metaStatus = account.account_status
-                  ? META_STATUS_LABELS[account.account_status]
-                  : null;
-
+                const isRemoving = removingId === account.id;
                 return (
                   <div
                     key={account.id}
-                    className={`bg-white border-2 rounded-xl p-4 sm:p-5 transition ${
-                      isActive
-                        ? "border-green-200 shadow-sm"
-                        : "border-gray-100"
-                    }`}
+                    className="bg-white border border-green-200 rounded-xl p-4 sm:p-5 shadow-sm"
                   >
                     <div className="flex flex-col sm:flex-row sm:items-center gap-4">
-                      {/* Icon — Facebook "f" */}
-                      <div className="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center flex-shrink-0">
+                      <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center flex-shrink-0">
                         <span className="text-blue-600 font-bold text-lg">
-                          f
+                          M
                         </span>
                       </div>
 
-                      {/* Info */}
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap mb-1">
-                          <h3 className="font-bold text-gray-900 truncate">
-                            {account.account_name ||
-                              `حساب ${account.account_id}`}
-                          </h3>
-                          {isActive && (
-                            <span className="bg-green-100 text-green-700 text-xs font-semibold px-2 py-0.5 rounded inline-flex items-center gap-1">
-                              <CheckCircle2 className="w-3 h-3" />
-                              مفعّل
-                            </span>
-                          )}
-                          {metaStatus && (
-                            <span
-                              className={`text-xs font-medium ${metaStatus.color}`}
-                            >
-                              ● {metaStatus.label}
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-3 text-xs text-gray-500">
+                        <h3 className="font-bold text-gray-900 truncate mb-1">
+                          {account.account_name ||
+                            `حساب ${account.account_id}`}
+                        </h3>
+                        <div
+                          className="flex items-center gap-3 text-xs text-gray-500"
+                          dir="ltr"
+                        >
                           <span>ID: {account.account_id}</span>
                           {account.currency && (
                             <span className="bg-gray-100 px-2 py-0.5 rounded">
                               {account.currency}
                             </span>
                           )}
-                          {account.timezone_name && (
-                            <span className="hidden sm:inline">
-                              {account.timezone_name}
-                            </span>
-                          )}
                         </div>
                       </div>
 
-                      {/* Toggle */}
                       <button
-                        onClick={() => handleToggle(account)}
-                        disabled={isToggling || (!canActivate && !isActive)}
-                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition flex items-center justify-center gap-2 min-w-[120px] ${
-                          isActive
-                            ? "bg-gray-100 text-gray-700 hover:bg-gray-200"
-                            : canActivate
-                              ? "bg-gradient-to-r from-green-500 to-emerald-500 text-white hover:shadow-lg"
-                              : "bg-gray-100 text-gray-400 cursor-not-allowed"
-                        }`}
+                        onClick={() => handleRemove(account)}
+                        disabled={isRemoving}
+                        className="text-xs text-gray-500 hover:text-red-600 disabled:opacity-50 transition px-3 py-1.5 inline-flex items-center justify-center gap-1.5 min-w-[100px]"
                       >
-                        {isToggling ? (
+                        {isRemoving ? (
                           <>
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                            جاري...
-                          </>
-                        ) : isActive ? (
-                          <>
-                            <Circle className="w-4 h-4" />
-                            إلغاء التفعيل
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            جاري الإزالة...
                           </>
                         ) : (
-                          <>
-                            <CheckCircle2 className="w-4 h-4" />
-                            تفعيل
-                          </>
+                          "إلغاء التفعيل"
                         )}
                       </button>
                     </div>

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { createClient as createServerClient } from "@/lib/supabase/server";
 import type { Database } from "@/lib/supabase/database.types";
-import { getUserAccountsLimit, buildLimitError } from "@/lib/plans";
+import { canAddMoreAccounts, buildLimitError } from "@/lib/plans";
 
 export const dynamic = "force-dynamic";
 
@@ -84,26 +84,17 @@ export async function PATCH(
       );
     }
 
-    // 5. Limit gate — per-platform, not global. Meta is single-account so
-    // the limit only meaningfully constrains multi-account providers
-    // (Google), but we apply it uniformly: counting active rows for the
-    // same platform as the row being toggled. Already-active rows bypass
-    // (no net new activation).
-    if (body.action === "activate") {
-      const { count: activeCount } = await adminClient
-        .from("connections")
-        .select("id", { count: "exact", head: true })
-        .eq("user_id", user.id)
-        .eq("platform", connection.platform)
-        .eq("status", "active");
-
-      const limit = await getUserAccountsLimit(user.id);
-      const current = activeCount ?? 0;
-
-      if (current >= limit && connection.status !== "active") {
-        return NextResponse.json(buildLimitError(current, limit), {
-          status: 403,
-        });
+    // 5. Limit gate — cross-platform (Meta+Google+future TikTok/Snap/etc).
+    // The new PlanLimits service counts the user's total active connections
+    // and checks against their tier's totalAccounts cap. Already-active
+    // rows bypass the check (no net new activation).
+    if (body.action === "activate" && connection.status !== "active") {
+      const check = await canAddMoreAccounts(adminClient, user.id, 1);
+      if (!check.allowed) {
+        return NextResponse.json(
+          buildLimitError(check.current, check.limit),
+          { status: 403 }
+        );
       }
     }
 

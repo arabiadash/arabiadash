@@ -40,6 +40,21 @@ const META_ERROR_MESSAGES: Record<string, string> = {
   meta_db_error: "تعذّر حفظ بيانات الربط. حاول مرة أخرى.",
   meta_init_failed: "تعذّر بدء عملية الربط. حاول مرة أخرى.",
   meta_callback_failed: "حدث خطأ غير متوقع أثناء الربط. حاول مرة أخرى.",
+  meta_workspace_required: "الرجاء اختيار مساحة عمل قبل ربط Meta.",
+  meta_invalid_workspace: "مساحة العمل المختارة غير صالحة.",
+};
+
+// Google Ads error reasons emitted by /api/google-ads/auth and the OAuth
+// callback via `?google_ads=error&reason=<code>`. workspace_required and
+// invalid_workspace come from the new workspace requirement in /auth.
+const GOOGLE_ADS_ERROR_MESSAGES: Record<string, string> = {
+  workspace_required: "الرجاء اختيار مساحة عمل قبل ربط Google.",
+  invalid_workspace: "مساحة العمل المختارة غير صالحة.",
+  expired_session: "انتهت صلاحية جلسة الربط. حاول مرة أخرى.",
+  csrf_mismatch: "حدث خطأ في التحقق من الجلسة. حاول مرة أخرى.",
+  missing_params: "حدث خطأ في عملية الربط. حاول مرة أخرى.",
+  no_accounts: "لم يتم العثور على حسابات Google Ads مرتبطة بحسابك.",
+  internal_error: "حدث خطأ غير متوقع أثناء الربط. حاول مرة أخرى.",
 };
 
 export default function ConnectionsClient({
@@ -69,12 +84,16 @@ export default function ConnectionsClient({
     setConnectedPlatforms(initialConnections);
   }, [initialConnections]);
 
-  // Handle OAuth callback redirect (?success=... or ?error=...)
+  // Handle OAuth callback redirect:
+  //   - Meta: ?success=meta_connected or ?error=<code>
+  //   - Google: ?google_ads=success or ?google_ads=error&reason=<code>
   useEffect(() => {
     const success = searchParams.get("success");
     const errorCode = searchParams.get("error");
+    const googleAds = searchParams.get("google_ads");
+    const googleReason = searchParams.get("reason");
 
-    if (!success && !errorCode) return;
+    if (!success && !errorCode && !googleAds) return;
 
     if (success === "meta_connected") {
       setShowSuccess("meta");
@@ -83,6 +102,16 @@ export default function ConnectionsClient({
     } else if (errorCode) {
       const msg =
         META_ERROR_MESSAGES[errorCode] ?? "حدث خطأ. حاول مرة أخرى.";
+      setErrorMessage(msg);
+      setTimeout(() => setErrorMessage(null), 4000);
+    } else if (googleAds === "success") {
+      setShowSuccess("google");
+      setTimeout(() => setShowSuccess(null), 3000);
+      router.refresh();
+    } else if (googleAds === "error") {
+      const msg =
+        (googleReason && GOOGLE_ADS_ERROR_MESSAGES[googleReason]) ??
+        "حدث خطأ أثناء ربط Google. حاول مرة أخرى.";
       setErrorMessage(msg);
       setTimeout(() => setErrorMessage(null), 4000);
     }
@@ -315,17 +344,16 @@ export default function ConnectionsClient({
                 const isConnected = connectedPlatforms.includes(platform.id);
                 const isConnecting = connecting === platform.id;
 
-                // Google is multi-account — show count + manage link instead
-                // of the binary connect/disconnect other platforms use.
+                // Google + Meta are multi-account — show active count +
+                // "إضافة حسابات أخرى" → selector. "Active count" is what
+                // matters for plan limits and reporting; pending/inactive
+                // rows are residual and surfaced only in the sub-page's
+                // "إلغاء التفعيل" history.
                 const isGoogle = platform.id === "google";
                 const googleCounts = isGoogle ? platformCounts.google : undefined;
-                const hasGoogleConnections = (googleCounts?.total ?? 0) > 0;
 
-                // Meta is now also multi-account (Phase 4.1.5 unification).
-                // Same UX as Google: count + manage link / OAuth init.
                 const isMeta = platform.id === "meta";
                 const metaCounts = isMeta ? platformCounts.meta : undefined;
-                const hasMetaConnections = (metaCounts?.total ?? 0) > 0;
 
                 return (
                   <div
@@ -362,30 +390,34 @@ export default function ConnectionsClient({
                       {platform.description}
                     </p>
 
-                    {isGoogle && hasGoogleConnections ? (
-                      // Google with at least one connection — show count + manage link
+                    {isGoogle && googleCounts && googleCounts.active > 0 ? (
+                      // Google with at least one ACTIVE connection — show
+                      // count, primary "إضافة حسابات أخرى" (selector skip-OAuth),
+                      // and secondary "إدارة" text link.
                       <div className="space-y-2">
                         <div className="bg-gray-50 rounded-lg px-3 py-2 mb-2">
                           <p className="text-xs text-gray-500 mb-0.5">
-                            حسابات مفعّلة
+                            حسابات مرتبطة
                           </p>
                           <p className="text-lg font-bold text-gray-900">
-                            {googleCounts!.active}
-                            <span className="text-sm font-normal text-gray-400">
-                              {" "}
-                              / {googleCounts!.total}
-                            </span>
+                            {googleCounts.active}
                           </p>
                         </div>
                         <Link
+                          href={`/dashboard/connections/google/select?workspace=${activeWorkspaceId}`}
+                          className="w-full bg-gradient-to-r from-red-500 to-orange-500 text-white py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg transition flex items-center justify-center gap-2"
+                        >
+                          إضافة حسابات أخرى
+                        </Link>
+                        <Link
                           href="/dashboard/connections/google"
-                          className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg hover:shadow-indigo-500/30 transition flex items-center justify-center gap-2"
+                          className="w-full text-center text-gray-600 hover:text-gray-900 text-xs py-1.5 transition"
                         >
                           إدارة الحسابات
                         </Link>
                       </div>
                     ) : isGoogle ? (
-                      // Google with no connections — kick off OAuth
+                      // Google with no active connections — kick off OAuth.
                       <button
                         onClick={() => {
                           window.location.assign(`/api/google-ads/auth?workspace=${activeWorkspaceId}`);
@@ -394,30 +426,33 @@ export default function ConnectionsClient({
                       >
                         ربط Google Ads
                       </button>
-                    ) : isMeta && hasMetaConnections ? (
-                      // Meta with at least one connection — count + manage link
+                    ) : isMeta && metaCounts && metaCounts.active > 0 ? (
+                      // Meta with at least one ACTIVE connection — same shape
+                      // as Google: primary "إضافة" → selector, secondary "إدارة".
                       <div className="space-y-2">
                         <div className="bg-gray-50 rounded-lg px-3 py-2 mb-2">
                           <p className="text-xs text-gray-500 mb-0.5">
-                            حسابات مفعّلة
+                            حسابات مرتبطة
                           </p>
                           <p className="text-lg font-bold text-gray-900">
-                            {metaCounts!.active}
-                            <span className="text-sm font-normal text-gray-400">
-                              {" "}
-                              / {metaCounts!.total}
-                            </span>
+                            {metaCounts.active}
                           </p>
                         </div>
                         <Link
+                          href={`/dashboard/connections/meta/select?workspace=${activeWorkspaceId}`}
+                          className="w-full bg-gradient-to-r from-blue-600 to-blue-700 text-white py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg transition flex items-center justify-center gap-2"
+                        >
+                          إضافة حسابات أخرى
+                        </Link>
+                        <Link
                           href="/dashboard/connections/meta"
-                          className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:shadow-lg hover:shadow-indigo-500/30 transition flex items-center justify-center gap-2"
+                          className="w-full text-center text-gray-600 hover:text-gray-900 text-xs py-1.5 transition"
                         >
                           إدارة الحسابات
                         </Link>
                       </div>
                     ) : isMeta ? (
-                      // Meta with no connections — kick off OAuth (Facebook blue)
+                      // Meta with no active connections — kick off OAuth.
                       <button
                         onClick={() => {
                           window.location.assign(`/api/auth/meta/init?workspace=${activeWorkspaceId}`);

@@ -1,6 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
-import { getUserAccountsLimit } from "@/lib/plans";
+import { canAddMoreAccounts } from "@/lib/plans";
+import { createClient as createAdminClient } from "@supabase/supabase-js";
+import type { Database } from "@/lib/supabase/database.types";
 import MetaConnectionsClient from "./MetaConnectionsClient";
 import { getUserWorkspaces, resolveActiveWorkspace } from "@/lib/workspaces";
 
@@ -10,7 +12,6 @@ export interface MetaAccountRow {
   id: number;
   account_id: string;
   account_name: string | null;
-  status: "active" | "pending" | "expired" | "revoked" | "error";
   currency: string | null;
   timezone_name: string | null;
   account_status: number | null;
@@ -37,18 +38,25 @@ export default async function MetaConnectionsPage({
   const fullName = user.user_metadata?.full_name || "مستخدم";
   const email = user.email || "";
 
-  // Parallel: Meta connections + workspace data + account limit.
-  const [{ data: connectionsData }, workspaces, activeWorkspace, limit] =
+  const adminClient = createAdminClient<Database>(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { persistSession: false } }
+  );
+
+  // Active-only — the selector establishes intent.
+  const [{ data: connectionsData }, workspaces, activeWorkspace, planCheck] =
     await Promise.all([
       supabase
         .from("connections")
-        .select("id, account_id, account_name, status, metadata")
+        .select("id, account_id, account_name, metadata")
         .eq("user_id", user.id)
         .eq("platform", "meta")
+        .eq("status", "active")
         .order("id", { ascending: true }),
       getUserWorkspaces(supabase, user.id),
       resolveActiveWorkspace(supabase, user.id, params.workspace),
-      getUserAccountsLimit(user.id),
+      canAddMoreAccounts(adminClient, user.id, 0),
     ]);
 
   const accounts: MetaAccountRow[] = (connectionsData ?? []).map((row) => {
@@ -63,14 +71,12 @@ export default async function MetaConnectionsPage({
       id: row.id,
       account_id: row.account_id,
       account_name: row.account_name,
-      status: row.status as MetaAccountRow["status"],
       currency: metadata.currency ?? null,
       timezone_name: metadata.timezone_name ?? null,
       account_status: metadata.account_status ?? null,
     };
   });
 
-  // Alphabetical (no MCC concept for Meta).
   accounts.sort((a, b) =>
     (a.account_name ?? "").localeCompare(b.account_name ?? "")
   );
@@ -80,7 +86,9 @@ export default async function MetaConnectionsPage({
       fullName={fullName}
       email={email}
       accounts={accounts}
-      limit={limit}
+      planLimit={planCheck.limit}
+      planTier={planCheck.tier}
+      planCurrent={planCheck.current}
       workspaces={workspaces}
       activeWorkspaceId={activeWorkspace.id}
     />
