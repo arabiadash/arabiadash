@@ -2967,7 +2967,7 @@ export default function ReportsClient({
                                 {googleAccountsBreakdown.map((row) => (
                                   <tr key={row.accountId} className="border-b border-gray-50 hover:bg-gray-50 transition">
                                     <td className="py-2 px-2 font-medium text-gray-900">
-                                      حساب {row.accountId}
+                                      {googleAccountNames.get(row.accountId) || `حساب ${row.accountId}`}
                                       {row.hasUnsupported && (
                                         <span className="mr-1 text-[10px] text-amber-600">*</span>
                                       )}
