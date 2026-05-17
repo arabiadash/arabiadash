@@ -49,6 +49,19 @@ export async function getAdapterForProvider(
       // Google-specific metadata written at OAuth sync time:
       is_manager?: boolean;
       manager_customer_id?: string | null;
+      // Populated by customer_client enrichment in the OAuth callback
+      // (ADR-009). Optional — existing connections from before the
+      // enrichment landed read these as undefined; the UI handles that
+      // via a "غير معروف" fallback badge. Not required for adapter
+      // construction (informational for UI status display only).
+      google_account_status?:
+        | "ENABLED"
+        | "SUSPENDED"
+        | "CANCELED"
+        | "CLOSED"
+        | "UNKNOWN"
+        | null;
+      is_test_account?: boolean;
     }) || {};
 
   // Currency + timezone must come from sync-accounts. A missing currency
