@@ -1743,6 +1743,61 @@ export default function ReportsClient({
       }));
   }, [googleChartInsights.insights, chartShouldShowDaily, chartDayCount, currency]);
 
+  // Per-account breakdown for the Google tab. Groups insights by accountId,
+  // computes per-account totals + ROAS. Sorted by spend desc so the biggest
+  // spenders appear first — that's the row most actionable for budget
+  // decisions. `hasUnsupported` flags accounts with non-USD/SAR data so the
+  // UI can surface a note (those rows are excluded from the displayed totals).
+  const googleAccountsBreakdown = useMemo(() => {
+    type AccountRow = {
+      accountId: string;
+      spend: number;
+      revenue: number;
+      roas: number;
+      conversions: number;
+      hasUnsupported: boolean;
+    };
+
+    const byAccount = new Map<string, AccountRow>();
+
+    googleInsights.insights.forEach((insight) => {
+      const accId = insight.accountId;
+      if (!accId) return;
+
+      const c = insight.currency;
+      const isSupported = !c || c === "USD" || c === "SAR";
+
+      if (!byAccount.has(accId)) {
+        byAccount.set(accId, {
+          accountId: accId,
+          spend: 0,
+          revenue: 0,
+          roas: 0,
+          conversions: 0,
+          hasUnsupported: false,
+        });
+      }
+
+      const row = byAccount.get(accId)!;
+
+      if (!isSupported) {
+        row.hasUnsupported = true;
+        return;
+      }
+
+      const src = (c as Currency) || "USD";
+      row.spend += convertCurrency(insight.spend, src, currency);
+      row.revenue += convertCurrency(insight.revenue, src, currency);
+      row.conversions += insight.purchases;
+    });
+
+    byAccount.forEach((row) => {
+      row.roas = row.spend > 0 ? row.revenue / row.spend : 0;
+    });
+
+    return Array.from(byAccount.values()).sort((a, b) => b.spend - a.spend);
+  }, [googleInsights.insights, currency]);
+
   // Real KPI cards from aggregated insights (Meta + Google after M2).
   //
   // `aggregated.spend` / `.revenue` are already in the display currency
@@ -2878,7 +2933,56 @@ export default function ReportsClient({
                         </div>
                       )}
 
-                      {/* Accounts breakdown placeholder — added in C6 */}
+                      {/* Per-account breakdown */}
+                      {googleAccountsBreakdown.length > 0 && (
+                        <div className="border border-gray-100 rounded-lg p-3 sm:p-4">
+                          <h4 className="text-sm font-bold text-gray-900 mb-3">
+                            تفاصيل الحسابات
+                          </h4>
+                          <div className="overflow-x-auto">
+                            <table className="w-full text-sm">
+                              <thead className="text-xs text-gray-500 border-b border-gray-100">
+                                <tr>
+                                  <th className="text-right py-2 px-2 font-medium">الحساب</th>
+                                  <th className="text-right py-2 px-2 font-medium">الإنفاق</th>
+                                  <th className="text-right py-2 px-2 font-medium">الإيرادات</th>
+                                  <th className="text-right py-2 px-2 font-medium">ROAS</th>
+                                  <th className="text-right py-2 px-2 font-medium">التحويلات</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {googleAccountsBreakdown.map((row) => (
+                                  <tr key={row.accountId} className="border-b border-gray-50 hover:bg-gray-50 transition">
+                                    <td className="py-2 px-2 font-medium text-gray-900">
+                                      حساب {row.accountId}
+                                      {row.hasUnsupported && (
+                                        <span className="mr-1 text-[10px] text-amber-600">*</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2 px-2 text-gray-700">
+                                      {formatCurrencyWithSymbol(row.spend, currency)}
+                                    </td>
+                                    <td className="py-2 px-2 text-gray-900 font-medium">
+                                      {formatCurrencyWithSymbol(row.revenue, currency)}
+                                    </td>
+                                    <td className={`py-2 px-2 font-semibold ${getROASColor(row.roas)}`}>
+                                      {row.roas.toFixed(2)}x
+                                    </td>
+                                    <td className="py-2 px-2 text-gray-700">
+                                      {row.conversions.toLocaleString("en-US")}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                            {googleAccountsBreakdown.some((r) => r.hasUnsupported) && (
+                              <p className="text-[10px] text-amber-600 mt-2">
+                                * بعض البيانات بعملات غير مدعومة (تظهر بدون تحويل في الإجماليات)
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
