@@ -1127,6 +1127,19 @@ export default function ReportsClient({
     [connections]
   );
 
+  // Account ID → name lookup for the Google accounts breakdown table.
+  // Names come from connections (populated by sync-accounts), insights
+  // payloads don't carry the name. Falls back to "حساب <id>" in the UI
+  // for accounts where sync hasn't populated the name yet (e.g. the
+  // suspended accounts that returned skipped in the May 17 sync).
+  const googleAccountNames = useMemo(() => {
+    return new Map(
+      connections
+        .filter((c) => c.platform === "google")
+        .map((c) => [c.account_id, c.account_name])
+    );
+  }, [connections]);
+
   const [dateRange, setDateRange] = useDateRangeStorage();
 
   const { currency } = useCurrency();
@@ -2954,7 +2967,7 @@ export default function ReportsClient({
                                 {googleAccountsBreakdown.map((row) => (
                                   <tr key={row.accountId} className="border-b border-gray-50 hover:bg-gray-50 transition">
                                     <td className="py-2 px-2 font-medium text-gray-900">
-                                      حساب {row.accountId}
+                                      {googleAccountNames.get(row.accountId) || `حساب ${row.accountId}`}
                                       {row.hasUnsupported && (
                                         <span className="mr-1 text-[10px] text-amber-600">*</span>
                                       )}
