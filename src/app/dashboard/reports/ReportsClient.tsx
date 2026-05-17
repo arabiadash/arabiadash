@@ -33,6 +33,7 @@ import {
   useInsights,
   dateRangeValueToOptions,
 } from "@/lib/hooks/use-insights";
+import { useProviderInsights } from "@/lib/hooks/use-provider-insights";
 import { useAds } from "@/lib/hooks/use-ads";
 import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
 import { useElementHeight } from "@/lib/hooks/useElementHeight";
@@ -1287,6 +1288,16 @@ export default function ReportsClient({
     skip: !metaAccountId,
   });
 
+  // Google KPIs — account-level (Google doesn't have a single-API campaign
+  // equivalent that maps cleanly; deferred to Phase 4.8 tabs work).
+  // account-level aggregation is the right shape for cross-platform totals.
+  const googleInsights = useProviderInsights({
+    provider: "google",
+    accountIds: googleAccountIds,
+    ...dateRangeValueToOptions(dateRange),
+    level: "account",
+  });
+
   // Insights for chart (account level + daily breakdown when applicable,
   // uses chartDateRange so lifetime falls back to 90d)
   const { insights: chartInsights, loading: chartLoading } = useInsights({
@@ -1418,6 +1429,22 @@ export default function ReportsClient({
           level: "campaign",
           accountId: metaAccountId,
           skip: !metaAccountId,
+        }
+  );
+
+  const googlePreviousInsights = useProviderInsights(
+    previousPeriod
+      ? {
+          provider: "google",
+          accountIds: googleAccountIds,
+          customRange: previousPeriod,
+          level: "account",
+        }
+      : {
+          provider: "google",
+          accountIds: googleAccountIds,
+          range: "30d",
+          level: "account",
         }
   );
 
