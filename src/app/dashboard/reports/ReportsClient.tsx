@@ -1598,6 +1598,107 @@ export default function ReportsClient({
     currency,
   ]);
 
+  // Real KPI cards from aggregated insights (Meta + Google after M2).
+  //
+  // `aggregated.spend` / `.revenue` are already in the display currency
+  // (converted during aggregation), so we use formatCurrencyWithSymbol —
+  // NOT formatAndConvert, which would double-convert.
+  //
+  // `unsupportedBadges` carry per-currency raw totals (AED, EGP, …) so the
+  // UI can render "+ 5,000 AED" alongside the main number. ROAS, profit,
+  // and AOV have no badges — mixing currencies in those derived values is
+  // meaningless.
+  const kpiCards = useMemo(() => {
+    if (!aggregated) return [];
+
+    const formatBadge = (amount: number, currencyCode: string): string =>
+      `+ ${amount.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${currencyCode}`;
+
+    const spendBadges = aggregated.isMixed
+      ? aggregated.unsupportedTotals.map((u) => formatBadge(u.spend, u.currency))
+      : undefined;
+    const revenueBadges = aggregated.isMixed
+      ? aggregated.unsupportedTotals.map((u) => formatBadge(u.revenue, u.currency))
+      : undefined;
+    const purchasesBadges = aggregated.isMixed
+      ? aggregated.unsupportedTotals.map(
+          (u) => `+ ${u.purchases.toLocaleString("en-US")} (${u.currency})`
+        )
+      : undefined;
+
+    return [
+      {
+        label: "إجمالي الإنفاق",
+        value: formatCurrencyWithSymbol(aggregated.spend, currency),
+        icon: DollarSign,
+        color: "indigo",
+        delta: previousSummary
+          ? computeDelta(aggregated.spend, previousSummary.spend)
+          : null,
+        deltaInverse: false,
+        unsupportedBadges: spendBadges,
+      },
+      {
+        label: "إجمالي الإيرادات",
+        value: formatCurrencyWithSymbol(aggregated.revenue, currency),
+        icon: ShoppingCart,
+        color: "green",
+        delta: previousSummary
+          ? computeDelta(aggregated.revenue, previousSummary.revenue)
+          : null,
+        deltaInverse: false,
+        unsupportedBadges: revenueBadges,
+      },
+      {
+        label: "صافي الربح",
+        value: formatCurrencyWithSymbol(aggregated.profit, currency),
+        icon: TrendingUp,
+        color: "emerald",
+        delta: previousSummary
+          ? computeDelta(aggregated.profit, previousSummary.profit)
+          : null,
+        deltaInverse: false,
+        unsupportedBadges: undefined as string[] | undefined,
+      },
+      {
+        label: "متوسط ROAS",
+        value: `${aggregated.roas.toFixed(2)}x`,
+        icon: Target,
+        color: "purple",
+        delta: previousSummary
+          ? computeDelta(aggregated.roas, previousSummary.roas)
+          : null,
+        deltaInverse: false,
+        unsupportedBadges: undefined as string[] | undefined,
+      },
+      {
+        label: "عدد المبيعات",
+        value: aggregated.purchases.toLocaleString("en-US"),
+        icon: Users,
+        color: "blue",
+        delta: previousSummary
+          ? computeDelta(aggregated.purchases, previousSummary.purchases)
+          : null,
+        deltaInverse: false,
+        unsupportedBadges: purchasesBadges,
+      },
+      {
+        label: "متوسط قيمة الطلب",
+        value:
+          aggregated.aov > 0
+            ? formatCurrencyWithSymbol(aggregated.aov, currency)
+            : "—",
+        icon: Percent,
+        color: "pink",
+        delta: previousSummary
+          ? computeDelta(aggregated.aov, previousSummary.aov)
+          : null,
+        deltaInverse: false,
+        unsupportedBadges: undefined as string[] | undefined,
+      },
+    ];
+  }, [aggregated, currency, previousSummary]);
+
   const handleExport = (format: "pdf" | "excel" | "email") => {
     alert(
       format === "pdf"
@@ -1664,75 +1765,6 @@ export default function ReportsClient({
       </div>
     );
   }
-
-  // ============================================================
-  // KPI cards data
-  // ============================================================
-  const kpiCards = [
-    {
-      label: "إجمالي الإنفاق",
-      value: formatAndConvert(summary.spend, accountCurrency, currency),
-      icon: DollarSign,
-      color: "indigo",
-      delta: previousSummary
-        ? computeDelta(summary.spend, previousSummary.spend)
-        : null,
-      deltaInverse: false,
-    },
-    {
-      label: "إجمالي الإيرادات",
-      value: formatAndConvert(summary.revenue, accountCurrency, currency),
-      icon: ShoppingCart,
-      color: "green",
-      delta: previousSummary
-        ? computeDelta(summary.revenue, previousSummary.revenue)
-        : null,
-      deltaInverse: false,
-    },
-    {
-      label: "صافي الربح",
-      value: formatAndConvert(summary.profit, accountCurrency, currency),
-      icon: TrendingUp,
-      color: "emerald",
-      delta: previousSummary
-        ? computeDelta(summary.profit, previousSummary.profit)
-        : null,
-      deltaInverse: false,
-    },
-    {
-      label: "متوسط ROAS",
-      value: `${summary.roas.toFixed(2)}x`,
-      icon: Target,
-      color: "purple",
-      delta: previousSummary
-        ? computeDelta(summary.roas, previousSummary.roas)
-        : null,
-      deltaInverse: false,
-    },
-    {
-      label: "عدد المبيعات",
-      value: summary.purchases.toLocaleString("en-US"),
-      icon: Users,
-      color: "blue",
-      delta: previousSummary
-        ? computeDelta(summary.purchases, previousSummary.purchases)
-        : null,
-      deltaInverse: false,
-    },
-    {
-      label: "متوسط قيمة الطلب",
-      value:
-        summary.aov > 0
-          ? formatAndConvert(summary.aov, accountCurrency, currency)
-          : "—",
-      icon: Percent,
-      color: "pink",
-      delta: previousSummary
-        ? computeDelta(summary.aov, previousSummary.aov)
-        : null,
-      deltaInverse: false,
-    },
-  ];
 
   return (
     <div className="min-h-screen bg-gray-50" dir="rtl">
@@ -1930,6 +1962,27 @@ export default function ReportsClient({
                               {stat.value}
                             </span>
                           </div>
+
+                          {/* Unsupported-currency side-totals — only present
+                              when the workspace has accounts in currencies
+                              outside USD/SAR (AED, EGP, EUR, …). Phase 4.9
+                              will fold these into the main total via live FX. */}
+                          {stat.unsupportedBadges &&
+                            stat.unsupportedBadges.length > 0 && (
+                              <div
+                                className="flex flex-col gap-0.5 mb-1"
+                                dir="ltr"
+                              >
+                                {stat.unsupportedBadges.map((badge, j) => (
+                                  <span
+                                    key={j}
+                                    className="text-[10px] sm:text-xs text-gray-500"
+                                  >
+                                    {badge}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
 
                           {showDelta ? (
                             <div
