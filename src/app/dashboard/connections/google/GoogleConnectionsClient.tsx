@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
   Building2,
@@ -13,6 +14,7 @@ import {
   Menu,
   Bell,
   Search,
+  RefreshCw,
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
 import type { Workspace } from "@/lib/workspaces";
@@ -68,14 +70,25 @@ export default function GoogleConnectionsClient({
   workspaces,
   activeWorkspaceId,
 }: GoogleConnectionsClientProps) {
+  const router = useRouter();
   const [accounts, setAccounts] =
     useState<GoogleAccountRow[]>(initialAccounts);
   const [togglingId, setTogglingId] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   const activeCount = accounts.filter((a) => a.status === "active").length;
   const limitReached = activeCount >= limit;
+
+  // Reconnect banner trigger — any connection without status enrichment
+  // (existing pre-ADR-009 rows or accounts that failed enrichment). Drives
+  // the orange banner with "تحديث" + "إعادة ربط" actions, mirroring the
+  // industry pattern (Stripe Connect, Plaid Link) of surfacing the refresh
+  // path explicitly instead of letting users get stuck on stale status.
+  const hasIncompleteStatuses = accounts.some(
+    (a) => !a.google_account_status
+  );
 
   const initial = fullName.charAt(0).toUpperCase();
 
@@ -130,6 +143,32 @@ export default function GoogleConnectionsClient({
 
   const handleConnectNew = () => {
     window.location.assign(`/api/google-ads/auth?workspace=${activeWorkspaceId}`);
+  };
+
+  // Refresh status + name + currency for all Google connections in this
+  // workspace via the customer_client query (works for any status,
+  // including CANCELED/CLOSED). Cheap — no re-auth required.
+  const handleSync = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    setErrorMessage(null);
+    try {
+      const response = await fetch("/api/google-ads/sync-accounts", {
+        method: "POST",
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        showError(data?.error ?? "تعذّر تحديث الحسابات. حاول مرة أخرى.");
+        return;
+      }
+      // The server enrichment updates metadata; refresh the server
+      // component to pull the new rows into this client.
+      router.refresh();
+    } catch {
+      showError("خطأ في الاتصال. حاول مرة أخرى.");
+    } finally {
+      setSyncing(false);
+    }
   };
 
   return (
@@ -238,6 +277,56 @@ export default function GoogleConnectionsClient({
               </div>
             )}
           </div>
+
+          {/* Reconnect banner — shown when any connection has missing
+              enrichment (pre-ADR-009 rows, or accounts that failed the
+              customer_client query). Two actions: cheap refresh (sync)
+              and full re-OAuth (reconnect). Hidden once everything is
+              enriched to avoid visual noise. */}
+          {hasIncompleteStatuses && (
+            <div className="mb-6 rounded-xl border border-orange-200 bg-orange-50 p-4 sm:p-5">
+              <div className="flex items-start gap-3">
+                <div className="flex-shrink-0 w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
+                  <RefreshCw className="w-5 h-5 text-orange-600" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h3 className="font-bold text-orange-900 mb-1">
+                    حدّث حالات الحسابات
+                  </h3>
+                  <p className="text-sm text-orange-800 leading-relaxed mb-3">
+                    بعض حساباتك مرتبطة قبل تحديث آخر. اضغط على «تحديث الحالات»
+                    لجلب أحدث الحالات من Google، أو «إعادة ربط» لإعادة المصادقة
+                    من البداية.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={handleSync}
+                      disabled={syncing}
+                      className="inline-flex items-center gap-2 rounded-lg bg-orange-600 text-white px-4 py-2 text-sm font-semibold hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                    >
+                      {syncing ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          جاري التحديث...
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="w-4 h-4" />
+                          تحديث الحالات
+                        </>
+                      )}
+                    </button>
+                    <button
+                      onClick={handleConnectNew}
+                      className="inline-flex items-center gap-2 rounded-lg border border-orange-300 bg-white text-orange-700 px-4 py-2 text-sm font-semibold hover:bg-orange-100 transition"
+                    >
+                      إعادة ربط Google
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Accounts List */}
           {accounts.length === 0 ? (
