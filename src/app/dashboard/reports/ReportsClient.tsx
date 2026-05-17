@@ -33,6 +33,7 @@ import {
   useInsights,
   dateRangeValueToOptions,
 } from "@/lib/hooks/use-insights";
+import { useProviderInsights } from "@/lib/hooks/use-provider-insights";
 import { useAds } from "@/lib/hooks/use-ads";
 import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
 import { useElementHeight } from "@/lib/hooks/useElementHeight";
@@ -56,6 +57,7 @@ import {
   type DateRangeValue,
   type UnifiedCampaign,
   type UnifiedAd,
+  type UnifiedInsight,
 } from "@/lib/ads/types";
 import {
   AreaChart,
@@ -1115,6 +1117,17 @@ export default function ReportsClient({
     [connections]
   );
 
+  // Google is multi-account: the active workspace can have N active Google
+  // connections. useProviderInsights fans out one API call per account in
+  // parallel; empty array → skip. Mirrors DashboardClient pattern.
+  const googleAccountIds = useMemo(
+    () =>
+      connections
+        .filter((c) => c.platform === "google")
+        .map((c) => c.account_id),
+    [connections]
+  );
+
   const [dateRange, setDateRange] = useDateRangeStorage();
 
   const { currency } = useCurrency();
@@ -1276,6 +1289,16 @@ export default function ReportsClient({
     skip: !metaAccountId,
   });
 
+  // Google KPIs — account-level (Google doesn't have a single-API campaign
+  // equivalent that maps cleanly; deferred to Phase 4.8 tabs work).
+  // account-level aggregation is the right shape for cross-platform totals.
+  const googleInsights = useProviderInsights({
+    provider: "google",
+    accountIds: googleAccountIds,
+    ...dateRangeValueToOptions(dateRange),
+    level: "account",
+  });
+
   // Insights for chart (account level + daily breakdown when applicable,
   // uses chartDateRange so lifetime falls back to 90d)
   const { insights: chartInsights, loading: chartLoading } = useInsights({
@@ -1284,6 +1307,14 @@ export default function ReportsClient({
     timeIncrement: chartShouldShowDaily ? 1 : undefined,
     accountId: metaAccountId,
     skip: !metaAccountId,
+  });
+
+  const googleChartInsights = useProviderInsights({
+    provider: "google",
+    accountIds: googleAccountIds,
+    ...dateRangeValueToOptions(chartDateRange),
+    level: "account",
+    timeIncrement: chartShouldShowDaily ? 1 : undefined,
   });
 
   // Apply search → status filter → sort
@@ -1410,37 +1441,100 @@ export default function ReportsClient({
         }
   );
 
-  const summary = useMemo(() => {
-    const totals = insights.reduce(
-      (acc, i) => ({
-        spend: acc.spend + i.spend,
-        revenue: acc.revenue + i.revenue,
-        purchases: acc.purchases + i.purchases,
-      }),
+  const googlePreviousInsights = useProviderInsights(
+    previousPeriod
+      ? {
+          provider: "google",
+          accountIds: googleAccountIds,
+          customRange: previousPeriod,
+          level: "account",
+        }
+      : {
+          provider: "google",
+          accountIds: googleAccountIds,
+          range: "30d",
+          level: "account",
+        }
+  );
+
+  const aggregated = useMemo(() => {
+    const allInsights = [...insights, ...googleInsights.insights];
+    if (allInsights.length === 0) return null;
+
+    const supportedRows = allInsights.filter((ins) => {
+      const c = ins.currency;
+      return !c || c === "USD" || c === "SAR";
+    });
+    const unsupportedRows = allInsights.filter((ins) => {
+      const c = ins.currency;
+      return c && c !== "USD" && c !== "SAR";
+    });
+
+    const totals = supportedRows.reduce(
+      (acc, ins) => {
+        const src = (ins.currency as Currency) || "USD";
+        return {
+          spend: acc.spend + convertCurrency(ins.spend, src, currency),
+          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
+          purchases: acc.purchases + ins.purchases,
+        };
+      },
       { spend: 0, revenue: 0, purchases: 0 }
     );
+
+    const unsupportedByCurrency = unsupportedRows.reduce(
+      (acc, ins) => {
+        const c = ins.currency as string;
+        if (!acc[c]) acc[c] = { spend: 0, revenue: 0, purchases: 0 };
+        acc[c].spend += ins.spend;
+        acc[c].revenue += ins.revenue;
+        acc[c].purchases += ins.purchases;
+        return acc;
+      },
+      {} as Record<string, { spend: number; revenue: number; purchases: number }>
+    );
+
+    const unsupportedTotals = Object.entries(unsupportedByCurrency).map(
+      ([cur, vals]) => ({ currency: cur, ...vals })
+    );
+
     return {
-      campaignsCount: insights.length,
+      campaignsCount: insights.length, // preserve Reports-specific count
       spend: totals.spend,
       revenue: totals.revenue,
       profit: totals.revenue - totals.spend,
       roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
       purchases: totals.purchases,
-      aov:
-        totals.purchases > 0 ? totals.revenue / totals.purchases : 0,
+      aov: totals.purchases > 0 ? totals.revenue / totals.purchases : 0,
+      isMixed: unsupportedTotals.length > 0,
+      unsupportedTotals,
     };
-  }, [insights]);
+  }, [insights, googleInsights.insights, currency]);
 
   // Previous period totals (for KPI deltas). Null when previousPeriod is null
-  // (lifetime) — KPI cards will hide their delta indicators.
+  // (lifetime) — KPI cards will hide their delta indicators. Same row-level
+  // currency policy as `aggregated`: only USD/SAR rows feed the converted
+  // total. Unsupported currencies silently dropped here — deltas across
+  // mismatched currency bases would be meaningless. Phase 4.9 fixes via FX.
   const previousSummary = useMemo(() => {
     if (!previousPeriod) return null;
-    const totals = previousInsights.reduce(
-      (acc, i) => ({
-        spend: acc.spend + i.spend,
-        revenue: acc.revenue + i.revenue,
-        purchases: acc.purchases + i.purchases,
-      }),
+    const allPrevious = [
+      ...previousInsights,
+      ...googlePreviousInsights.insights,
+    ];
+    const supportedRows = allPrevious.filter((ins) => {
+      const c = ins.currency;
+      return !c || c === "USD" || c === "SAR";
+    });
+    const totals = supportedRows.reduce(
+      (acc, ins) => {
+        const src = (ins.currency as Currency) || "USD";
+        return {
+          spend: acc.spend + convertCurrency(ins.spend, src, currency),
+          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
+          purchases: acc.purchases + ins.purchases,
+        };
+      },
       { spend: 0, revenue: 0, purchases: 0 }
     );
     return {
@@ -1449,34 +1543,161 @@ export default function ReportsClient({
       profit: totals.revenue - totals.spend,
       roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
       purchases: totals.purchases,
-      aov:
-        totals.purchases > 0 ? totals.revenue / totals.purchases : 0,
+      aov: totals.purchases > 0 ? totals.revenue / totals.purchases : 0,
     };
-  }, [previousInsights, previousPeriod]);
+  }, [previousInsights, googlePreviousInsights.insights, previousPeriod, currency]);
 
-  const displayChartData = useMemo(
-    () =>
-      chartInsights.map((i) => ({
-        date: i.dateStart,
+  // Merge Meta + Google daily breakdowns by date. Per-row currency:
+  //   - USD/SAR or missing (cached pre-C0): convert to display currency
+  //   - Unsupported (AED, EGP, …): row dropped from the chart (Phase 4.9 fix)
+  const displayChartData = useMemo(() => {
+    type Row = { date: string; spend: number; revenue: number };
+    const byDate = new Map<string, Row>();
+
+    const addRow = (insight: UnifiedInsight) => {
+      const c = insight.currency;
+      const isSupported = !c || c === "USD" || c === "SAR";
+      if (!isSupported) return;
+
+      const src = (c as Currency) || "USD";
+      const sp = convertCurrency(insight.spend, src, currency);
+      const rv = convertCurrency(insight.revenue, src, currency);
+
+      const existing = byDate.get(insight.dateStart);
+      if (existing) {
+        existing.spend += sp;
+        existing.revenue += rv;
+      } else {
+        byDate.set(insight.dateStart, {
+          date: insight.dateStart,
+          spend: sp,
+          revenue: rv,
+        });
+      }
+    };
+
+    chartInsights.forEach(addRow);
+    googleChartInsights.insights.forEach(addRow);
+
+    return Array.from(byDate.values())
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((row) => ({
+        date: row.date,
         dayLabel: chartShouldShowDaily
-          ? formatChartDayLabel(i.dateStart, chartDayCount)
-          : i.dateStart,
-        tooltipLabel: formatChartTooltipLabel(i.dateStart),
-        displaySpend: convertCurrency(i.spend, accountCurrency, currency),
-        displayRevenue: convertCurrency(
-          i.revenue,
-          accountCurrency,
-          currency
-        ),
-      })),
-    [
-      chartInsights,
-      chartShouldShowDaily,
-      chartDayCount,
-      accountCurrency,
-      currency,
-    ]
-  );
+          ? formatChartDayLabel(row.date, chartDayCount)
+          : row.date,
+        tooltipLabel: formatChartTooltipLabel(row.date),
+        displaySpend: row.spend,
+        displayRevenue: row.revenue,
+      }));
+  }, [
+    chartInsights,
+    googleChartInsights.insights,
+    chartShouldShowDaily,
+    chartDayCount,
+    currency,
+  ]);
+
+  // Real KPI cards from aggregated insights (Meta + Google after M2).
+  //
+  // `aggregated.spend` / `.revenue` are already in the display currency
+  // (converted during aggregation), so we use formatCurrencyWithSymbol —
+  // NOT formatAndConvert, which would double-convert.
+  //
+  // `unsupportedBadges` carry per-currency raw totals (AED, EGP, …) so the
+  // UI can render "+ 5,000 AED" alongside the main number. ROAS, profit,
+  // and AOV have no badges — mixing currencies in those derived values is
+  // meaningless.
+  const kpiCards = useMemo(() => {
+    if (!aggregated) return [];
+
+    const formatBadge = (amount: number, currencyCode: string): string =>
+      `+ ${amount.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${currencyCode}`;
+
+    const spendBadges = aggregated.isMixed
+      ? aggregated.unsupportedTotals.map((u) => formatBadge(u.spend, u.currency))
+      : undefined;
+    const revenueBadges = aggregated.isMixed
+      ? aggregated.unsupportedTotals.map((u) => formatBadge(u.revenue, u.currency))
+      : undefined;
+    const purchasesBadges = aggregated.isMixed
+      ? aggregated.unsupportedTotals.map(
+          (u) => `+ ${u.purchases.toLocaleString("en-US")} (${u.currency})`
+        )
+      : undefined;
+
+    return [
+      {
+        label: "إجمالي الإنفاق",
+        value: formatCurrencyWithSymbol(aggregated.spend, currency),
+        icon: DollarSign,
+        color: "indigo",
+        delta: previousSummary
+          ? computeDelta(aggregated.spend, previousSummary.spend)
+          : null,
+        deltaInverse: false,
+        unsupportedBadges: spendBadges,
+      },
+      {
+        label: "إجمالي الإيرادات",
+        value: formatCurrencyWithSymbol(aggregated.revenue, currency),
+        icon: ShoppingCart,
+        color: "green",
+        delta: previousSummary
+          ? computeDelta(aggregated.revenue, previousSummary.revenue)
+          : null,
+        deltaInverse: false,
+        unsupportedBadges: revenueBadges,
+      },
+      {
+        label: "صافي الربح",
+        value: formatCurrencyWithSymbol(aggregated.profit, currency),
+        icon: TrendingUp,
+        color: "emerald",
+        delta: previousSummary
+          ? computeDelta(aggregated.profit, previousSummary.profit)
+          : null,
+        deltaInverse: false,
+        unsupportedBadges: undefined as string[] | undefined,
+      },
+      {
+        label: "متوسط ROAS",
+        value: `${aggregated.roas.toFixed(2)}x`,
+        icon: Target,
+        color: "purple",
+        delta: previousSummary
+          ? computeDelta(aggregated.roas, previousSummary.roas)
+          : null,
+        deltaInverse: false,
+        unsupportedBadges: undefined as string[] | undefined,
+      },
+      {
+        label: "عدد المبيعات",
+        value: aggregated.purchases.toLocaleString("en-US"),
+        icon: Users,
+        color: "blue",
+        delta: previousSummary
+          ? computeDelta(aggregated.purchases, previousSummary.purchases)
+          : null,
+        deltaInverse: false,
+        unsupportedBadges: purchasesBadges,
+      },
+      {
+        label: "متوسط قيمة الطلب",
+        value:
+          aggregated.aov > 0
+            ? formatCurrencyWithSymbol(aggregated.aov, currency)
+            : "—",
+        icon: Percent,
+        color: "pink",
+        delta: previousSummary
+          ? computeDelta(aggregated.aov, previousSummary.aov)
+          : null,
+        deltaInverse: false,
+        unsupportedBadges: undefined as string[] | undefined,
+      },
+    ];
+  }, [aggregated, currency, previousSummary]);
 
   const handleExport = (format: "pdf" | "excel" | "email") => {
     alert(
@@ -1544,75 +1765,6 @@ export default function ReportsClient({
       </div>
     );
   }
-
-  // ============================================================
-  // KPI cards data
-  // ============================================================
-  const kpiCards = [
-    {
-      label: "إجمالي الإنفاق",
-      value: formatAndConvert(summary.spend, accountCurrency, currency),
-      icon: DollarSign,
-      color: "indigo",
-      delta: previousSummary
-        ? computeDelta(summary.spend, previousSummary.spend)
-        : null,
-      deltaInverse: false,
-    },
-    {
-      label: "إجمالي الإيرادات",
-      value: formatAndConvert(summary.revenue, accountCurrency, currency),
-      icon: ShoppingCart,
-      color: "green",
-      delta: previousSummary
-        ? computeDelta(summary.revenue, previousSummary.revenue)
-        : null,
-      deltaInverse: false,
-    },
-    {
-      label: "صافي الربح",
-      value: formatAndConvert(summary.profit, accountCurrency, currency),
-      icon: TrendingUp,
-      color: "emerald",
-      delta: previousSummary
-        ? computeDelta(summary.profit, previousSummary.profit)
-        : null,
-      deltaInverse: false,
-    },
-    {
-      label: "متوسط ROAS",
-      value: `${summary.roas.toFixed(2)}x`,
-      icon: Target,
-      color: "purple",
-      delta: previousSummary
-        ? computeDelta(summary.roas, previousSummary.roas)
-        : null,
-      deltaInverse: false,
-    },
-    {
-      label: "عدد المبيعات",
-      value: summary.purchases.toLocaleString("en-US"),
-      icon: Users,
-      color: "blue",
-      delta: previousSummary
-        ? computeDelta(summary.purchases, previousSummary.purchases)
-        : null,
-      deltaInverse: false,
-    },
-    {
-      label: "متوسط قيمة الطلب",
-      value:
-        summary.aov > 0
-          ? formatAndConvert(summary.aov, accountCurrency, currency)
-          : "—",
-      icon: Percent,
-      color: "pink",
-      delta: previousSummary
-        ? computeDelta(summary.aov, previousSummary.aov)
-        : null,
-      deltaInverse: false,
-    },
-  ];
 
   return (
     <div className="min-h-screen bg-gray-50" dir="rtl">
@@ -1810,6 +1962,27 @@ export default function ReportsClient({
                               {stat.value}
                             </span>
                           </div>
+
+                          {/* Unsupported-currency side-totals — only present
+                              when the workspace has accounts in currencies
+                              outside USD/SAR (AED, EGP, EUR, …). Phase 4.9
+                              will fold these into the main total via live FX. */}
+                          {stat.unsupportedBadges &&
+                            stat.unsupportedBadges.length > 0 && (
+                              <div
+                                className="flex flex-col gap-0.5 mb-1"
+                                dir="ltr"
+                              >
+                                {stat.unsupportedBadges.map((badge, j) => (
+                                  <span
+                                    key={j}
+                                    className="text-[10px] sm:text-xs text-gray-500"
+                                  >
+                                    {badge}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
 
                           {showDelta ? (
                             <div
