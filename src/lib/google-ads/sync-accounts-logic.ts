@@ -1,6 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import { fetchCustomerDetails } from "@/lib/google-ads/customer";
+import {
+  getEnrichedCustomerClients,
+  type AccessibleCustomerDetails,
+} from "@/lib/google-ads/oauth";
 
 export interface SyncResult {
   customer_id: string;
@@ -42,9 +46,75 @@ export async function syncGoogleAccountsForUser(
     return [];
   }
 
+  // Single customer_client query covers all MCC-linked accounts with names
+  // + statuses + currency in one shot — works for CANCELED/CLOSED accounts
+  // where the per-account customer.descriptive_name query (the fallback
+  // below) would fail. Standalone accounts (not in MCC) won't appear here;
+  // they fall through to fetchCustomerDetails.
+  //
+  // All connections for one user share the same refresh_token (the OAuth
+  // flow wrote it once on every row), so reading from connections[0] is
+  // safe and avoids one extra round-trip.
+  const refreshToken = connections[0]?.access_token;
+  const enrichedMap = new Map<string, AccessibleCustomerDetails>();
+  if (refreshToken) {
+    try {
+      const enriched = await getEnrichedCustomerClients(refreshToken);
+      for (const client of enriched) {
+        enrichedMap.set(client.id, client);
+      }
+    } catch (err) {
+      console.error(
+        "[sync-accounts-logic] enrichment query failed:",
+        err instanceof Error ? err.message : "unknown"
+      );
+      // Continue without enrichment — per-account fallback will run for each.
+    }
+  }
+
   const results: SyncResult[] = [];
 
   for (const conn of connections) {
+    // Enrichment path first — works for any status including CANCELED/CLOSED.
+    const enriched = enrichedMap.get(conn.account_id);
+    if (enriched) {
+      const existingMetadata =
+        (conn.metadata as Record<string, unknown>) || {};
+      const mergedMetadata = {
+        ...existingMetadata,
+        currency: enriched.currency_code,
+        timezone_name: enriched.time_zone,
+        google_account_status: enriched.status,
+        is_manager: enriched.manager,
+        is_test_account: enriched.test_account,
+      };
+
+      const { error: updateError } = await adminClient
+        .from("connections")
+        .update({
+          account_name: enriched.descriptive_name,
+          metadata: mergedMetadata,
+        })
+        .eq("user_id", userId)
+        .eq("platform", "google")
+        .eq("account_id", conn.account_id);
+
+      if (updateError) {
+        results.push({
+          customer_id: conn.account_id,
+          status: "failed",
+        });
+      } else {
+        results.push({
+          customer_id: conn.account_id,
+          status: "updated",
+          name: enriched.descriptive_name ?? undefined,
+        });
+      }
+      continue;
+    }
+
+    // Fallback: standalone accounts (not MCC-linked) — per-account query.
     const details = await fetchCustomerDetails(
       conn.account_id,
       conn.access_token
