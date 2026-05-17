@@ -23,11 +23,10 @@ import {
   ChevronUp,
   ChevronDown,
   ChevronsUpDown,
-  ArrowUp,
-  ArrowDown,
   RefreshCw,
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
+import KpiCard, { type KpiCardProps } from "@/components/reports/KpiCard";
 import type { Workspace, WorkspaceConnection } from "@/lib/workspaces";
 import {
   useInsights,
@@ -1907,113 +1906,20 @@ export default function ReportsClient({
                         <div className="h-5 bg-gray-200 rounded w-1/2"></div>
                       </div>
                     ))
-                  : kpiCards.map((stat, i) => {
-                      const colorClasses: Record<string, string> = {
-                        indigo: "bg-indigo-50 text-indigo-600",
-                        green: "bg-green-50 text-green-600",
-                        emerald: "bg-emerald-50 text-emerald-600",
-                        purple: "bg-purple-50 text-purple-600",
-                        blue: "bg-blue-50 text-blue-600",
-                        pink: "bg-pink-50 text-pink-600",
-                      };
-
-                      const showDelta = stat.delta && stat.delta.isFinite;
-                      const deltaValue = stat.delta?.value ?? 0;
-                      const isNegligible =
-                        showDelta && Math.abs(deltaValue) < 0.1;
-                      const deltaIsPositive = stat.deltaInverse
-                        ? deltaValue < 0
-                        : deltaValue > 0;
-                      const deltaColor = !showDelta
-                        ? "text-gray-400"
-                        : isNegligible
-                          ? "text-gray-500"
-                          : deltaIsPositive
-                            ? "text-green-600"
-                            : "text-red-600";
-                      const DeltaIcon =
-                        !showDelta || isNegligible
-                          ? null
-                          : deltaValue > 0
-                            ? ArrowUp
-                            : ArrowDown;
-
-                      return (
-                        <div
-                          key={i}
-                          className="bg-white border border-gray-100 rounded-xl p-3 sm:p-4 hover:shadow-md transition"
-                        >
-                          <div className="flex items-center justify-between mb-2 sm:mb-3">
-                            <div
-                              className={`w-8 h-8 sm:w-9 sm:h-9 rounded-lg flex items-center justify-center ${
-                                colorClasses[stat.color]
-                              }`}
-                            >
-                              <stat.icon className="w-4 h-4" />
-                            </div>
-                          </div>
-                          <p className="text-xs text-gray-600 mb-1 truncate">
-                            {stat.label}
-                          </p>
-                          <div
-                            className="flex items-baseline gap-1 flex-wrap mb-1"
-                            dir="ltr"
-                          >
-                            <span className="text-base sm:text-lg font-bold text-gray-900">
-                              {stat.value}
-                            </span>
-                          </div>
-
-                          {/* Unsupported-currency side-totals — only present
-                              when the workspace has accounts in currencies
-                              outside USD/SAR (AED, EGP, EUR, …). Phase 4.9
-                              will fold these into the main total via live FX. */}
-                          {stat.unsupportedBadges &&
-                            stat.unsupportedBadges.length > 0 && (
-                              <div
-                                className="flex flex-col gap-0.5 mb-1"
-                                dir="ltr"
-                              >
-                                {stat.unsupportedBadges.map((badge, j) => (
-                                  <span
-                                    key={j}
-                                    className="text-[10px] sm:text-xs text-gray-500"
-                                  >
-                                    {badge}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-
-                          {showDelta ? (
-                            <div
-                              className={`flex items-center gap-0.5 text-[10px] sm:text-xs ${deltaColor}`}
-                              dir="ltr"
-                            >
-                              {DeltaIcon && (
-                                <DeltaIcon className="w-3 h-3" />
-                              )}
-                              <span className="font-semibold">
-                                {Math.abs(deltaValue).toFixed(1)}%
-                              </span>
-                              <span className="text-gray-400 mr-1">
-                                vs السابقة
-                              </span>
-                            </div>
-                          ) : previousPeriod ? (
-                            <div className="text-[10px] sm:text-xs text-gray-400">
-                              — vs السابقة
-                            </div>
-                          ) : null}
-
-                          {stat.footnote && (
-                            <div className="text-[10px] text-gray-400 mt-1 italic">
-                              * {stat.footnote}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
+                  : kpiCards.map((stat, i) => (
+                      <KpiCard
+                        key={i}
+                        label={stat.label}
+                        value={stat.value}
+                        icon={stat.icon}
+                        color={stat.color as KpiCardProps["color"]}
+                        delta={stat.delta}
+                        deltaInverse={stat.deltaInverse}
+                        unsupportedBadges={stat.unsupportedBadges}
+                        footnote={stat.footnote}
+                        previousPeriod={previousPeriod}
+                      />
+                    ))}
               </div>
 
               {/* Main Chart - Spend vs Revenue */}
