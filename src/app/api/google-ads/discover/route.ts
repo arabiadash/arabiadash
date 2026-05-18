@@ -66,88 +66,82 @@ export async function GET() {
       );
     }
 
-    // Hybrid discovery (ADR-010 follow-up):
-    //   1) customer_client (MCC-linked accounts with rich status data —
-    //      preferred; returns ENABLED/SUSPENDED/CANCELED/CLOSED so we
-    //      can filter cancelled ones out cleanly).
-    //   2) Fallback to listAccessibleCustomers + per-account
-    //      fetchCustomerDetails for standalone account owners (the
-    //      typical Saudi market user — owns accounts directly, not via
-    //      an MCC). Cancelled/inaccessible accounts naturally drop here
-    //      because fetchCustomerDetails returns null for them.
-    let enrichedAccounts: AccessibleCustomerDetails[] =
-      await getEnrichedCustomerClients(credential.refresh_token);
-
-    console.log("[discover-debug] MCC query result:", {
-      count: enrichedAccounts.length,
-      sample: enrichedAccounts.slice(0, 2),
-    });
-
-    if (enrichedAccounts.length === 0) {
-      console.log("[discover-debug] fallback path triggered");
-
-      let standaloneIds: string[];
-      try {
-        standaloneIds = await getAccessibleCustomers(credential.refresh_token);
-        console.log("[discover-debug] listAccessibleCustomers result:", {
-          count: standaloneIds.length,
-          ids: standaloneIds.slice(0, 5),
-        });
-      } catch (err) {
+    // Hybrid discovery (ADR-010 follow-up): run BOTH paths in parallel
+    // and merge by ID. Preferring the if-empty fallback (PR #22 v1)
+    // missed users who have BOTH an MCC-linked manager row AND
+    // standalone client accounts — the MCC query returned just the
+    // manager (count=1), so the fallback never fired and the 11+
+    // standalone accounts were invisible.
+    //
+    //   - MCC path:  rich status data (ENABLED/SUSPENDED/CANCELED/CLOSED)
+    //                — preferred when both paths return the same ID.
+    //   - Standalone path:  per-account fetchCustomerDetails. Cancelled/
+    //                inaccessible accounts naturally drop because the
+    //                query returns null.
+    //
+    // Each path's failure is logged + isolated via .catch so a transient
+    // SDK error on one path doesn't blank the whole result.
+    const [mccResults, accessibleIds] = await Promise.all([
+      getEnrichedCustomerClients(credential.refresh_token).catch((err) => {
         console.error(
-          "[discover-debug] listAccessibleCustomers threw:",
+          "[discover] MCC query failed:",
           err instanceof Error ? err.message : "unknown"
         );
-        standaloneIds = [];
-      }
+        return [] as AccessibleCustomerDetails[];
+      }),
+      getAccessibleCustomers(credential.refresh_token).catch((err) => {
+        console.error(
+          "[discover] listAccessibleCustomers failed:",
+          err instanceof Error ? err.message : "unknown"
+        );
+        return [] as string[];
+      }),
+    ]);
 
-      const enrichedStandalone = await Promise.all(
-        standaloneIds.map(
+    // IDs already covered by the MCC path keep that path's enrichment
+    // (richer status). Only run per-account queries for IDs NOT in MCC.
+    const mccIds = new Set(mccResults.map((r) => r.id));
+    const standaloneOnlyIds = accessibleIds.filter((id) => !mccIds.has(id));
+
+    const enrichedStandalone = (
+      await Promise.all(
+        standaloneOnlyIds.map(
           async (id): Promise<AccessibleCustomerDetails | null> => {
             try {
               const details = await fetchCustomerDetails(
                 id,
                 credential.refresh_token
               );
-              if (!details) {
-                console.log(
-                  `[discover-debug] fetchCustomerDetails returned null for ${id}`
-                );
-                return null;
-              }
+              if (!details) return null;
               return {
                 id,
                 descriptive_name: details.descriptive_name,
                 currency_code: details.currency_code,
                 time_zone: details.time_zone,
-                // Standalone path can't fetch status directly. If details
-                // came back, the account is queryable → assume ENABLED.
-                // Cancelled/closed accounts fail the details query and
-                // get filtered above by the `if (!details) return null`.
+                // Standalone path can't fetch status directly. If
+                // details came back, the account is queryable → assume
+                // ENABLED. Cancelled/closed accounts fail the details
+                // query and get filtered above by the null guard.
                 status: "ENABLED",
                 manager: details.is_manager,
                 test_account: false,
               };
             } catch (err) {
               console.error(
-                `[discover-debug] fetchCustomerDetails threw for ${id}:`,
+                `[discover] fetchCustomerDetails threw for ${id}:`,
                 err instanceof Error ? err.message : "unknown"
               );
               return null;
             }
           }
         )
-      );
+      )
+    ).filter((acc): acc is AccessibleCustomerDetails => acc !== null);
 
-      console.log("[discover-debug] standalone enrichment result:", {
-        total: enrichedStandalone.length,
-        nonNull: enrichedStandalone.filter(Boolean).length,
-      });
-
-      enrichedAccounts = enrichedStandalone.filter(
-        (acc): acc is AccessibleCustomerDetails => acc !== null
-      );
-    }
+    const enrichedAccounts: AccessibleCustomerDetails[] = [
+      ...mccResults,
+      ...enrichedStandalone,
+    ];
 
     // Filter to usable statuses: ENABLED, SUSPENDED, and unknown
     // (rare edge case where the SDK returns null status).
