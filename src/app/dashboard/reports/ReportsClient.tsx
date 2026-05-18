@@ -1497,8 +1497,8 @@ export default function ReportsClient({
         const src = (ins.currency as Currency) || "USD";
         return {
           spend: acc.spend + convertCurrency(ins.spend, src, currency),
-          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
-          purchases: acc.purchases + ins.purchases,
+          revenue: acc.revenue + convertCurrency(ins.revenue ?? 0, src, currency),
+          purchases: acc.purchases + (ins.purchases ?? 0),
         };
       },
       { spend: 0, revenue: 0, purchases: 0 }
@@ -1509,8 +1509,8 @@ export default function ReportsClient({
         const c = ins.currency as string;
         if (!acc[c]) acc[c] = { spend: 0, revenue: 0, purchases: 0 };
         acc[c].spend += ins.spend;
-        acc[c].revenue += ins.revenue;
-        acc[c].purchases += ins.purchases;
+        acc[c].revenue += ins.revenue ?? 0;
+        acc[c].purchases += ins.purchases ?? 0;
         return acc;
       },
       {} as Record<string, { spend: number; revenue: number; purchases: number }>
@@ -1553,8 +1553,8 @@ export default function ReportsClient({
         const src = (ins.currency as Currency) || "USD";
         return {
           spend: acc.spend + convertCurrency(ins.spend, src, currency),
-          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
-          purchases: acc.purchases + ins.purchases,
+          revenue: acc.revenue + convertCurrency(ins.revenue ?? 0, src, currency),
+          purchases: acc.purchases + (ins.purchases ?? 0),
         };
       },
       { spend: 0, revenue: 0, purchases: 0 }
@@ -1583,7 +1583,7 @@ export default function ReportsClient({
 
       const src = (c as Currency) || "USD";
       const sp = convertCurrency(insight.spend, src, currency);
-      const rv = convertCurrency(insight.revenue, src, currency);
+      const rv = convertCurrency(insight.revenue ?? 0, src, currency);
 
       const existing = byDate.get(insight.dateStart);
       if (existing) {
@@ -1633,8 +1633,8 @@ export default function ReportsClient({
         const src = (ins.currency as Currency) || "USD";
         return {
           spend: acc.spend + convertCurrency(ins.spend, src, currency),
-          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
-          purchases: acc.purchases + ins.purchases,
+          revenue: acc.revenue + convertCurrency(ins.revenue ?? 0, src, currency),
+          purchases: acc.purchases + (ins.purchases ?? 0),
         };
       },
       { spend: 0, revenue: 0, purchases: 0 }
@@ -1659,7 +1659,7 @@ export default function ReportsClient({
 
       const src = (c as Currency) || "USD";
       const sp = convertCurrency(insight.spend, src, currency);
-      const rv = convertCurrency(insight.revenue, src, currency);
+      const rv = convertCurrency(insight.revenue ?? 0, src, currency);
 
       const existing = byDate.get(insight.dateStart);
       if (existing) {
@@ -1702,8 +1702,8 @@ export default function ReportsClient({
         const src = (ins.currency as Currency) || "USD";
         return {
           spend: acc.spend + convertCurrency(ins.spend, src, currency),
-          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
-          purchases: acc.purchases + ins.purchases,
+          revenue: acc.revenue + convertCurrency(ins.revenue ?? 0, src, currency),
+          purchases: acc.purchases + (ins.purchases ?? 0),
         };
       },
       { spend: 0, revenue: 0, purchases: 0 }
@@ -1728,7 +1728,7 @@ export default function ReportsClient({
 
       const src = (c as Currency) || "USD";
       const sp = convertCurrency(insight.spend, src, currency);
-      const rv = convertCurrency(insight.revenue, src, currency);
+      const rv = convertCurrency(insight.revenue ?? 0, src, currency);
 
       const existing = byDate.get(insight.dateStart);
       if (existing) {
@@ -1800,8 +1800,8 @@ export default function ReportsClient({
 
       const src = (c as Currency) || "USD";
       row.spend += convertCurrency(insight.spend, src, currency);
-      row.revenue += convertCurrency(insight.revenue, src, currency);
-      row.conversions += insight.purchases;
+      row.revenue += convertCurrency(insight.revenue ?? 0, src, currency);
+      row.conversions += insight.purchases ?? 0;
     });
 
     byAccount.forEach((row) => {
@@ -2535,31 +2535,45 @@ export default function ReportsClient({
                                   الإيرادات
                                 </p>
                                 <p className="text-sm font-semibold text-gray-900">
-                                  {formatAndConvert(
-                                    insight.revenue,
-                                    accountCurrency,
-                                    currency
-                                  )}
+                                  {insight.revenue !== null
+                                    ? formatAndConvert(
+                                        insight.revenue,
+                                        accountCurrency,
+                                        currency
+                                      )
+                                    : (
+                                      <span className="text-gray-400">—</span>
+                                    )}
                                 </p>
                               </div>
                               <div>
                                 <p className="text-xs text-gray-500 mb-0.5">
                                   ROAS
                                 </p>
-                                <p
-                                  className={`text-sm font-semibold ${getROASColor(
-                                    insight.roas
-                                  )}`}
-                                >
-                                  {insight.roas.toFixed(2)}x
-                                </p>
+                                {insight.roas !== null ? (
+                                  <p
+                                    className={`text-sm font-semibold ${getROASColor(
+                                      insight.roas
+                                    )}`}
+                                  >
+                                    {insight.roas.toFixed(2)}x
+                                  </p>
+                                ) : (
+                                  <p className="text-sm font-semibold text-gray-400">
+                                    —
+                                  </p>
+                                )}
                               </div>
                               <div>
                                 <p className="text-xs text-gray-500 mb-0.5">
                                   المبيعات
                                 </p>
                                 <p className="text-sm font-semibold text-gray-900">
-                                  {insight.purchases.toLocaleString("en-US")}
+                                  {insight.purchases !== null
+                                    ? insight.purchases.toLocaleString("en-US")
+                                    : (
+                                      <span className="text-gray-400">—</span>
+                                    )}
                                 </p>
                               </div>
                               <div>
@@ -2677,21 +2691,35 @@ export default function ReportsClient({
                                   )}
                                 </td>
                                 <td className="py-3 px-2 text-gray-900 font-medium">
-                                  {formatAndConvert(
-                                    insight.revenue,
-                                    accountCurrency,
-                                    currency
-                                  )}
+                                  {insight.revenue !== null
+                                    ? formatAndConvert(
+                                        insight.revenue,
+                                        accountCurrency,
+                                        currency
+                                      )
+                                    : (
+                                      <span className="text-gray-400">—</span>
+                                    )}
                                 </td>
-                                <td
-                                  className={`py-3 px-2 font-semibold ${getROASColor(
-                                    insight.roas
-                                  )}`}
-                                >
-                                  {insight.roas.toFixed(2)}x
-                                </td>
+                                {insight.roas !== null ? (
+                                  <td
+                                    className={`py-3 px-2 font-semibold ${getROASColor(
+                                      insight.roas
+                                    )}`}
+                                  >
+                                    {insight.roas.toFixed(2)}x
+                                  </td>
+                                ) : (
+                                  <td className="py-3 px-2 font-semibold text-gray-400">
+                                    —
+                                  </td>
+                                )}
                                 <td className="py-3 px-2 text-gray-700">
-                                  {insight.purchases.toLocaleString("en-US")}
+                                  {insight.purchases !== null
+                                    ? insight.purchases.toLocaleString("en-US")
+                                    : (
+                                      <span className="text-gray-400">—</span>
+                                    )}
                                 </td>
                                 <td className="py-3 px-2 text-gray-700">
                                   {formatAndConvert(

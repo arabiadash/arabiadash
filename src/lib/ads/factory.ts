@@ -3,6 +3,7 @@ import { MetaAdapter } from "./providers/meta";
 import { GoogleAdsAdapter } from "./providers/google";
 import type { AdProviderAdapter } from "./types";
 import type { AdProvider } from "./cache";
+import { getPurchaseActionIds } from "@/lib/google-ads/conversion-actions";
 
 /**
  * Get the user's adapter for a specific ad provider, optionally scoped to
@@ -84,12 +85,30 @@ export async function getAdapterForProvider(
         timezone: metadata.timezone_name,
       });
 
-    case "google":
+    case "google": {
       // For Google, the `access_token` column holds the long-lived
       // refresh_token (the column name is provider-agnostic). The
       // login_customer_id (MCC) is only passed for accounts linked under
       // our manager; standalone accounts have manager_customer_id = null
       // in metadata, which we collapse to undefined here.
+      //
+      // Pre-load the purchase action IDs from the conversion_actions
+      // cache. The adapter uses this set to filter Q2 segmented
+      // conversions down to real purchases (#15, ADR-011).
+      //
+      // - null = cache empty (sync hasn't populated this account yet).
+      //   Adapter degrades to purchases/revenue/roas = null with
+      //   hasConversionData = false.
+      // - Set<string> (possibly empty) = cache populated; if empty,
+      //   means this account has zero PURCHASE/STORE_SALE-categorized
+      //   conversion actions (rare but valid — operator may need to
+      //   curate via future override UI).
+      const purchaseActionIds = await getPurchaseActionIds(
+        supabase,
+        userId,
+        connection.account_id
+      );
+
       return new GoogleAdsAdapter(
         connection.access_token,
         connection.account_id,
@@ -98,8 +117,10 @@ export async function getAdapterForProvider(
           currency: metadata.currency,
           timezone: metadata.timezone_name,
         },
-        metadata.manager_customer_id ?? undefined
+        metadata.manager_customer_id ?? undefined,
+        purchaseActionIds
       );
+    }
 
     // Future providers:
     // case 'tiktok':

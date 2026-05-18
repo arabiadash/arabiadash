@@ -238,5 +238,8 @@ export class MetaAdapter implements AdProviderAdapter {
     costPerLead: 0, // calculate later if needed
     dateStart: insight.date_start,
     dateStop: insight.date_stop,
+    // Meta surfaces purchase counts natively via omni_purchase
+    // action_type — no cache map dependency, always authoritative.
+    hasConversionData: true,
   });
 }
