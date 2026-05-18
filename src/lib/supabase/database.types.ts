@@ -76,6 +76,63 @@ export type Database = {
           },
         ]
       }
+      connections_pending_backup_2026_05_18: {
+        Row: {
+          access_token: string | null
+          account_id: string | null
+          account_name: string | null
+          backed_up_at: string | null
+          connected_at: string | null
+          created_at: string | null
+          id: number | null
+          last_synced_at: string | null
+          metadata: Json | null
+          platform: string | null
+          scopes: string[] | null
+          status: string | null
+          token_expires_at: string | null
+          updated_at: string | null
+          user_id: string | null
+          workspace_id: number | null
+        }
+        Insert: {
+          access_token?: string | null
+          account_id?: string | null
+          account_name?: string | null
+          backed_up_at?: string | null
+          connected_at?: string | null
+          created_at?: string | null
+          id?: number | null
+          last_synced_at?: string | null
+          metadata?: Json | null
+          platform?: string | null
+          scopes?: string[] | null
+          status?: string | null
+          token_expires_at?: string | null
+          updated_at?: string | null
+          user_id?: string | null
+          workspace_id?: number | null
+        }
+        Update: {
+          access_token?: string | null
+          account_id?: string | null
+          account_name?: string | null
+          backed_up_at?: string | null
+          connected_at?: string | null
+          created_at?: string | null
+          id?: number | null
+          last_synced_at?: string | null
+          metadata?: Json | null
+          platform?: string | null
+          scopes?: string[] | null
+          status?: string | null
+          token_expires_at?: string | null
+          updated_at?: string | null
+          user_id?: string | null
+          workspace_id?: number | null
+        }
+        Relationships: []
+      }
       contact_messages: {
         Row: {
           created_at: string
@@ -142,6 +199,60 @@ export type Database = {
           provider?: string
           stale_until?: string
           user_id?: string
+        }
+        Relationships: []
+      }
+      google_conversion_actions: {
+        Row: {
+          category: number
+          category_name: string
+          conversion_action_id: string
+          counts_as_purchase: boolean
+          created_at: string
+          customer_id: string
+          id: number
+          name: string
+          primary_for_goal: boolean
+          resource_name: string
+          status: number
+          synced_at: string
+          updated_at: string
+          user_id: string
+          user_override: boolean | null
+        }
+        Insert: {
+          category: number
+          category_name: string
+          conversion_action_id: string
+          counts_as_purchase: boolean
+          created_at?: string
+          customer_id: string
+          id?: number
+          name: string
+          primary_for_goal?: boolean
+          resource_name: string
+          status: number
+          synced_at?: string
+          updated_at?: string
+          user_id: string
+          user_override?: boolean | null
+        }
+        Update: {
+          category?: number
+          category_name?: string
+          conversion_action_id?: string
+          counts_as_purchase?: boolean
+          created_at?: string
+          customer_id?: string
+          id?: number
+          name?: string
+          primary_for_goal?: boolean
+          resource_name?: string
+          status?: number
+          synced_at?: string
+          updated_at?: string
+          user_id?: string
+          user_override?: boolean | null
         }
         Relationships: []
       }

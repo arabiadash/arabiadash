@@ -106,11 +106,12 @@ Use these instead of asking the user to open dashboards or take screenshots.
 - Ad accounts from different workspaces NEVER blend in dashboard/reports.
 
 ### Connections (Approach C)
-- OAuth callbacks save new ad accounts as `status='pending'`.
-- **On re-OAuth, callbacks preserve `workspace_id`, `status`, `connected_at`, and `account_name` (provider-dependent) for existing rows.** Only `access_token` and `metadata` refresh. See ADR-006. This pattern is mandatory for all future platform callbacks (TikTok, Snapchat, Salla, Zid).
-- User manually activates each account from UI.
-- Plan limit: **3 active accounts per platform** (Meta and Google counted separately).
-- Hard-coded in `src/lib/plans.ts`. Billing tier wiring deferred to Phase 10.
+- OAuth callbacks save only the refresh token to `platform_credentials` (token isolation).
+- New accounts are inserted via `/api/{platform}/select-accounts` after user selection in the selector UI (`/dashboard/connections/{platform}/select`).
+- Plan limit: **cross-platform total** (Meta + Google + future TikTok/Snap/Salla/Zid combined).
+- Trial = 3 accounts, Growth = 10, Agency = unlimited (see `src/lib/plans.ts` `canAddMoreAccounts`).
+- `getUserTier()` stubbed to `"trial"` until Phase 10 billing.
+- Deactivate flow (PATCH `/api/ads/connections/[id]`) flips `active` → `pending`.
 
 ### API
 - Unified endpoints `/api/ads/insights` and `/api/ads/creatives` accept `?provider=meta|google`.
@@ -234,7 +235,7 @@ Feature commits MUST use branches.
 ## 10. Current state (update after major milestones)
 
 - **Latest commit on origin/main**: see `git log origin/main --oneline -1`
-- **Completed**: Phase 1-3 (backend), Phase 4.1, 4.1.5, 4.4a, 4.4b sub-phase A, 4.5
-- **In progress**: Phase 4.4b sub-phase B (workspace switcher UI)
-- **Next**: 4.4c (workspace CRUD), 4.2 (dashboard refactor), 4.3 (reports refactor), 4.6 (currency)
-- **Future**: Phase 5 (alerts), 6 (AI), 7 (TikTok), 8 (Snap), 9 (Salla/Zid), 10 (billing)
+- **Completed**: Phase 1-3 (backend), 4.1 through 4.5, 4.7 M1 + M2 (Google), 4.8 M1 (per-platform tabs), account selection pivot (PR #21, #22)
+- **In progress**: Phase 4.8 M2 (expanded metrics + tech-debt #15 fix)
+- **Next**: 4.8 M3 (conditional Revenue/ROAS), 4.8 M4 (Dashboard mirror), 4.9 (universal FX live rates)
+- **Future**: Phase 5 (alerts), 6 (AI), 7 (TikTok), 8 (Snap), 9 (Salla/Zid), 10 (billing), 11 (public launch)

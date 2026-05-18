@@ -1,11 +1,16 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import { fetchCustomerDetails } from "@/lib/google-ads/customer";
+import {
+  syncConversionActionsForCustomer,
+  type SyncResult as ConversionActionsSyncResult,
+} from "@/lib/google-ads/conversion-actions";
 
 export interface SyncResult {
   customer_id: string;
   status: "updated" | "skipped" | "failed";
   name?: string;
+  conversion_actions?: ConversionActionsSyncResult;
 }
 
 /**
@@ -88,10 +93,32 @@ export async function syncGoogleAccountsForUser(
         status: "failed",
       });
     } else {
+      // Sync conversion_actions cache — non-blocking. Failure here doesn't
+      // affect primary metadata refresh status. See ADR-011 + Phase 4.8 M2.
+      const managerId =
+        typeof mergedMetadata.manager_customer_id === "string"
+          ? mergedMetadata.manager_customer_id
+          : undefined;
+
+      const conversionActionsResult = await syncConversionActionsForCustomer(
+        adminClient,
+        userId,
+        conn.account_id,
+        conn.access_token,
+        managerId
+      );
+
+      if (conversionActionsResult.error) {
+        console.warn(
+          `[sync-accounts-logic] conversion_actions sync failed for ${conn.account_id}: ${conversionActionsResult.error}`
+        );
+      }
+
       results.push({
         customer_id: conn.account_id,
         status: "updated",
         name: details.descriptive_name ?? undefined,
+        conversion_actions: conversionActionsResult,
       });
     }
   }

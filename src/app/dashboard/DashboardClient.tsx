@@ -206,8 +206,8 @@ export default function DashboardClient({
         const src = (ins.currency as Currency) || "USD";
         return {
           spend: acc.spend + convertCurrency(ins.spend, src, currency),
-          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
-          purchases: acc.purchases + ins.purchases,
+          revenue: acc.revenue + convertCurrency(ins.revenue ?? 0, src, currency),
+          purchases: acc.purchases + (ins.purchases ?? 0),
         };
       },
       { spend: 0, revenue: 0, purchases: 0 }
@@ -218,8 +218,8 @@ export default function DashboardClient({
         const c = ins.currency as string;
         if (!acc[c]) acc[c] = { spend: 0, revenue: 0, purchases: 0 };
         acc[c].spend += ins.spend;
-        acc[c].revenue += ins.revenue;
-        acc[c].purchases += ins.purchases;
+        acc[c].revenue += ins.revenue ?? 0;
+        acc[c].purchases += ins.purchases ?? 0;
         return acc;
       },
       {} as Record<string, { spend: number; revenue: number; purchases: number }>
@@ -296,8 +296,8 @@ export default function DashboardClient({
         const src = (ins.currency as Currency) || "USD";
         return {
           spend: acc.spend + convertCurrency(ins.spend, src, currency),
-          revenue: acc.revenue + convertCurrency(ins.revenue, src, currency),
-          purchases: acc.purchases + ins.purchases,
+          revenue: acc.revenue + convertCurrency(ins.revenue ?? 0, src, currency),
+          purchases: acc.purchases + (ins.purchases ?? 0),
         };
       },
       { spend: 0, revenue: 0, purchases: 0 }
@@ -365,7 +365,7 @@ export default function DashboardClient({
 
       const src = (c as Currency) || "USD";
       const sp = convertCurrency(insight.spend, src, currency);
-      const rv = convertCurrency(insight.revenue, src, currency);
+      const rv = convertCurrency(insight.revenue ?? 0, src, currency);
 
       const existing = byDate.get(insight.dateStart);
       if (existing) {
@@ -444,7 +444,7 @@ export default function DashboardClient({
           return {
             spend: acc.spend + convertCurrency(i.spend, src, currency),
             revenue:
-              acc.revenue + convertCurrency(i.revenue, src, currency),
+              acc.revenue + convertCurrency(i.revenue ?? 0, src, currency),
           };
         },
         { spend: 0, revenue: 0 }
@@ -489,7 +489,7 @@ export default function DashboardClient({
       : undefined;
     const purchasesBadges = aggregated.isMixed
       ? aggregated.unsupportedTotals.map(
-          (u) => `+ ${u.purchases.toLocaleString("en-US")} (${u.currency})`
+          (u) => `+ ${Math.round(u.purchases).toLocaleString("en-US")} (${u.currency})`
         )
       : undefined;
 
@@ -526,7 +526,7 @@ export default function DashboardClient({
       },
       {
         label: "عدد المبيعات",
-        value: aggregated.purchases.toLocaleString("en-US"),
+        value: Math.round(aggregated.purchases).toLocaleString("en-US"),
         icon: Users,
         color: "blue",
         delta: previousSummary

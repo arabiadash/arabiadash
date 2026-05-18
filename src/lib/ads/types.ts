@@ -62,9 +62,24 @@ export interface UnifiedInsight {
   cpm: number;
 
   // Conversion metrics
-  purchases: number;
-  revenue: number;
-  roas: number; // calculated: revenue / spend
+  /**
+   * Counts of real e-commerce purchases. NULL when the platform cannot
+   * yet determine this (e.g. Google account whose conversion_action
+   * cache has not yet been populated by sync-accounts). See ADR-011
+   * and the hasConversionData flag below.
+   */
+  purchases: number | null;
+  /**
+   * Total purchase revenue. NULL under the same conditions as purchases.
+   * Filtered to purchase-action conversions on Google (#15 fix); Meta
+   * uses omni_purchase action_value natively.
+   */
+  revenue: number | null;
+  /**
+   * Return on ad spend. NULL when revenue is NULL OR when spend is 0
+   * (to avoid divide-by-zero). Computed as revenue / spend.
+   */
+  roas: number | null;
 
   // Funnel metrics (for advanced analysis)
   addToCart: number;
@@ -72,8 +87,33 @@ export interface UnifiedInsight {
   leads: number;
 
   // Cost per
-  costPerPurchase: number;
+  /**
+   * Cost per purchase. NULL when purchases is NULL OR when purchases
+   * is 0 (to avoid divide-by-zero). Computed as spend / purchases.
+   */
+  costPerPurchase: number | null;
   costPerLead: number;
+
+  // ===============================
+  // Conversion data availability
+  // ===============================
+  /**
+   * Whether the platform has populated conversion tracking data for
+   * this row. FALSE means purchases/revenue/roas/costPerPurchase will
+   * be NULL — the platform recognized the account but cannot yet
+   * resolve which conversion actions count as purchases. TRUE means
+   * the values are authoritative (may still be 0 for legitimate zero
+   * activity).
+   *
+   * Meta always sets TRUE (omni_purchase is platform-native).
+   * Google sets TRUE once google_conversion_actions sync has populated
+   * the user's purchase action IDs (see ADR-011).
+   *
+   * Consumers MUST treat undefined as false (defensive — old cache
+   * rows pre-Commit 4+5 lack this field; the 15-min fresh-TTL handles
+   * rollover within a deploy window).
+   */
+  hasConversionData: boolean;
 
   // Date range
   dateStart: string;
