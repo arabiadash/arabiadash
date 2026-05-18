@@ -7,50 +7,60 @@ import type { Database } from "@/lib/supabase/database.types";
  *
  * Source: google-ads-api SDK ConversionActionCategoryEnum (v17+).
  * Values that map to real e-commerce purchases:
- *   7  = PURCHASE
+ *   4  = PURCHASE
  *   21 = STORE_SALE (offline / brick-and-mortar attributed)
  *
  * Conservative stance per ADR-011: false negatives preferred over false
  * positives. If a user has miscategorized actions, the operator override
  * column (user_override) will be the long-term fix.
  */
-const PURCHASE_CATEGORY_INTEGERS = new Set<number>([7, 21]);
+const PURCHASE_CATEGORY_INTEGERS = new Set<number>([4, 21]);
 
 /**
  * Reverse map for category_name denormalization. Stored in DB for human
  * readability when querying directly in Supabase Studio. Adapter logic
- * uses counts_as_purchase boolean, not this string.
+ * uses the counts_as_purchase boolean column, not this string.
  *
- * If the SDK returns an integer we don't recognize, we store category_name
- * as 'UNKNOWN_<N>' rather than throwing — the row still gets cached, just
- * with counts_as_purchase = false. This is forward-compatible with future
- * SDK additions.
+ * Source: Google Ads API v17+ protobuf ConversionActionCategory enum.
+ * Note: integer 6 is reserved/deprecated in v17+ and Google does not
+ * return it for active accounts. We omit it from the map so any account
+ * returning category=6 falls through to "UNKNOWN_6" — a clear signal
+ * to investigate rather than guess.
+ *
+ * If the SDK returns an integer we don't recognize (e.g., a newer enum
+ * value introduced after the SDK version we depend on — see imaa's
+ * "YouTube follow-on views" returning 0/UNSPECIFIED with SDK v17 even
+ * though v23 defines value 24=YOUTUBE_FOLLOW_ON_VIEWS), we store
+ * category_name as "UNKNOWN_<N>" rather than throwing. The row still
+ * gets cached, just with counts_as_purchase=false. This is forward-
+ * compatible with future SDK additions.
  */
 const CATEGORY_NAMES: Record<number, string> = {
   0: "UNSPECIFIED",
   1: "UNKNOWN",
   2: "DEFAULT",
   3: "PAGE_VIEW",
-  4: "PURCHASE_LEGACY",
+  4: "PURCHASE",
   5: "SIGNUP",
-  6: "LEAD",
-  7: "PURCHASE",
-  8: "DOWNLOAD",
-  9: "ADD_TO_CART",
-  10: "BEGIN_CHECKOUT",
-  11: "SUBSCRIBE_PAID",
-  12: "PHONE_CALL_LEAD",
-  13: "IMPORTED_LEAD",
-  14: "SUBMIT_LEAD_FORM",
-  15: "BOOK_APPOINTMENT",
-  16: "REQUEST_QUOTE",
-  17: "GET_DIRECTIONS",
-  18: "OUTBOUND_CLICK",
-  19: "CONTACT",
-  20: "ENGAGEMENT",
+  // 6 = reserved/deprecated in v17+ — intentionally omitted
+  7: "DOWNLOAD",
+  8: "ADD_TO_CART",
+  9: "BEGIN_CHECKOUT",
+  10: "SUBSCRIBE_PAID",
+  11: "PHONE_CALL_LEAD",
+  12: "IMPORTED_LEAD",
+  13: "SUBMIT_LEAD_FORM",
+  14: "BOOK_APPOINTMENT",
+  15: "REQUEST_QUOTE",
+  16: "GET_DIRECTIONS",
+  17: "OUTBOUND_CLICK",
+  18: "CONTACT",
+  19: "ENGAGEMENT",
+  20: "STORE_VISIT",
   21: "STORE_SALE",
   22: "QUALIFIED_LEAD",
   23: "CONVERTED_LEAD",
+  24: "YOUTUBE_FOLLOW_ON_VIEWS",
 };
 
 function resolveCategoryName(raw: number): string {
