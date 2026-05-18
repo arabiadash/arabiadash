@@ -2,7 +2,12 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { createClient as createServerClient } from "@/lib/supabase/server";
 import type { Database } from "@/lib/supabase/database.types";
-import { getEnrichedCustomerClients } from "@/lib/google-ads/oauth";
+import {
+  getAccessibleCustomers,
+  getEnrichedCustomerClients,
+  type AccessibleCustomerDetails,
+} from "@/lib/google-ads/oauth";
+import { fetchCustomerDetails } from "@/lib/google-ads/customer";
 
 export const dynamic = "force-dynamic";
 
@@ -61,13 +66,48 @@ export async function GET() {
       );
     }
 
-    // customer_client enrichment covers MCC-linked accounts in any status
-    // (ENABLED/SUSPENDED/CANCELED/CLOSED). Standalone accounts (admin-on-
-    // account, not linked to our MCC) don't appear — covered by future
-    // iterations if user demand surfaces.
-    const enrichedAccounts = await getEnrichedCustomerClients(
-      credential.refresh_token
-    );
+    // Hybrid discovery (ADR-010 follow-up):
+    //   1) customer_client (MCC-linked accounts with rich status data —
+    //      preferred; returns ENABLED/SUSPENDED/CANCELED/CLOSED so we
+    //      can filter cancelled ones out cleanly).
+    //   2) Fallback to listAccessibleCustomers + per-account
+    //      fetchCustomerDetails for standalone account owners (the
+    //      typical Saudi market user — owns accounts directly, not via
+    //      an MCC). Cancelled/inaccessible accounts naturally drop here
+    //      because fetchCustomerDetails returns null for them.
+    let enrichedAccounts: AccessibleCustomerDetails[] =
+      await getEnrichedCustomerClients(credential.refresh_token);
+
+    if (enrichedAccounts.length === 0) {
+      const ids = await getAccessibleCustomers(credential.refresh_token);
+      const enrichedStandalone = await Promise.all(
+        ids.map(
+          async (id): Promise<AccessibleCustomerDetails | null> => {
+            const details = await fetchCustomerDetails(
+              id,
+              credential.refresh_token
+            );
+            if (!details) return null;
+            return {
+              id,
+              descriptive_name: details.descriptive_name,
+              currency_code: details.currency_code,
+              time_zone: details.time_zone,
+              // Standalone path can't fetch status directly. If details
+              // came back, the account is queryable → assume ENABLED.
+              // Cancelled/closed accounts fail the details query and
+              // get filtered above by the `if (!details) return null`.
+              status: "ENABLED",
+              manager: details.is_manager,
+              test_account: false,
+            };
+          }
+        )
+      );
+      enrichedAccounts = enrichedStandalone.filter(
+        (acc): acc is AccessibleCustomerDetails => acc !== null
+      );
+    }
 
     // Filter to usable statuses: ENABLED, SUSPENDED, and unknown
     // (rare edge case where the SDK returns null status).
