@@ -130,22 +130,34 @@ export async function refreshAccessToken(
 export async function getAccessibleCustomers(
   refreshToken: string
 ): Promise<string[]> {
-  const clientId = requireEnv("GOOGLE_ADS_CLIENT_ID");
-  const clientSecret = requireEnv("GOOGLE_ADS_CLIENT_SECRET");
-  const developerToken = requireEnv("GOOGLE_ADS_DEVELOPER_TOKEN");
+  try {
+    const clientId = requireEnv("GOOGLE_ADS_CLIENT_ID");
+    const clientSecret = requireEnv("GOOGLE_ADS_CLIENT_SECRET");
+    const developerToken = requireEnv("GOOGLE_ADS_DEVELOPER_TOKEN");
 
-  const client = new GoogleAdsApi({
-    client_id: clientId,
-    client_secret: clientSecret,
-    developer_token: developerToken,
-  });
+    const client = new GoogleAdsApi({
+      client_id: clientId,
+      client_secret: clientSecret,
+      developer_token: developerToken,
+    });
 
-  const response = await client.listAccessibleCustomers(refreshToken);
-  const resourceNames: string[] = response.resource_names ?? [];
+    const response = await client.listAccessibleCustomers(refreshToken);
+    const resourceNames: string[] = response.resource_names ?? [];
 
-  return resourceNames
-    .map((name) => name.replace(/^customers\//, ""))
-    .filter((id) => /^\d{10}$/.test(id));
+    return resourceNames
+      .map((name) => name.replace(/^customers\//, ""))
+      .filter((id) => /^\d{10}$/.test(id));
+  } catch (err) {
+    // Log at the source so callers always get a server-side trail of
+    // the underlying SDK error (the discover route's debug wrapper has
+    // its own log but logs only the .message — this gives us the type
+    // and stack context too).
+    console.error(
+      "[oauth] getAccessibleCustomers failed:",
+      err instanceof Error ? err.message : "unknown"
+    );
+    throw err;
+  }
 }
 
 export interface AccessibleCustomerDetails {

@@ -78,32 +78,72 @@ export async function GET() {
     let enrichedAccounts: AccessibleCustomerDetails[] =
       await getEnrichedCustomerClients(credential.refresh_token);
 
+    console.log("[discover-debug] MCC query result:", {
+      count: enrichedAccounts.length,
+      sample: enrichedAccounts.slice(0, 2),
+    });
+
     if (enrichedAccounts.length === 0) {
-      const ids = await getAccessibleCustomers(credential.refresh_token);
+      console.log("[discover-debug] fallback path triggered");
+
+      let standaloneIds: string[];
+      try {
+        standaloneIds = await getAccessibleCustomers(credential.refresh_token);
+        console.log("[discover-debug] listAccessibleCustomers result:", {
+          count: standaloneIds.length,
+          ids: standaloneIds.slice(0, 5),
+        });
+      } catch (err) {
+        console.error(
+          "[discover-debug] listAccessibleCustomers threw:",
+          err instanceof Error ? err.message : "unknown"
+        );
+        standaloneIds = [];
+      }
+
       const enrichedStandalone = await Promise.all(
-        ids.map(
+        standaloneIds.map(
           async (id): Promise<AccessibleCustomerDetails | null> => {
-            const details = await fetchCustomerDetails(
-              id,
-              credential.refresh_token
-            );
-            if (!details) return null;
-            return {
-              id,
-              descriptive_name: details.descriptive_name,
-              currency_code: details.currency_code,
-              time_zone: details.time_zone,
-              // Standalone path can't fetch status directly. If details
-              // came back, the account is queryable → assume ENABLED.
-              // Cancelled/closed accounts fail the details query and
-              // get filtered above by the `if (!details) return null`.
-              status: "ENABLED",
-              manager: details.is_manager,
-              test_account: false,
-            };
+            try {
+              const details = await fetchCustomerDetails(
+                id,
+                credential.refresh_token
+              );
+              if (!details) {
+                console.log(
+                  `[discover-debug] fetchCustomerDetails returned null for ${id}`
+                );
+                return null;
+              }
+              return {
+                id,
+                descriptive_name: details.descriptive_name,
+                currency_code: details.currency_code,
+                time_zone: details.time_zone,
+                // Standalone path can't fetch status directly. If details
+                // came back, the account is queryable → assume ENABLED.
+                // Cancelled/closed accounts fail the details query and
+                // get filtered above by the `if (!details) return null`.
+                status: "ENABLED",
+                manager: details.is_manager,
+                test_account: false,
+              };
+            } catch (err) {
+              console.error(
+                `[discover-debug] fetchCustomerDetails threw for ${id}:`,
+                err instanceof Error ? err.message : "unknown"
+              );
+              return null;
+            }
           }
         )
       );
+
+      console.log("[discover-debug] standalone enrichment result:", {
+        total: enrichedStandalone.length,
+        nonNull: enrichedStandalone.filter(Boolean).length,
+      });
+
       enrichedAccounts = enrichedStandalone.filter(
         (acc): acc is AccessibleCustomerDetails => acc !== null
       );
