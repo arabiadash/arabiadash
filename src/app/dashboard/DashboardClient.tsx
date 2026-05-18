@@ -489,7 +489,7 @@ export default function DashboardClient({
       : undefined;
     const purchasesBadges = aggregated.isMixed
       ? aggregated.unsupportedTotals.map(
-          (u) => `+ ${u.purchases.toLocaleString("en-US")} (${u.currency})`
+          (u) => `+ ${Math.round(u.purchases).toLocaleString("en-US")} (${u.currency})`
         )
       : undefined;
 
@@ -526,7 +526,7 @@ export default function DashboardClient({
       },
       {
         label: "عدد المبيعات",
-        value: aggregated.purchases.toLocaleString("en-US"),
+        value: Math.round(aggregated.purchases).toLocaleString("en-US"),
         icon: Users,
         color: "blue",
         delta: previousSummary

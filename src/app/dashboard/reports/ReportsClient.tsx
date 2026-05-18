@@ -1835,7 +1835,7 @@ export default function ReportsClient({
       : undefined;
     const purchasesBadges = aggregated.isMixed
       ? aggregated.unsupportedTotals.map(
-          (u) => `+ ${u.purchases.toLocaleString("en-US")} (${u.currency})`
+          (u) => `+ ${Math.round(u.purchases).toLocaleString("en-US")} (${u.currency})`
         )
       : undefined;
 
@@ -1886,7 +1886,7 @@ export default function ReportsClient({
       },
       {
         label: "عدد المبيعات*",
-        value: aggregated.purchases.toLocaleString("en-US"),
+        value: Math.round(aggregated.purchases).toLocaleString("en-US"),
         icon: Users,
         color: "blue",
         delta: previousSummary
@@ -2340,7 +2340,7 @@ export default function ReportsClient({
                           <KpiCard
                             size="mini"
                             label="مبيعات Meta"
-                            value={metaAggregated.purchases.toLocaleString("en-US")}
+                            value={Math.round(metaAggregated.purchases).toLocaleString("en-US")}
                             icon={Users}
                             color="blue"
                           />
@@ -2570,7 +2570,7 @@ export default function ReportsClient({
                                 </p>
                                 <p className="text-sm font-semibold text-gray-900">
                                   {insight.purchases !== null
-                                    ? insight.purchases.toLocaleString("en-US")
+                                    ? Math.round(insight.purchases).toLocaleString("en-US")
                                     : (
                                       <span className="text-gray-400">—</span>
                                     )}
@@ -2716,7 +2716,7 @@ export default function ReportsClient({
                                 )}
                                 <td className="py-3 px-2 text-gray-700">
                                   {insight.purchases !== null
-                                    ? insight.purchases.toLocaleString("en-US")
+                                    ? Math.round(insight.purchases).toLocaleString("en-US")
                                     : (
                                       <span className="text-gray-400">—</span>
                                     )}
@@ -2925,7 +2925,7 @@ export default function ReportsClient({
                           <KpiCard
                             size="mini"
                             label="تحويلات Google"
-                            value={googleAggregated.conversions.toLocaleString("en-US")}
+                            value={Math.round(googleAggregated.conversions).toLocaleString("en-US")}
                             icon={Users}
                             color="blue"
                           />
@@ -3010,7 +3010,7 @@ export default function ReportsClient({
                                       {row.roas.toFixed(2)}x
                                     </td>
                                     <td className="py-2 px-2 text-gray-700">
-                                      {row.conversions.toLocaleString("en-US")}
+                                      {Math.round(row.conversions).toLocaleString("en-US")}
                                     </td>
                                   </tr>
                                 ))}
