@@ -2,7 +2,12 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { createClient as createServerClient } from "@/lib/supabase/server";
 import type { Database } from "@/lib/supabase/database.types";
-import { getEnrichedCustomerClients } from "@/lib/google-ads/oauth";
+import {
+  getAccessibleCustomers,
+  getEnrichedCustomerClients,
+  type AccessibleCustomerDetails,
+} from "@/lib/google-ads/oauth";
+import { fetchCustomerDetails } from "@/lib/google-ads/customer";
 
 export const dynamic = "force-dynamic";
 
@@ -61,13 +66,82 @@ export async function GET() {
       );
     }
 
-    // customer_client enrichment covers MCC-linked accounts in any status
-    // (ENABLED/SUSPENDED/CANCELED/CLOSED). Standalone accounts (admin-on-
-    // account, not linked to our MCC) don't appear — covered by future
-    // iterations if user demand surfaces.
-    const enrichedAccounts = await getEnrichedCustomerClients(
-      credential.refresh_token
-    );
+    // Hybrid discovery (ADR-010 follow-up): run BOTH paths in parallel
+    // and merge by ID. Preferring the if-empty fallback (PR #22 v1)
+    // missed users who have BOTH an MCC-linked manager row AND
+    // standalone client accounts — the MCC query returned just the
+    // manager (count=1), so the fallback never fired and the 11+
+    // standalone accounts were invisible.
+    //
+    //   - MCC path:  rich status data (ENABLED/SUSPENDED/CANCELED/CLOSED)
+    //                — preferred when both paths return the same ID.
+    //   - Standalone path:  per-account fetchCustomerDetails. Cancelled/
+    //                inaccessible accounts naturally drop because the
+    //                query returns null.
+    //
+    // Each path's failure is logged + isolated via .catch so a transient
+    // SDK error on one path doesn't blank the whole result.
+    const [mccResults, accessibleIds] = await Promise.all([
+      getEnrichedCustomerClients(credential.refresh_token).catch((err) => {
+        console.error(
+          "[discover] MCC query failed:",
+          err instanceof Error ? err.message : "unknown"
+        );
+        return [] as AccessibleCustomerDetails[];
+      }),
+      getAccessibleCustomers(credential.refresh_token).catch((err) => {
+        console.error(
+          "[discover] listAccessibleCustomers failed:",
+          err instanceof Error ? err.message : "unknown"
+        );
+        return [] as string[];
+      }),
+    ]);
+
+    // IDs already covered by the MCC path keep that path's enrichment
+    // (richer status). Only run per-account queries for IDs NOT in MCC.
+    const mccIds = new Set(mccResults.map((r) => r.id));
+    const standaloneOnlyIds = accessibleIds.filter((id) => !mccIds.has(id));
+
+    const enrichedStandalone = (
+      await Promise.all(
+        standaloneOnlyIds.map(
+          async (id): Promise<AccessibleCustomerDetails | null> => {
+            try {
+              const details = await fetchCustomerDetails(
+                id,
+                credential.refresh_token
+              );
+              if (!details) return null;
+              return {
+                id,
+                descriptive_name: details.descriptive_name,
+                currency_code: details.currency_code,
+                time_zone: details.time_zone,
+                // Standalone path can't fetch status directly. If
+                // details came back, the account is queryable → assume
+                // ENABLED. Cancelled/closed accounts fail the details
+                // query and get filtered above by the null guard.
+                status: "ENABLED",
+                manager: details.is_manager,
+                test_account: false,
+              };
+            } catch (err) {
+              console.error(
+                `[discover] fetchCustomerDetails threw for ${id}:`,
+                err instanceof Error ? err.message : "unknown"
+              );
+              return null;
+            }
+          }
+        )
+      )
+    ).filter((acc): acc is AccessibleCustomerDetails => acc !== null);
+
+    const enrichedAccounts: AccessibleCustomerDetails[] = [
+      ...mccResults,
+      ...enrichedStandalone,
+    ];
 
     // Filter to usable statuses: ENABLED, SUSPENDED, and unknown
     // (rare edge case where the SDK returns null status).

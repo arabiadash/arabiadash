@@ -158,6 +158,28 @@ export interface AccessibleCustomerDetails {
   test_account: boolean;
 }
 
+// Google Ads CustomerStatus enum mapping.
+//
+// The google-ads-api SDK returns numeric enum values for status fields,
+// not the string names we'd expect from documentation. PR #22 debug logs
+// surfaced this: an ENABLED account (status code 2) was reaching the UI
+// filter as the integer 2, never matching the string "ENABLED" — so the
+// MCC's own manager row was being silently filtered out.
+//
+// Mapping reference:
+//   https://developers.google.com/google-ads/api/reference/rpc/v17/CustomerStatusEnum.CustomerStatus
+const CUSTOMER_STATUS_MAP: Record<
+  number,
+  AccessibleCustomerDetails["status"]
+> = {
+  0: "UNKNOWN", // UNSPECIFIED
+  1: "UNKNOWN", // UNKNOWN
+  2: "ENABLED",
+  3: "CANCELED",
+  4: "SUSPENDED",
+  5: "CLOSED",
+};
+
 /**
  * Enriched account discovery via customer_client GAQL query from our
  * MCC context. Returns name + status + currency + timezone + manager
@@ -220,10 +242,15 @@ export async function getEnrichedCustomerClients(
           descriptive_name: client.descriptive_name ?? null,
           currency_code: client.currency_code ?? null,
           time_zone: client.time_zone ?? null,
-          // google-ads-api v23 returns the enum as a string name
-          // ("ENABLED" / "SUSPENDED" / "CANCELED" / "CLOSED" / "UNKNOWN").
+          // google-ads-api v23 returns the enum as a NUMERIC value
+          // (despite docs implying strings). Map via CUSTOMER_STATUS_MAP.
+          // Defensive: if a future SDK version starts returning strings,
+          // pass them through; null when status is undefined.
           status:
-            (client.status as AccessibleCustomerDetails["status"]) ?? null,
+            typeof client.status === "number"
+              ? (CUSTOMER_STATUS_MAP[client.status] ?? "UNKNOWN")
+              : ((client.status as AccessibleCustomerDetails["status"]) ??
+                null),
           manager: Boolean(client.manager),
           test_account: Boolean(client.test_account),
         };

@@ -75,16 +75,13 @@ GRANT USAGE ON SEQUENCE platform_credentials_id_seq TO service_role;
 
 This caused the discover endpoint to fail with `permission denied for table platform_credentials` (Postgres error 42501) when admin clients tried to read tokens. Future schema migrations creating new tables MUST include these GRANTs.
 
-## Hybrid discovery follow-up needed
+## Hybrid discovery (resolved)
 
-Initial implementation uses `customer_client` GAQL query (MCC-scoped) for Google account discovery. This works for agency users whose accounts are linked under our MCC, but returns 0 results for standalone account owners (the user owns accounts directly, not via an MCC).
+Initial implementation used `customer_client` GAQL query (MCC-scoped) for Google account discovery only. This worked for agency users whose accounts are linked under our MCC, but returned 0 results for standalone account owners (the user owns accounts directly, not via an MCC).
 
-For Saudi/Gulf market reality (mostly brand-owners with standalone Google Ads accounts, not agencies with MCCs), this is a blocking gap. Follow-up PR will add hybrid discovery:
+For Saudi/Gulf market reality (mostly brand-owners with standalone Google Ads accounts, not agencies with MCCs), this was a blocking gap.
 
-1. Try customer_client query first (MCC-linked accounts with full enrichment)
-2. Fallback to listAccessibleCustomers (standalone accounts) + per-account fetchCustomerDetails for name/currency/timezone
-
-Tracked as follow-up. Initial PR #21 establishes the selection architecture; the discovery layer evolves in PR #22.
+**Resolved in PR #22 (commit `8540553`)**: `/api/google-ads/discover` now uses hybrid discovery — customer_client first, falls back to listAccessibleCustomers + per-account fetchCustomerDetails when MCC query is empty. Standalone account owners (majority of Saudi market) now see their accounts in the selector. Cancelled/inaccessible accounts drop naturally because `fetchCustomerDetails` returns null for them; the standalone path assumes ENABLED status for surviving rows since the API only allows queries on queryable accounts.
 
 ## Consequences
 
