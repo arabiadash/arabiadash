@@ -7,13 +7,15 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-"check": "tsc --noEmit",
+    "check": "tsc --noEmit",
     "verify": "npm run check && npm run build",
-    "db:types": "supabase gen types typescript --project-id fkljjwfhmmletytvevbp --schema public > src/lib/supabase/database.types.ts"
+    "db:types": "supabase gen types typescript --project-id fkljjwfhmmletytvevbp --schema public > src/lib/supabase/database.types.ts",
+    "analyze": "next experimental-analyze --serve"
   },
   "dependencies": {
     "@supabase/ssr": "^0.10.2",
     "@supabase/supabase-js": "^2.105.1",
+    "@vercel/speed-insights": "^2.0.0",
     "framer-motion": "^12.38.0",
     "google-ads-api": "^23.0.0",
     "lucide-react": "^1.14.0",

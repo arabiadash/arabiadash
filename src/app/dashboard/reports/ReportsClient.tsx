@@ -2157,11 +2157,7 @@ export default function ReportsClient({
                       </p>
                     </div>
                   ) : chartLoading ? (
-                    <div className="h-full flex items-center justify-center">
-                      <div className="animate-pulse text-gray-400 text-sm">
-                        جاري تحميل البيانات...
-                      </div>
-                    </div>
+                    <div className="h-full w-full animate-pulse bg-gradient-to-b from-gray-100 to-gray-50 rounded" />
                   ) : displayChartData.length === 0 ? (
                     <div className="h-full flex items-center justify-center">
                       <p className="text-gray-500 text-sm">
