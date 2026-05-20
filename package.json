@@ -10,7 +10,7 @@
     "check": "tsc --noEmit",
     "verify": "npm run check && npm run build",
     "db:types": "supabase gen types typescript --project-id fkljjwfhmmletytvevbp --schema public > src/lib/supabase/database.types.ts",
-    "analyze": "next experimental-analyze --serve"
+    "analyze": "next experimental-analyze"
   },
   "dependencies": {
     "@supabase/ssr": "^0.10.2",
