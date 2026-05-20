@@ -51,3 +51,4 @@ supabase/.branches/
 
 # Scratch investigation files (per-phase CP1 records, not for history)
 investigation-*.md
+perf-measurements/
