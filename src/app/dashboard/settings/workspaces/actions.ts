@@ -43,15 +43,6 @@ export async function createWorkspace(
   if (!name) return { error: "الاسم مطلوب" };
   if (name.length > 50) return { error: "الاسم يجب أن لا يتجاوز 50 حرفاً" };
 
-  // Template selection (Phase 4.8 M3). Defaults to 'ecommerce' to preserve
-  // existing UX for users who don't pick explicitly. See ADR-012.
-  const rawTemplate = formData.get("template");
-  const template =
-    typeof rawTemplate === "string" && rawTemplate ? rawTemplate : "ecommerce";
-  if (template !== "ecommerce" && template !== "reports") {
-    return { error: "قالب غير صالح" };
-  }
-
   // Plan-limit check. WORKSPACE_LIMIT is currently Infinity; Phase 10 swaps
   // it for a per-plan resolver and this guard starts blocking real users.
   const existing = await getUserWorkspaces(supabase, user.id);
@@ -67,7 +58,6 @@ export async function createWorkspace(
       user_id: user.id,
       name,
       is_default: false,
-      template,
     })
     .select("id")
     .single();
@@ -293,62 +283,6 @@ export async function setWorkspaceAsDefault(
 
   console.log(
     `[workspace.set_default] user=${user.id} workspace=${id}`
-  );
-
-  revalidateAfterMutation();
-  return { ok: true };
-}
-
-// ---------------------------------------------------------------------------
-// updateWorkspaceTemplate (Phase 4.8 M3)
-// ---------------------------------------------------------------------------
-// Direct-args signature (mirrors renameWorkspace). Called from the edit page
-// via useTransition. Validates template value, enforces ownership, no-ops
-// when unchanged. See ADR-012 for design rationale.
-
-export async function updateWorkspaceTemplate(
-  id: number,
-  template: "ecommerce" | "reports"
-): Promise<ActionResult> {
-  const supabase = await createServerClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) return { error: "غير مصرح" };
-
-  if (template !== "ecommerce" && template !== "reports") {
-    return { error: "قالب غير صالح" };
-  }
-
-  // Ownership + non-archived check, also captures the previous value for the
-  // audit log and the no-op short-circuit.
-  const { data: existing } = await supabase
-    .from("workspaces")
-    .select("template")
-    .eq("id", id)
-    .eq("user_id", user.id)
-    .is("archived_at", null)
-    .maybeSingle();
-
-  if (!existing) return { error: "Workspace غير موجود" };
-  if (existing.template === template) return { ok: true };
-
-  const { error } = await supabase
-    .from("workspaces")
-    .update({ template })
-    .eq("id", id)
-    .eq("user_id", user.id);
-
-  if (error) {
-    console.error("[workspaces/updateWorkspaceTemplate] DB error:", {
-      message: error.message,
-      code: error.code,
-    });
-    return { error: "تعذّر تحديث القالب" };
-  }
-
-  console.log(
-    `[workspace.template_updated] user=${user.id} workspace=${id} from="${existing.template}" to="${template}"`
   );
 
   revalidateAfterMutation();
