@@ -43,7 +43,7 @@ export default async function EditWorkspacePage({
   const [{ data: workspace }, workspaces, activeWorkspace] = await Promise.all([
     supabase
       .from("workspaces")
-      .select("id, name, template, archived_at")
+      .select("id, name, archived_at")
       .eq("id", id)
       .maybeSingle(),
     getUserWorkspaces(supabase, user.id),
@@ -52,17 +52,10 @@ export default async function EditWorkspacePage({
 
   if (!workspace || workspace.archived_at !== null) notFound();
 
-  // DB CHECK constraint guarantees template ∈ {"ecommerce","reports"}, but
-  // the generated type widens it to string. Narrow defensively so any
-  // unexpected value (e.g. mid-migration row) falls back to ecommerce.
-  const initialTemplate: "ecommerce" | "reports" =
-    workspace.template === "reports" ? "reports" : "ecommerce";
-
   return (
     <EditWorkspaceForm
       workspaceId={workspace.id}
       initialName={workspace.name}
-      initialTemplate={initialTemplate}
       fullName={fullName}
       email={email}
       workspaces={workspaces}

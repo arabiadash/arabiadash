@@ -19,6 +19,9 @@ import {
   Target,
   Users,
   Percent,
+  Eye,
+  MousePointerClick,
+  Coins,
   AlertCircle,
   ChevronUp,
   ChevronDown,
@@ -1499,9 +1502,11 @@ export default function ReportsClient({
           spend: acc.spend + convertCurrency(ins.spend, src, currency),
           revenue: acc.revenue + convertCurrency(ins.revenue ?? 0, src, currency),
           purchases: acc.purchases + (ins.purchases ?? 0),
+          impressions: acc.impressions + ins.impressions,
+          clicks: acc.clicks + ins.clicks,
         };
       },
-      { spend: 0, revenue: 0, purchases: 0 }
+      { spend: 0, revenue: 0, purchases: 0, impressions: 0, clicks: 0 }
     );
 
     const unsupportedByCurrency = unsupportedRows.reduce(
@@ -1528,6 +1533,17 @@ export default function ReportsClient({
       roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
       purchases: totals.purchases,
       aov: totals.purchases > 0 ? totals.revenue / totals.purchases : 0,
+      impressions: totals.impressions,
+      clicks: totals.clicks,
+      ctr:
+        totals.impressions > 0
+          ? (totals.clicks / totals.impressions) * 100
+          : 0,
+      cpc: totals.clicks > 0 ? totals.spend / totals.clicks : 0,
+      cpm:
+        totals.impressions > 0
+          ? (totals.spend / totals.impressions) * 1000
+          : 0,
       isMixed: unsupportedTotals.length > 0,
       unsupportedTotals,
     };
@@ -1913,6 +1929,46 @@ export default function ReportsClient({
     ];
   }, [aggregated, currency, previousSummary]);
 
+  // Secondary 5 — engagement metrics, mini-size cards
+  const secondaryKpiCards = useMemo(() => {
+    if (!aggregated) return [];
+    return [
+      {
+        label: "الظهور (Impressions)",
+        value: Math.round(aggregated.impressions).toLocaleString("en-US"),
+        icon: Eye,
+        color: "pink" as const,
+      },
+      {
+        label: "النقرات",
+        value: Math.round(aggregated.clicks).toLocaleString("en-US"),
+        icon: MousePointerClick,
+        color: "blue" as const,
+      },
+      {
+        label: "نسبة النقر (CTR)",
+        value: `${aggregated.ctr.toFixed(2)}%`,
+        icon: Percent,
+        color: "green" as const,
+        footnote: "نسبة النقرات إلى الظهور",
+      },
+      {
+        label: "تكلفة النقرة (CPC)",
+        value: formatCurrencyWithSymbol(aggregated.cpc, currency),
+        icon: Coins,
+        color: "purple" as const,
+        footnote: "متوسط تكلفة كل نقرة",
+      },
+      {
+        label: "تكلفة الألف ظهور (CPM)",
+        value: formatCurrencyWithSymbol(aggregated.cpm, currency),
+        icon: TrendingUp,
+        color: "indigo" as const,
+        footnote: "تكلفة كل 1000 ظهور",
+      },
+    ];
+  }, [aggregated, currency]);
+
   const handleExport = (format: "pdf" | "excel" | "email") => {
     alert(
       format === "pdf"
@@ -2135,6 +2191,23 @@ export default function ReportsClient({
                       />
                     ))}
               </div>
+
+              {/* Secondary 5 — engagement metrics (mini) */}
+              {aggregated && (
+                <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-6">
+                  {secondaryKpiCards.map((stat, i) => (
+                    <KpiCard
+                      key={`secondary-${i}`}
+                      label={stat.label}
+                      value={stat.value}
+                      icon={stat.icon}
+                      color={stat.color}
+                      footnote={stat.footnote}
+                      size="mini"
+                    />
+                  ))}
+                </div>
+              )}
 
               {/* Main Chart - Spend vs Revenue */}
               <div className="bg-white border border-gray-100 rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
