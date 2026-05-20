@@ -390,7 +390,7 @@ export default function SettingsClient({
                         href={`/dashboard/settings/workspaces/${w.id}/edit`}
                         className="text-sm text-gray-600 hover:text-indigo-600 px-3 py-1.5 rounded hover:bg-gray-50 transition"
                       >
-                        إعادة تسمية
+                        تعديل
                       </Link>
                       {!w.is_default && (
                         <button
