@@ -7,7 +7,7 @@ import type { Database } from "@/lib/supabase/database.types";
  */
 export type Workspace = Pick<
   Database["public"]["Tables"]["workspaces"]["Row"],
-  "id" | "name" | "icon" | "is_default"
+  "id" | "name" | "icon" | "is_default" | "template"
 >;
 
 /**
@@ -76,7 +76,7 @@ export async function getUserWorkspaces(
 ): Promise<Workspace[]> {
   const { data, error } = await supabase
     .from("workspaces")
-    .select("id, name, icon, is_default")
+    .select("id, name, icon, is_default, template")
     .eq("user_id", userId)
     .is("archived_at", null);
 
@@ -186,7 +186,7 @@ export async function createDefaultWorkspace(
       name: "My Workspace",
       is_default: true,
     })
-    .select("id, name, icon, is_default")
+    .select("id, name, icon, is_default, template")
     .single();
 
   if (error || !data) {

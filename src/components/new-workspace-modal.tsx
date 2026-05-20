@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useRef } from "react";
+import { useActionState, useEffect, useRef, useState } from "react";
 import { Loader2, X } from "lucide-react";
 import { createWorkspace } from "@/app/dashboard/settings/workspaces/actions";
 
@@ -25,6 +25,9 @@ export default function NewWorkspaceModal({
   onClose,
 }: NewWorkspaceModalProps) {
   const [state, formAction, isPending] = useActionState(createWorkspace, null);
+  const [template, setTemplate] = useState<"ecommerce" | "reports">(
+    "ecommerce"
+  );
   const inputRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const handledSuccessRef = useRef(false);
@@ -123,6 +126,53 @@ export default function NewWorkspaceModal({
               placeholder="مثلاً: العميل ABC أو العلامة التجارية X"
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:opacity-50"
             />
+          </div>
+
+          {/* Template selector (Phase 4.8 M3) */}
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-gray-700">
+              قالب الـ workspace
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setTemplate("ecommerce")}
+                disabled={isPending}
+                className={`p-3 rounded-lg border-2 text-right transition disabled:opacity-50 ${
+                  template === "ecommerce"
+                    ? "border-indigo-600 bg-indigo-50"
+                    : "border-gray-200 hover:border-gray-300"
+                }`}
+              >
+                <div className="text-2xl mb-1">🛒</div>
+                <div className="text-sm font-semibold text-gray-900">
+                  متاجر إلكترونية
+                </div>
+                <div className="text-xs text-gray-500 mt-1">
+                  إيرادات + ROAS + مبيعات
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setTemplate("reports")}
+                disabled={isPending}
+                className={`p-3 rounded-lg border-2 text-right transition disabled:opacity-50 ${
+                  template === "reports"
+                    ? "border-indigo-600 bg-indigo-50"
+                    : "border-gray-200 hover:border-gray-300"
+                }`}
+              >
+                <div className="text-2xl mb-1">📊</div>
+                <div className="text-sm font-semibold text-gray-900">
+                  تقارير إعلانية
+                </div>
+                <div className="text-xs text-gray-500 mt-1">
+                  ظهور + نقرات + CTR
+                </div>
+              </button>
+            </div>
+            {/* Hidden input so the selected value reaches the form action */}
+            <input type="hidden" name="template" value={template} />
           </div>
 
           {errorMessage && (

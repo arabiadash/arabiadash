@@ -6,11 +6,15 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, Bell, Loader2, Menu } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
 import type { Workspace } from "@/lib/workspaces";
-import { renameWorkspace } from "@/app/dashboard/settings/workspaces/actions";
+import {
+  renameWorkspace,
+  updateWorkspaceTemplate,
+} from "@/app/dashboard/settings/workspaces/actions";
 
 interface EditWorkspaceFormProps {
   workspaceId: number;
   initialName: string;
+  initialTemplate: "ecommerce" | "reports";
   fullName: string;
   email: string;
   workspaces: Workspace[];
@@ -20,6 +24,7 @@ interface EditWorkspaceFormProps {
 export default function EditWorkspaceForm({
   workspaceId,
   initialName,
+  initialTemplate,
   fullName,
   email,
   workspaces,
@@ -27,29 +32,46 @@ export default function EditWorkspaceForm({
 }: EditWorkspaceFormProps) {
   const router = useRouter();
   const [name, setName] = useState(initialName);
+  const [template, setTemplate] = useState<"ecommerce" | "reports">(
+    initialTemplate
+  );
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const initial = fullName.charAt(0).toUpperCase();
 
-  // Save is enabled only when the trimmed name has actually changed AND is
-  // non-empty. The server enforces the same rules — this is purely UX so
-  // a no-op submit doesn't burn a round-trip and a misleading "saved" flash.
+  // Save is enabled when name is non-empty AND something has changed (name or
+  // template). Server enforces the same rules — this is purely UX so a no-op
+  // submit doesn't burn a round-trip and a misleading "saved" flash.
   const trimmedName = name.trim();
-  const isDirty = trimmedName.length > 0 && trimmedName !== initialName.trim();
+  const nameValid = trimmedName.length > 0;
+  const nameChanged = nameValid && trimmedName !== initialName.trim();
+  const templateChanged = template !== initialTemplate;
+  const isDirty = nameValid && (nameChanged || templateChanged);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!isDirty || isPending) return;
     setError(null);
     startTransition(async () => {
-      const result = await renameWorkspace(workspaceId, name);
-      if ("error" in result) {
-        setError(result.error);
-      } else {
-        router.push("/dashboard/settings");
+      // Apply name first, template second. If name fails, abort before
+      // touching template so the UI reflects which field rejected.
+      if (nameChanged) {
+        const result = await renameWorkspace(workspaceId, name);
+        if ("error" in result) {
+          setError(result.error);
+          return;
+        }
       }
+      if (templateChanged) {
+        const result = await updateWorkspaceTemplate(workspaceId, template);
+        if ("error" in result) {
+          setError(result.error);
+          return;
+        }
+      }
+      router.push("/dashboard/settings");
     });
   };
 
@@ -95,7 +117,7 @@ export default function EditWorkspaceForm({
             تعديل workspace
           </h1>
           <p className="text-sm text-gray-500 mb-6">
-            عدّل اسم الـ workspace. باقي الخصائص تأتي في إصدارات قادمة.
+            عدّل اسم الـ workspace أو غيّر القالب حسب طبيعة استخدامك.
           </p>
 
           <div className="bg-white border border-gray-100 rounded-xl p-6">
@@ -118,6 +140,51 @@ export default function EditWorkspaceForm({
                   disabled={isPending}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:opacity-50"
                 />
+              </div>
+
+              {/* Template selector (Phase 4.8 M3) */}
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-gray-700">
+                  قالب الـ workspace
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setTemplate("ecommerce")}
+                    disabled={isPending}
+                    className={`p-3 rounded-lg border-2 text-right transition disabled:opacity-50 ${
+                      template === "ecommerce"
+                        ? "border-indigo-600 bg-indigo-50"
+                        : "border-gray-200 hover:border-gray-300"
+                    }`}
+                  >
+                    <div className="text-2xl mb-1">🛒</div>
+                    <div className="text-sm font-semibold text-gray-900">
+                      متاجر إلكترونية
+                    </div>
+                    <div className="text-xs text-gray-500 mt-1">
+                      إيرادات + ROAS + مبيعات
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTemplate("reports")}
+                    disabled={isPending}
+                    className={`p-3 rounded-lg border-2 text-right transition disabled:opacity-50 ${
+                      template === "reports"
+                        ? "border-indigo-600 bg-indigo-50"
+                        : "border-gray-200 hover:border-gray-300"
+                    }`}
+                  >
+                    <div className="text-2xl mb-1">📊</div>
+                    <div className="text-sm font-semibold text-gray-900">
+                      تقارير إعلانية
+                    </div>
+                    <div className="text-xs text-gray-500 mt-1">
+                      ظهور + نقرات + CTR
+                    </div>
+                  </button>
+                </div>
               </div>
 
               {error && (
