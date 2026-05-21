@@ -1324,6 +1324,20 @@ export default function ReportsClient({
     level: "account",
   });
 
+  // Google campaigns — per-campaign breakdown for the campaigns table (Phase 4.8 M4)
+  const googleCampaigns = useProviderInsights({
+    provider: "google",
+    accountIds: googleAccountIds,
+    ...dateRangeValueToOptions(dateRange),
+    level: "campaign",
+  });
+
+  // Phase 4.8 M4 amend — only campaigns that spent in the date range
+  const googleCampaignsWithSpend = useMemo(
+    () => googleCampaigns.insights.filter((row) => row.spend > 0),
+    [googleCampaigns.insights]
+  );
+
   // Insights for chart (account level + daily breakdown when applicable,
   // uses chartDateRange so lifetime falls back to 90d)
   const { insights: chartInsights, loading: chartLoading } = useInsights({
@@ -1771,61 +1785,6 @@ export default function ReportsClient({
         displayRevenue: row.revenue,
       }));
   }, [googleChartInsights.insights, chartShouldShowDaily, chartDayCount, currency]);
-
-  // Per-account breakdown for the Google tab. Groups insights by accountId,
-  // computes per-account totals + ROAS. Sorted by spend desc so the biggest
-  // spenders appear first — that's the row most actionable for budget
-  // decisions. `hasUnsupported` flags accounts with non-USD/SAR data so the
-  // UI can surface a note (those rows are excluded from the displayed totals).
-  const googleAccountsBreakdown = useMemo(() => {
-    type AccountRow = {
-      accountId: string;
-      spend: number;
-      revenue: number;
-      roas: number;
-      conversions: number;
-      hasUnsupported: boolean;
-    };
-
-    const byAccount = new Map<string, AccountRow>();
-
-    googleInsights.insights.forEach((insight) => {
-      const accId = insight.accountId;
-      if (!accId) return;
-
-      const c = insight.currency;
-      const isSupported = !c || c === "USD" || c === "SAR";
-
-      if (!byAccount.has(accId)) {
-        byAccount.set(accId, {
-          accountId: accId,
-          spend: 0,
-          revenue: 0,
-          roas: 0,
-          conversions: 0,
-          hasUnsupported: false,
-        });
-      }
-
-      const row = byAccount.get(accId)!;
-
-      if (!isSupported) {
-        row.hasUnsupported = true;
-        return;
-      }
-
-      const src = (c as Currency) || "USD";
-      row.spend += convertCurrency(insight.spend, src, currency);
-      row.revenue += convertCurrency(insight.revenue ?? 0, src, currency);
-      row.conversions += insight.purchases ?? 0;
-    });
-
-    byAccount.forEach((row) => {
-      row.roas = row.spend > 0 ? row.revenue / row.spend : 0;
-    });
-
-    return Array.from(byAccount.values()).sort((a, b) => b.spend - a.spend);
-  }, [googleInsights.insights, currency]);
 
   // Real KPI cards from aggregated insights (Meta + Google after M2).
   //
@@ -3043,56 +3002,99 @@ export default function ReportsClient({
                         </div>
                       )}
 
-                      {/* Per-account breakdown */}
-                      {googleAccountsBreakdown.length > 0 && (
-                        <div className="border border-gray-100 rounded-lg p-3 sm:p-4">
-                          <h4 className="text-sm font-bold text-gray-900 mb-3">
-                            تفاصيل الحسابات
-                          </h4>
+                      {/* Google campaigns table — Phase 4.8 M4 */}
+                      <div className="border border-gray-100 rounded-lg p-3 sm:p-4 mt-4">
+                        <h4 className="text-sm font-bold text-gray-900 mb-3">
+                          تفاصيل الحملات
+                        </h4>
+
+                        {googleCampaigns.loading ? (
+                          <div className="space-y-2">
+                            {[0, 1, 2, 3, 4].map((i) => (
+                              <div
+                                key={i}
+                                className="h-12 bg-gray-50 rounded animate-pulse"
+                              />
+                            ))}
+                          </div>
+                        ) : googleCampaignsWithSpend.length === 0 ? (
+                          <p className="text-sm text-gray-500 text-center py-8">
+                            لا توجد حملات صرفت في هذه الفترة
+                          </p>
+                        ) : (
                           <div className="overflow-x-auto">
                             <table className="w-full text-sm">
                               <thead className="text-xs text-gray-500 border-b border-gray-100">
                                 <tr>
                                   <th className="text-right py-2 px-2 font-medium">الحساب</th>
+                                  <th className="text-right py-2 px-2 font-medium">اسم الحملة</th>
                                   <th className="text-right py-2 px-2 font-medium">الإنفاق</th>
                                   <th className="text-right py-2 px-2 font-medium">الإيرادات</th>
                                   <th className="text-right py-2 px-2 font-medium">ROAS</th>
                                   <th className="text-right py-2 px-2 font-medium">التحويلات</th>
+                                  <th className="text-right py-2 px-2 font-medium">الظهور</th>
+                                  <th className="text-right py-2 px-2 font-medium">النقرات</th>
+                                  <th className="text-right py-2 px-2 font-medium">CTR</th>
                                 </tr>
                               </thead>
                               <tbody>
-                                {googleAccountsBreakdown.map((row) => (
-                                  <tr key={row.accountId} className="border-b border-gray-50 hover:bg-gray-50 transition">
-                                    <td className="py-2 px-2 font-medium text-gray-900">
-                                      {googleAccountNames.get(row.accountId) || `حساب ${row.accountId}`}
-                                      {row.hasUnsupported && (
-                                        <span className="mr-1 text-[10px] text-amber-600">*</span>
-                                      )}
-                                    </td>
-                                    <td className="py-2 px-2 text-gray-700">
-                                      {formatCurrencyWithSymbol(row.spend, currency)}
-                                    </td>
-                                    <td className="py-2 px-2 text-gray-900 font-medium">
-                                      {formatCurrencyWithSymbol(row.revenue, currency)}
-                                    </td>
-                                    <td className={`py-2 px-2 font-semibold ${getROASColor(row.roas)}`}>
-                                      {row.roas.toFixed(2)}x
-                                    </td>
-                                    <td className="py-2 px-2 text-gray-700">
-                                      {Math.round(row.conversions).toLocaleString("en-US")}
-                                    </td>
-                                  </tr>
-                                ))}
+                                {googleCampaignsWithSpend.map((row, idx) => {
+                                  const accountName =
+                                    (row.accountId &&
+                                      googleAccountNames.get(row.accountId)) ||
+                                    `حساب ${row.accountId ?? "—"}`;
+                                  const srcCurrency =
+                                    (row.currency as Currency) || "USD";
+                                  return (
+                                    <tr
+                                      key={`${row.accountId}-${row.campaignId}-${idx}`}
+                                      className="border-b border-gray-50 hover:bg-gray-50 transition"
+                                    >
+                                      <td className="text-right py-2 px-2 text-gray-700">
+                                        {accountName}
+                                      </td>
+                                      <td className="text-right py-2 px-2 text-gray-900 font-medium">
+                                        {row.campaignName ?? "—"}
+                                      </td>
+                                      <td className="text-right py-2 px-2 text-gray-900">
+                                        {formatCurrencyWithSymbol(
+                                          convertCurrency(row.spend, srcCurrency, currency),
+                                          currency
+                                        )}
+                                      </td>
+                                      <td className="text-right py-2 px-2 text-gray-900">
+                                        {row.revenue !== null
+                                          ? formatCurrencyWithSymbol(
+                                              convertCurrency(row.revenue, srcCurrency, currency),
+                                              currency
+                                            )
+                                          : "—"}
+                                      </td>
+                                      <td className={`text-right py-2 px-2 font-semibold ${row.roas !== null ? getROASColor(row.roas) : "text-gray-400"}`}>
+                                        {row.roas !== null ? `${row.roas.toFixed(2)}x` : "—"}
+                                      </td>
+                                      <td className="text-right py-2 px-2 text-gray-900">
+                                        {row.purchases !== null
+                                          ? Math.round(row.purchases).toLocaleString("en-US")
+                                          : "—"}
+                                      </td>
+                                      <td className="text-right py-2 px-2 text-gray-700">
+                                        {row.impressions.toLocaleString("en-US")}
+                                      </td>
+                                      <td className="text-right py-2 px-2 text-gray-700">
+                                        {row.clicks.toLocaleString("en-US")}
+                                      </td>
+                                      <td className="text-right py-2 px-2 text-gray-700">
+                                        {row.ctr.toFixed(2)}%
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
                               </tbody>
                             </table>
-                            {googleAccountsBreakdown.some((r) => r.hasUnsupported) && (
-                              <p className="text-[10px] text-amber-600 mt-2">
-                                * بعض البيانات بعملات غير مدعومة (تظهر بدون تحويل في الإجماليات)
-                              </p>
-                            )}
                           </div>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
