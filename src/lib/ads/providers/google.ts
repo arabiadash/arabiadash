@@ -611,6 +611,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       leads: 0,
       costPerPurchase,
       costPerLead: 0,
+      status: this.normalizeCampaignStatus(c.status),
       dateStart: dateFrom,
       dateStop: dateTo,
       hasConversionData,

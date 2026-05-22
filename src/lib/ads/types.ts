@@ -115,6 +115,13 @@ export interface UnifiedInsight {
    */
   hasConversionData: boolean;
 
+  /**
+   * Campaign status — populated ONLY when this insight is at level=campaign.
+   * Undefined for account-level insights and day-level insights.
+   * Phase 4.8 M4 Commit 2 — enables status filtering on per-campaign tables.
+   */
+  status?: UnifiedCampaign["status"];
+
   // Date range
   dateStart: string;
   dateStop: string;
