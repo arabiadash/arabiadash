@@ -627,6 +627,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
   private normalizeAd = (ad: AdRow): UnifiedAd => ({
     id: ad.id,
     name: `${ad.campaign_name} — ${ad.ad_group_name}`,
+    currency: this.accountInfo.currency,
     status: this.normalizeAdStatus(ad.status),
     campaignId: ad.campaign_id,
     campaignName: ad.campaign_name,
@@ -638,6 +639,8 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     videoId: undefined,
     creativeType: this.adTypeToCreativeType(ad.type),
     previewLink: ad.final_url ?? undefined,
+    headlines: ad.headlines,
+    descriptions: ad.descriptions,
     spend: ad.spend,
     revenue: ad.revenue,
     roas: ad.roas,
@@ -657,18 +660,23 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
 
   /**
    * Best-effort mapping from Google's ad type strings → Unified creativeType.
-   * Google has 35+ ad types; we collapse to image/video/unknown.
+   * Phase 4.8 M5 Commit 1: RSA/ETA/RDA now return "text" so the UI renders
+   * the SERP-style text card. RDA also has marketing images, but those need
+   * asset-resource resolution (M5 Commit 2) before they're usable — for now
+   * the text representation is the useful surface.
    */
   private adTypeToCreativeType(googleType: string): UnifiedAd["creativeType"] {
     if (googleType.includes("VIDEO")) return "video";
+    if (googleType === "IMAGE_AD") return "image";
     if (
-      googleType.includes("IMAGE") ||
+      googleType === "RESPONSIVE_SEARCH_AD" ||
+      googleType === "EXPANDED_TEXT_AD" ||
       googleType === "RESPONSIVE_DISPLAY_AD" ||
       googleType === "LEGACY_RESPONSIVE_DISPLAY_AD"
     ) {
-      return "image";
+      return "text";
     }
-    // Search ads, App ads, Shopping ads — text or app-store-driven.
+    // Shopping, App, Call, Smart Campaigns, Demand Gen — no surface yet.
     return "unknown";
   }
 }

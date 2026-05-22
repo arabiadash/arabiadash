@@ -73,6 +73,15 @@ export interface AdRow {
   campaign_id: string;
   campaign_name: string;
   final_url: string | null;
+  /**
+   * RSA/RDA headlines. Empty arrays are coerced to undefined so consumers
+   * can use truthy checks. Phase 4.8 M5 Commit 1.
+   */
+  headlines?: string[];
+  /**
+   * RSA/RDA descriptions. Same shape as headlines.
+   */
+  descriptions?: string[];
   spend: number;
   impressions: number;
   clicks: number;
@@ -151,6 +160,10 @@ export async function fetchAds(
       ad_group_ad.ad.id,
       ad_group_ad.ad.type,
       ad_group_ad.ad.final_urls,
+      ad_group_ad.ad.responsive_search_ad.headlines,
+      ad_group_ad.ad.responsive_search_ad.descriptions,
+      ad_group_ad.ad.responsive_display_ad.headlines,
+      ad_group_ad.ad.responsive_display_ad.descriptions,
       ad_group_ad.status,
       ad_group.id,
       ad_group.name,
@@ -191,6 +204,37 @@ export async function fetchAds(
           (u): u is string => typeof u === "string" && u.length > 0
         ) ?? null;
 
+      // RSA/RDA text content. The Google Ads SDK returns these as arrays of
+      // { text, pinned_field? } — we want just the strings, dropping empties.
+      // RSA fields populated for RESPONSIVE_SEARCH_AD; RDA for RESPONSIVE_
+      // DISPLAY_AD. Only one of the two will be populated per row; we union
+      // them with RSA taking precedence (no overlap expected anyway).
+      const extractTexts = (
+        assets: unknown
+      ): string[] | undefined => {
+        if (!Array.isArray(assets)) return undefined;
+        const out: string[] = [];
+        for (const a of assets) {
+          if (a && typeof a === "object" && "text" in a) {
+            const t = (a as { text?: unknown }).text;
+            if (typeof t === "string" && t.length > 0) out.push(t);
+          }
+        }
+        return out.length > 0 ? out : undefined;
+      };
+
+      const rsaHeadlines = extractTexts(ad?.responsive_search_ad?.headlines);
+      const rdaHeadlines = extractTexts(ad?.responsive_display_ad?.headlines);
+      const headlines = rsaHeadlines ?? rdaHeadlines;
+
+      const rsaDescriptions = extractTexts(
+        ad?.responsive_search_ad?.descriptions
+      );
+      const rdaDescriptions = extractTexts(
+        ad?.responsive_display_ad?.descriptions
+      );
+      const descriptions = rsaDescriptions ?? rdaDescriptions;
+
       return {
         id: String(ad?.id ?? ""),
         type: mapAdType(ad?.type),
@@ -200,6 +244,8 @@ export async function fetchAds(
         campaign_id: String(row.campaign?.id ?? ""),
         campaign_name: String(row.campaign?.name ?? ""),
         final_url: finalUrl,
+        headlines,
+        descriptions,
         spend,
         impressions,
         clicks,
