@@ -1157,6 +1157,16 @@ export default function ReportsClient({
   const [currentPage, setCurrentPage] = useState(1);
   const [perPage, setPerPage] = useState<10 | 20 | 50>(20);
 
+  // Phase 4.8 M4 Commit 2 — Google campaigns filter/sort state
+  const [googleSearchQuery, setGoogleSearchQuery] = useState("");
+  const [googleStatusFilter, setGoogleStatusFilter] = useState<
+    "all" | "ACTIVE" | "PAUSED"
+  >("all");
+  const [googleSortBy, setGoogleSortBy] = useState<SortableColumn | null>(
+    "spend"
+  );
+  const [googleSortDir, setGoogleSortDir] = useState<"asc" | "desc">("desc");
+
   // Reports tab (campaigns table vs creatives grid), persisted to localStorage
   const [activeTab, setActiveTab] = useState<"campaigns" | "creatives">(
     "campaigns"
@@ -1332,11 +1342,70 @@ export default function ReportsClient({
     level: "campaign",
   });
 
-  // Phase 4.8 M4 amend — only campaigns that spent in the date range
-  const googleCampaignsWithSpend = useMemo(
-    () => googleCampaigns.insights.filter((row) => row.spend > 0),
-    [googleCampaigns.insights]
-  );
+  // Phase 4.8 M4 Commit 2 — filter, status filter, sort pipeline
+  const processedGoogleCampaigns = useMemo(() => {
+    let result = googleCampaigns.insights.filter((r) => r.spend > 0);
+
+    if (googleSearchQuery.trim()) {
+      const q = googleSearchQuery.toLowerCase().trim();
+      result = result.filter((r) =>
+        (r.campaignName ?? "").toLowerCase().includes(q)
+      );
+    }
+
+    if (googleStatusFilter !== "all") {
+      result = result.filter((r) => r.status === googleStatusFilter);
+    }
+
+    if (googleSortBy) {
+      result = [...result].sort((a, b) => {
+        let aVal: string | number;
+        let bVal: string | number;
+        if (googleSortBy === "status") {
+          aVal = a.status ?? "";
+          bVal = b.status ?? "";
+        } else if (googleSortBy === "campaignName") {
+          aVal = a.campaignName ?? "";
+          bVal = b.campaignName ?? "";
+        } else {
+          aVal =
+            ((a as unknown as Record<string, unknown>)[googleSortBy] as number) ??
+            0;
+          bVal =
+            ((b as unknown as Record<string, unknown>)[googleSortBy] as number) ??
+            0;
+        }
+        if (typeof aVal === "string" && typeof bVal === "string") {
+          return googleSortDir === "asc"
+            ? aVal.localeCompare(bVal)
+            : bVal.localeCompare(aVal);
+        }
+        const numA = typeof aVal === "number" ? aVal : 0;
+        const numB = typeof bVal === "number" ? bVal : 0;
+        return googleSortDir === "asc" ? numA - numB : numB - numA;
+      });
+    }
+
+    return result;
+  }, [
+    googleCampaigns.insights,
+    googleSearchQuery,
+    googleStatusFilter,
+    googleSortBy,
+    googleSortDir,
+  ]);
+
+  const handleGoogleSort = (column: SortableColumn) => {
+    if (googleSortBy === column) {
+      setGoogleSortDir(googleSortDir === "asc" ? "desc" : "asc");
+    } else {
+      setGoogleSortBy(column);
+      setGoogleSortDir("desc");
+    }
+  };
+
+  const googleHasActiveFilters =
+    googleSearchQuery !== "" || googleStatusFilter !== "all";
 
   // Insights for chart (account level + daily breakdown when applicable,
   // uses chartDateRange so lifetime falls back to 90d)
@@ -3008,6 +3077,59 @@ export default function ReportsClient({
                           تفاصيل الحملات
                         </h4>
 
+                        {/* Filters Bar */}
+                        <div className="flex flex-col sm:flex-row gap-3 mb-4 pb-4 border-b border-gray-100">
+                          <div className="flex-1 relative">
+                            <Search className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                            <input
+                              type="text"
+                              value={googleSearchQuery}
+                              onChange={(e) =>
+                                setGoogleSearchQuery(e.target.value)
+                              }
+                              placeholder="بحث باسم الحملة..."
+                              className="w-full pr-9 pl-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            />
+                          </div>
+                          <select
+                            value={googleStatusFilter}
+                            onChange={(e) =>
+                              setGoogleStatusFilter(
+                                e.target.value as "all" | "ACTIVE" | "PAUSED"
+                              )
+                            }
+                            className="px-3 py-2 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          >
+                            <option value="all">الكل</option>
+                            <option value="ACTIVE">نشطة</option>
+                            <option value="PAUSED">موقوفة</option>
+                          </select>
+                          {googleHasActiveFilters && (
+                            <button
+                              onClick={() => {
+                                setGoogleSearchQuery("");
+                                setGoogleStatusFilter("all");
+                              }}
+                              className="px-3 py-2 text-sm text-gray-600 hover:text-gray-900 transition"
+                            >
+                              مسح الفلاتر
+                            </button>
+                          )}
+                        </div>
+
+                        {/* Results count */}
+                        <p className="text-xs text-gray-500 mb-3">
+                          {processedGoogleCampaigns.length ===
+                          googleCampaigns.insights.filter((r) => r.spend > 0)
+                            .length
+                            ? `${processedGoogleCampaigns.length} حملة`
+                            : `${processedGoogleCampaigns.length} من ${
+                                googleCampaigns.insights.filter(
+                                  (r) => r.spend > 0
+                                ).length
+                              } حملة`}
+                        </p>
+
                         {googleCampaigns.loading ? (
                           <div className="space-y-2">
                             {[0, 1, 2, 3, 4].map((i) => (
@@ -3017,7 +3139,7 @@ export default function ReportsClient({
                               />
                             ))}
                           </div>
-                        ) : googleCampaignsWithSpend.length === 0 ? (
+                        ) : processedGoogleCampaigns.length === 0 ? (
                           <p className="text-sm text-gray-500 text-center py-8">
                             لا توجد حملات صرفت في هذه الفترة
                           </p>
@@ -3026,19 +3148,64 @@ export default function ReportsClient({
                             <table className="w-full text-sm">
                               <thead className="text-xs text-gray-500 border-b border-gray-100">
                                 <tr>
-                                  <th className="text-right py-2 px-2 font-medium">الحساب</th>
-                                  <th className="text-right py-2 px-2 font-medium">اسم الحملة</th>
-                                  <th className="text-right py-2 px-2 font-medium">الإنفاق</th>
-                                  <th className="text-right py-2 px-2 font-medium">الإيرادات</th>
-                                  <th className="text-right py-2 px-2 font-medium">ROAS</th>
-                                  <th className="text-right py-2 px-2 font-medium">التحويلات</th>
+                                  {googleAccountIds.length > 1 && (
+                                    <th className="text-right py-2 px-2 font-medium">الحساب</th>
+                                  )}
+                                  <SortableHeader
+                                    column="campaignName"
+                                    label="اسم الحملة"
+                                    sortBy={googleSortBy}
+                                    sortDir={googleSortDir}
+                                    onSort={handleGoogleSort}
+                                  />
+                                  <SortableHeader
+                                    column="status"
+                                    label="الحالة"
+                                    sortBy={googleSortBy}
+                                    sortDir={googleSortDir}
+                                    onSort={handleGoogleSort}
+                                  />
+                                  <SortableHeader
+                                    column="spend"
+                                    label="الإنفاق"
+                                    sortBy={googleSortBy}
+                                    sortDir={googleSortDir}
+                                    onSort={handleGoogleSort}
+                                  />
+                                  <SortableHeader
+                                    column="revenue"
+                                    label="الإيرادات"
+                                    sortBy={googleSortBy}
+                                    sortDir={googleSortDir}
+                                    onSort={handleGoogleSort}
+                                  />
+                                  <SortableHeader
+                                    column="roas"
+                                    label="ROAS"
+                                    sortBy={googleSortBy}
+                                    sortDir={googleSortDir}
+                                    onSort={handleGoogleSort}
+                                  />
+                                  <SortableHeader
+                                    column="purchases"
+                                    label="التحويلات"
+                                    sortBy={googleSortBy}
+                                    sortDir={googleSortDir}
+                                    onSort={handleGoogleSort}
+                                  />
                                   <th className="text-right py-2 px-2 font-medium">الظهور</th>
                                   <th className="text-right py-2 px-2 font-medium">النقرات</th>
-                                  <th className="text-right py-2 px-2 font-medium">CTR</th>
+                                  <SortableHeader
+                                    column="ctr"
+                                    label="CTR"
+                                    sortBy={googleSortBy}
+                                    sortDir={googleSortDir}
+                                    onSort={handleGoogleSort}
+                                  />
                                 </tr>
                               </thead>
                               <tbody>
-                                {googleCampaignsWithSpend.map((row, idx) => {
+                                {processedGoogleCampaigns.map((row, idx) => {
                                   const accountName =
                                     (row.accountId &&
                                       googleAccountNames.get(row.accountId)) ||
@@ -3050,11 +3217,16 @@ export default function ReportsClient({
                                       key={`${row.accountId}-${row.campaignId}-${idx}`}
                                       className="border-b border-gray-50 hover:bg-gray-50 transition"
                                     >
-                                      <td className="text-right py-2 px-2 text-gray-700">
-                                        {accountName}
-                                      </td>
+                                      {googleAccountIds.length > 1 && (
+                                        <td className="text-right py-2 px-2 text-gray-700">
+                                          {accountName}
+                                        </td>
+                                      )}
                                       <td className="text-right py-2 px-2 text-gray-900 font-medium">
                                         {row.campaignName ?? "—"}
+                                      </td>
+                                      <td className="text-right py-2 px-2">
+                                        <StatusBadge status={row.status} />
                                       </td>
                                       <td className="text-right py-2 px-2 text-gray-900">
                                         {formatCurrencyWithSymbol(
