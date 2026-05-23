@@ -82,6 +82,12 @@ export interface AdRow {
    * RSA/RDA descriptions. Same shape as headlines.
    */
   descriptions?: string[];
+  /**
+   * Asset resource names collected from image_ad + RDA marketing_images.
+   * Resolved to URLs in the adapter via fetchAssetUrls (assets.ts).
+   * Phase 4.8 M5 Commit 2.
+   */
+  imageAssetResourceNames?: string[];
   spend: number;
   impressions: number;
   clicks: number;
@@ -164,6 +170,8 @@ export async function fetchAds(
       ad_group_ad.ad.responsive_search_ad.descriptions,
       ad_group_ad.ad.responsive_display_ad.headlines,
       ad_group_ad.ad.responsive_display_ad.descriptions,
+      ad_group_ad.ad.responsive_display_ad.marketing_images,
+      ad_group_ad.ad.image_ad.image_asset,
       ad_group_ad.status,
       ad_group.id,
       ad_group.name,
@@ -235,6 +243,32 @@ export async function fetchAds(
       );
       const descriptions = rsaDescriptions ?? rdaDescriptions;
 
+      // Asset resource names: IMAGE_AD's single image_asset + RDA's
+      // marketing_images array (each entry: { asset: "customers/X/assets/Y" }).
+      // Resolved to URLs in the adapter via fetchAssetUrls (single batched query).
+      // SDK types these as objects but GAQL returns resource-name strings;
+      // cast through unknown to read the actual shape.
+      const collectedAssets: string[] = [];
+      const imageAdAsset: unknown = ad?.image_ad?.image_asset;
+      if (typeof imageAdAsset === "string" && imageAdAsset.length > 0) {
+        collectedAssets.push(imageAdAsset);
+      }
+      const rdaMarketingImages: unknown =
+        ad?.responsive_display_ad?.marketing_images;
+      if (Array.isArray(rdaMarketingImages)) {
+        for (const m of rdaMarketingImages) {
+          const assetRef =
+            m && typeof m === "object" && "asset" in m
+              ? (m as { asset?: unknown }).asset
+              : undefined;
+          if (typeof assetRef === "string" && assetRef.length > 0) {
+            collectedAssets.push(assetRef);
+          }
+        }
+      }
+      const imageAssetResourceNames =
+        collectedAssets.length > 0 ? collectedAssets : undefined;
+
       return {
         id: String(ad?.id ?? ""),
         type: mapAdType(ad?.type),
@@ -246,6 +280,7 @@ export async function fetchAds(
         final_url: finalUrl,
         headlines,
         descriptions,
+        imageAssetResourceNames,
         spend,
         impressions,
         clicks,

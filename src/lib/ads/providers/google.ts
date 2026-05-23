@@ -12,6 +12,7 @@ import {
 } from "../types";
 import { fetchCampaigns, type CampaignRow } from "@/lib/google-ads/campaigns";
 import { fetchAds, type AdRow } from "@/lib/google-ads/ads";
+import { fetchAssetUrls } from "@/lib/google-ads/assets";
 import {
   fetchTimeSeries,
   type TimeSeriesPoint,
@@ -172,6 +173,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
   async getAds(range: DateRangeInput): Promise<UnifiedAd[]> {
     const { dateFrom, dateTo } = this.resolveDateRange(range);
 
+    // Pass 1: fetch ad rows (now includes imageAssetResourceNames)
     const result = await fetchAds({
       customerId: this.customerId,
       refreshToken: this.refreshToken,
@@ -183,9 +185,34 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     if (!result) return [];
 
     // Drop ads with zero activity in the period — matches Meta behavior.
-    return result.ads
-      .filter((ad) => ad.spend > 0 || ad.impressions > 0)
-      .map((ad) => this.normalizeAd(ad));
+    const activeAds = result.ads.filter(
+      (ad) => ad.spend > 0 || ad.impressions > 0
+    );
+
+    // Pass 2: collect unique asset resource names across all active ads
+    const allResourceNames = new Set<string>();
+    for (const ad of activeAds) {
+      if (ad.imageAssetResourceNames) {
+        for (const rn of ad.imageAssetResourceNames) {
+          allResourceNames.add(rn);
+        }
+      }
+    }
+
+    // Pass 3: batch-resolve to URLs (single API call regardless of ad count).
+    // Empty set short-circuits to an empty map without firing a request.
+    const urlMap =
+      allResourceNames.size > 0
+        ? await fetchAssetUrls({
+            customerId: this.customerId,
+            refreshToken: this.refreshToken,
+            loginCustomerId: this.loginCustomerId,
+            resourceNames: Array.from(allResourceNames),
+          })
+        : new Map<string, string>();
+
+    // Pass 4: normalize with URL lookups baked in.
+    return activeAds.map((ad) => this.normalizeAd(ad, urlMap));
   }
 
   // ───────────────────────────────────────────────────────────────
@@ -624,33 +651,57 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
    * video assets) is NOT included — Google has 35+ ad types with wildly
    * different schemas; surfacing them needs a separate fetcher.
    */
-  private normalizeAd = (ad: AdRow): UnifiedAd => ({
-    id: ad.id,
-    name: `${ad.campaign_name} — ${ad.ad_group_name}`,
-    currency: this.accountInfo.currency,
-    status: this.normalizeAdStatus(ad.status),
-    campaignId: ad.campaign_id,
-    campaignName: ad.campaign_name,
-    adsetId: ad.ad_group_id,
-    adsetName: ad.ad_group_name,
-    creativeId: undefined,
-    imageUrl: undefined,
-    thumbnailUrl: undefined,
-    videoId: undefined,
-    creativeType: this.adTypeToCreativeType(ad.type),
-    previewLink: ad.final_url ?? undefined,
-    headlines: ad.headlines,
-    descriptions: ad.descriptions,
-    spend: ad.spend,
-    revenue: ad.revenue,
-    roas: ad.roas,
-    purchases: ad.conversions,
-    impressions: ad.impressions,
-    clicks: ad.clicks,
-    ctr: ad.ctr * 100,
-    cpc: ad.cpc,
-    provider: "google",
-  });
+  private normalizeAd = (
+    ad: AdRow,
+    urlMap?: Map<string, string>
+  ): UnifiedAd => {
+    // Resolve collected asset resource names to URLs via the batched map.
+    const resolvedUrls: string[] = [];
+    if (ad.imageAssetResourceNames && urlMap) {
+      for (const rn of ad.imageAssetResourceNames) {
+        const url = urlMap.get(rn);
+        if (url) resolvedUrls.push(url);
+      }
+    }
+
+    // Single image → imageUrl; multiple → carouselImages (reuses Meta's
+    // CarouselImage / CarouselDisplay render path with zero UI changes).
+    const imageUrl = resolvedUrls.length > 0 ? resolvedUrls[0] : undefined;
+    const carouselImages =
+      resolvedUrls.length > 1 ? resolvedUrls : undefined;
+
+    return {
+      id: ad.id,
+      name: `${ad.campaign_name} — ${ad.ad_group_name}`,
+      currency: this.accountInfo.currency,
+      status: this.normalizeAdStatus(ad.status),
+      campaignId: ad.campaign_id,
+      campaignName: ad.campaign_name,
+      adsetId: ad.ad_group_id,
+      adsetName: ad.ad_group_name,
+      creativeId: undefined,
+      imageUrl,
+      thumbnailUrl: undefined,
+      videoId: undefined,
+      creativeType: this.adTypeToCreativeType(
+        ad.type,
+        resolvedUrls.length > 0
+      ),
+      previewLink: ad.final_url ?? undefined,
+      headlines: ad.headlines,
+      descriptions: ad.descriptions,
+      carouselImages,
+      spend: ad.spend,
+      revenue: ad.revenue,
+      roas: ad.roas,
+      purchases: ad.conversions,
+      impressions: ad.impressions,
+      clicks: ad.clicks,
+      ctr: ad.ctr * 100,
+      cpc: ad.cpc,
+      provider: "google",
+    };
+  };
 
   private normalizeAdStatus(googleStatus: string): UnifiedAd["status"] {
     if (googleStatus === "ENABLED") return "ACTIVE";
@@ -660,13 +711,17 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
 
   /**
    * Best-effort mapping from Google's ad type strings → Unified creativeType.
-   * Phase 4.8 M5 Commit 1: RSA/ETA/RDA now return "text" so the UI renders
-   * the SERP-style text card. RDA also has marketing images, but those need
-   * asset-resource resolution (M5 Commit 2) before they're usable — for now
-   * the text representation is the useful surface.
+   * Phase 4.8 M5 Commit 2: when image assets resolved successfully, prefer
+   * "image" so the UI uses the photo render branch instead of the SERP-style
+   * text card. RDA falls back to "text" only when its marketing_images
+   * couldn't be resolved (rare — usually a transient asset API failure).
    */
-  private adTypeToCreativeType(googleType: string): UnifiedAd["creativeType"] {
+  private adTypeToCreativeType(
+    googleType: string,
+    hasResolvedImages: boolean = false
+  ): UnifiedAd["creativeType"] {
     if (googleType.includes("VIDEO")) return "video";
+    if (hasResolvedImages) return "image";
     if (googleType === "IMAGE_AD") return "image";
     if (
       googleType === "RESPONSIVE_SEARCH_AD" ||

@@ -713,6 +713,8 @@ function AdDetailModal({
   // Show multi-image gallery whenever 2+ images exist — works for classic
   // carousels AND Meta's Flexible Ads (asset_feed_spec.images).
   const hasCarouselImages = (ad.carouselImages?.length ?? 0) >= 2;
+  const isText =
+    ad.creativeType === "text" && (ad.headlines?.length ?? 0) > 0;
 
   const [carouselIndex, setCarouselIndex] = useState(0);
 
@@ -795,6 +797,27 @@ function AdDetailModal({
                 alt={ad.name}
                 className="w-full max-h-96 object-contain bg-gray-50"
               />
+            ) : isText ? (
+              <div className="w-full aspect-[4/3] bg-gradient-to-br from-blue-50 to-indigo-50 p-6 flex flex-col justify-center rounded-lg">
+                <div className="text-lg md:text-xl font-semibold text-blue-700 mb-2 leading-relaxed">
+                  {ad.headlines![0]}
+                </div>
+                {ad.headlines![1] && (
+                  <div className="text-sm md:text-base text-blue-600 mb-3">
+                    {ad.headlines![1]}
+                  </div>
+                )}
+                {ad.previewLink && (
+                  <div className="text-xs text-green-700 mb-3 truncate">
+                    {ad.previewLink.replace(/^https?:\/\//, "")}
+                  </div>
+                )}
+                {ad.descriptions && ad.descriptions.length > 0 && (
+                  <div className="text-sm text-gray-700 leading-relaxed">
+                    {ad.descriptions[0]}
+                  </div>
+                )}
+              </div>
             ) : (
               <div className="aspect-video flex items-center justify-center text-gray-400 bg-gray-50">
                 لا توجد صورة
