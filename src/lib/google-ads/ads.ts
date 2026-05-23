@@ -83,7 +83,7 @@ export interface AdRow {
    */
   descriptions?: string[];
   /**
-   * Asset resource names collected from image_ad + RDA marketing_images.
+   * Asset resource names collected from RDA marketing_images.
    * Resolved to URLs in the adapter via fetchAssetUrls (assets.ts).
    * Phase 4.8 M5 Commit 2.
    */
@@ -171,7 +171,6 @@ export async function fetchAds(
       ad_group_ad.ad.responsive_display_ad.headlines,
       ad_group_ad.ad.responsive_display_ad.descriptions,
       ad_group_ad.ad.responsive_display_ad.marketing_images,
-      ad_group_ad.ad.image_ad.image_asset,
       ad_group_ad.status,
       ad_group.id,
       ad_group.name,
@@ -243,16 +242,16 @@ export async function fetchAds(
       );
       const descriptions = rsaDescriptions ?? rdaDescriptions;
 
-      // Asset resource names: IMAGE_AD's single image_asset + RDA's
-      // marketing_images array (each entry: { asset: "customers/X/assets/Y" }).
-      // Resolved to URLs in the adapter via fetchAssetUrls (single batched query).
-      // SDK types these as objects but GAQL returns resource-name strings;
-      // cast through unknown to read the actual shape.
+      // Asset resource names: RDA's marketing_images array (each entry:
+      // { asset: "customers/X/assets/Y" }). Resolved to URLs in the adapter
+      // via fetchAssetUrls (single batched query).
+      //
+      // Note: ad_group_ad.ad.image_ad.image_asset was tried but rejected by
+      // Google Ads API (query_error 23, INVALID_FIELD_IN_SELECT_CLAUSE) —
+      // the field exists in older API versions but is not accepted via this
+      // path in the current SDK. IMAGE_AD coverage deferred; rare in practice
+      // (mostly replaced by RDA in modern accounts).
       const collectedAssets: string[] = [];
-      const imageAdAsset: unknown = ad?.image_ad?.image_asset;
-      if (typeof imageAdAsset === "string" && imageAdAsset.length > 0) {
-        collectedAssets.push(imageAdAsset);
-      }
       const rdaMarketingImages: unknown =
         ad?.responsive_display_ad?.marketing_images;
       if (Array.isArray(rdaMarketingImages)) {
@@ -322,7 +321,14 @@ export async function fetchAds(
     totals.roas = totals.spend > 0 ? totals.revenue / totals.spend : 0;
 
     return { ads, totals };
-  } catch {
+  } catch (error) {
+    // Brief production-safe log — the silent return null was masking M5
+    // GAQL field rejections during the regression investigation. Surface
+    // just enough to debug from production logs without leaking tokens.
+    console.error(
+      "[google-ads/ads] fetch failed:",
+      error instanceof Error ? error.message : String(error)
+    );
     return null;
   }
 }
