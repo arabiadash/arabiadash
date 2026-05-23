@@ -128,6 +128,45 @@ export interface UnifiedInsight {
 }
 
 // =================================================================
+// Asset Extensions (Google-only). Per ADR-012.
+// =================================================================
+/**
+ * Asset Extensions surfaced on Google ads.
+ * Per ADR-012 — see docs/decisions/012-google-ads-extensions.md.
+ * v1 scope: SITELINK + CALLOUT + STRUCTURED_SNIPPET.
+ * Future: PROMOTION, PRICE, CALL, LEAD_FORM, IMAGE variants, LOCATION.
+ *
+ * All fields optional + array-typed for graceful degradation.
+ * Meta-side adapters never populate this field (extensions = Google concept).
+ */
+export interface UnifiedAdExtensions {
+  /**
+   * Sitelink extensions — additional links shown under the main ad.
+   * Most common extension type in Search ads.
+   * Note: description fields exist on sitelink_asset but are not
+   * SELECTable via GAQL (query_error 32 at runtime in v23 SDK).
+   * v1 surfaces just text + finalUrl.
+   */
+  sitelinks?: Array<{
+    text: string;
+    finalUrl?: string;
+  }>;
+
+  /**
+   * Callout extensions — short text snippets ("Free shipping", "24/7 support").
+   */
+  callouts?: string[];
+
+  /**
+   * Structured snippet extensions — categorized lists ("Brands: A, B, C").
+   */
+  structuredSnippets?: Array<{
+    header: string;
+    values: string[];
+  }>;
+}
+
+// =================================================================
 // Unified Ad (with creative + performance, for the Ad Creatives view)
 // =================================================================
 export interface UnifiedAd {
@@ -198,6 +237,12 @@ export interface UnifiedAd {
   // Intermediate: hashes pulled from asset_feed_spec.images that still need
   // resolution to URLs via /act_{id}/adimages. Removed after batch resolution.
   carouselImageHashes?: string[];
+
+  /**
+   * Asset Extensions (Google-only). Phase 4.8 M6.
+   * See ADR-012 for query strategy + attribution.
+   */
+  extensions?: UnifiedAdExtensions;
 
   // Always-available shareable link to the ad preview on Facebook
   previewLink?: string;
