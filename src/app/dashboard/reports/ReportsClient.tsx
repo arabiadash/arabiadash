@@ -36,7 +36,6 @@ import {
   dateRangeValueToOptions,
 } from "@/lib/hooks/use-insights";
 import { useProviderInsights } from "@/lib/hooks/use-provider-insights";
-import { useProviderAds } from "@/lib/hooks/use-provider-ads";
 import { useAds } from "@/lib/hooks/use-ads";
 import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
 import { useElementHeight } from "@/lib/hooks/useElementHeight";
@@ -387,8 +386,6 @@ function CreativeCard({
     isCarousel &&
     Array.isArray(ad.carouselImages) &&
     ad.carouselImages.length > 1;
-  const isText =
-    ad.creativeType === "text" && (ad.headlines?.length ?? 0) > 0;
 
   return (
     <div
@@ -462,31 +459,6 @@ function CreativeCard({
               (e.target as HTMLImageElement).style.display = "none";
             }}
           />
-        ) : isText ? (
-          <div className="w-full h-full bg-gradient-to-br from-blue-50 to-indigo-50 p-3 flex flex-col justify-center">
-            <div className="text-sm font-semibold text-blue-700 line-clamp-2 mb-1">
-              {ad.headlines![0]}
-            </div>
-            {ad.headlines![1] && (
-              <div className="text-xs text-blue-600 line-clamp-1 mb-2">
-                {ad.headlines![1]}
-              </div>
-            )}
-            {ad.descriptions && ad.descriptions.length > 0 && (
-              <div className="text-xs text-gray-700 line-clamp-2 leading-relaxed">
-                {ad.descriptions[0]}
-              </div>
-            )}
-            {(ad.headlines!.length > 2 ||
-              (ad.descriptions?.length ?? 0) > 1) && (
-              <div className="text-[10px] text-blue-400 mt-2 text-center">
-                +
-                {Math.max(0, ad.headlines!.length - 2) +
-                  Math.max(0, (ad.descriptions?.length ?? 0) - 1)}{" "}
-                عنصر إضافي
-              </div>
-            )}
-          </div>
         ) : (
           <div className="w-full h-full flex items-center justify-center text-gray-400 text-xs">
             بدون صورة
@@ -581,7 +553,7 @@ function CreativeCard({
           <div className="col-span-2">
             <p className="text-gray-500 text-[10px]">الإنفاق</p>
             <p className="font-bold text-gray-900">
-              {formatAndConvert(ad.spend, (ad.currency as Currency) || accountCurrency, displayCurrency)}
+              {formatAndConvert(ad.spend, accountCurrency, displayCurrency)}
             </p>
           </div>
         </div>
@@ -713,8 +685,6 @@ function AdDetailModal({
   // Show multi-image gallery whenever 2+ images exist — works for classic
   // carousels AND Meta's Flexible Ads (asset_feed_spec.images).
   const hasCarouselImages = (ad.carouselImages?.length ?? 0) >= 2;
-  const isText =
-    ad.creativeType === "text" && (ad.headlines?.length ?? 0) > 0;
 
   const [carouselIndex, setCarouselIndex] = useState(0);
 
@@ -797,27 +767,6 @@ function AdDetailModal({
                 alt={ad.name}
                 className="w-full max-h-96 object-contain bg-gray-50"
               />
-            ) : isText ? (
-              <div className="w-full aspect-[4/3] bg-gradient-to-br from-blue-50 to-indigo-50 p-6 flex flex-col justify-center rounded-lg">
-                <div className="text-lg md:text-xl font-semibold text-blue-700 mb-2 leading-relaxed">
-                  {ad.headlines![0]}
-                </div>
-                {ad.headlines![1] && (
-                  <div className="text-sm md:text-base text-blue-600 mb-3">
-                    {ad.headlines![1]}
-                  </div>
-                )}
-                {ad.previewLink && (
-                  <div className="text-xs text-green-700 mb-3 truncate">
-                    {ad.previewLink.replace(/^https?:\/\//, "")}
-                  </div>
-                )}
-                {ad.descriptions && ad.descriptions.length > 0 && (
-                  <div className="text-sm text-gray-700 leading-relaxed">
-                    {ad.descriptions[0]}
-                  </div>
-                )}
-              </div>
             ) : (
               <div className="aspect-video flex items-center justify-center text-gray-400 bg-gray-50">
                 لا توجد صورة
@@ -852,50 +801,6 @@ function AdDetailModal({
               <span className="inline-block px-3 py-1.5 bg-indigo-100 text-indigo-700 rounded-lg text-xs font-semibold">
                 {CTA_LABELS_AR[ad.callToAction] ?? ad.callToAction}
               </span>
-            </div>
-          )}
-
-          {ad.headlines && ad.headlines.length > 0 && (
-            <div>
-              <p className="text-xs text-gray-500 mb-2">
-                العناوين ({ad.headlines.length})
-              </p>
-              <ol className="space-y-1.5">
-                {ad.headlines.map((headline, i) => (
-                  <li
-                    key={i}
-                    className="text-sm text-gray-700 flex gap-2 items-start"
-                  >
-                    <span className="text-xs text-gray-400 mt-0.5 min-w-[1.25rem]">
-                      {i + 1}.
-                    </span>
-                    <span className="flex-1">{headline}</span>
-                  </li>
-                ))}
-              </ol>
-            </div>
-          )}
-
-          {ad.descriptions && ad.descriptions.length > 0 && (
-            <div>
-              <p className="text-xs text-gray-500 mb-2">
-                الأوصاف ({ad.descriptions.length})
-              </p>
-              <ol className="space-y-1.5">
-                {ad.descriptions.map((description, i) => (
-                  <li
-                    key={i}
-                    className="text-sm text-gray-700 flex gap-2 items-start"
-                  >
-                    <span className="text-xs text-gray-400 mt-0.5 min-w-[1.25rem]">
-                      {i + 1}.
-                    </span>
-                    <span className="flex-1 leading-relaxed">
-                      {description}
-                    </span>
-                  </li>
-                ))}
-              </ol>
             </div>
           )}
 
@@ -947,7 +852,7 @@ function AdDetailModal({
               <div className="bg-gray-50 rounded-lg p-3">
                 <p className="text-xs text-gray-500">الإنفاق</p>
                 <p className="text-lg font-bold text-gray-900">
-                  {formatAndConvert(ad.spend, (ad.currency as Currency) || accountCurrency, displayCurrency)}
+                  {formatAndConvert(ad.spend, accountCurrency, displayCurrency)}
                 </p>
               </div>
               <div className="bg-gray-50 rounded-lg p-3">
@@ -955,7 +860,7 @@ function AdDetailModal({
                 <p className="text-lg font-bold text-green-600">
                   {formatAndConvert(
                     ad.revenue,
-                    (ad.currency as Currency) || accountCurrency,
+                    accountCurrency,
                     displayCurrency
                   )}
                 </p>
@@ -975,16 +880,14 @@ function AdDetailModal({
               <div className="bg-gray-50 rounded-lg p-3">
                 <p className="text-xs text-gray-500">CPC</p>
                 <p className="text-lg font-bold text-gray-900">
-                  {formatAndConvert(ad.cpc, (ad.currency as Currency) || accountCurrency, displayCurrency)}
+                  {formatAndConvert(ad.cpc, accountCurrency, displayCurrency)}
                 </p>
               </div>
             </div>
           </div>
 
-          {/* Facebook preview link — Meta only. Google's previewLink is the
-              landing-page URL, not the Google Ads editor, so we hide the
-              button for Google ads to avoid misleading the user. */}
-          {ad.provider !== "google" && ad.previewLink && (
+          {/* Facebook preview link — always available when Meta exposes it */}
+          {ad.previewLink && (
             <div className="border-t border-gray-100 pt-4">
               <a
                 href={ad.previewLink}
@@ -1269,12 +1172,6 @@ export default function ReportsClient({
     "campaigns"
   );
 
-  // Phase 4.8 M5 Commit 1B — separate sub-tab state for Google to allow
-  // independent toggling per platform.
-  const [googleActiveTab, setGoogleActiveTab] = useState<
-    "campaigns" | "creatives"
-  >("campaigns");
-
   // Outer platform tab (Phase 4.8 M1). Defaults to Meta; auto-switches to
   // Google when the workspace has no Meta connection but has Google.
   const [platformTab, setPlatformTab] = useState<"meta" | "google">("meta");
@@ -1291,19 +1188,6 @@ export default function ReportsClient({
     if (typeof window === "undefined") return;
     localStorage.setItem("arabiadash:reportsTab", activeTab);
   }, [activeTab]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const saved = localStorage.getItem("arabiadash:googleReportsTab");
-    if (saved === "campaigns" || saved === "creatives") {
-      setGoogleActiveTab(saved);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    localStorage.setItem("arabiadash:googleReportsTab", googleActiveTab);
-  }, [googleActiveTab]);
 
   useEffect(() => {
     if (!metaAccountId && googleAccountIds.length > 0) {
@@ -1456,19 +1340,6 @@ export default function ReportsClient({
     accountIds: googleAccountIds,
     ...dateRangeValueToOptions(dateRange),
     level: "campaign",
-  });
-
-  // Phase 4.8 M5 Commit 1B — multi-account Google ads fanout
-  const {
-    ads: googleAds,
-    loading: googleAdsLoading,
-    error: googleAdsError,
-    noConnection: googleAdsNoConnection,
-    refresh: refreshGoogleAds,
-  } = useProviderAds({
-    provider: "google",
-    accountIds: googleAccountIds,
-    ...dateRangeValueToOptions(dateRange),
   });
 
   // Phase 4.8 M4 Commit 2 — filter, status filter, sort pipeline
@@ -3200,43 +3071,7 @@ export default function ReportsClient({
                         </div>
                       )}
 
-                      {/* Phase 4.8 M5 Commit 1B — Google sub-tab toggle */}
-                      <div className="border-b border-gray-100 mb-4 mt-4">
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={() => setGoogleActiveTab("campaigns")}
-                            className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
-                              googleActiveTab === "campaigns"
-                                ? "border-indigo-600 text-indigo-600"
-                                : "border-transparent text-gray-500 hover:text-gray-700"
-                            }`}
-                          >
-                            الحملات
-                            {googleCampaigns.insights.length > 0 && (
-                              <span className="mr-1.5 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">
-                                {googleCampaigns.insights.length}
-                              </span>
-                            )}
-                          </button>
-                          <button
-                            onClick={() => setGoogleActiveTab("creatives")}
-                            className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
-                              googleActiveTab === "creatives"
-                                ? "border-indigo-600 text-indigo-600"
-                                : "border-transparent text-gray-500 hover:text-gray-700"
-                            }`}
-                          >
-                            الإبداعات
-                            {googleAds.length > 0 && (
-                              <span className="mr-1.5 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">
-                                {googleAds.length}
-                              </span>
-                            )}
-                          </button>
-                        </div>
-                      </div>
-
-                      {googleActiveTab === "campaigns" ? (
+                      {/* Google campaigns table — Phase 4.8 M4 */}
                       <div className="border border-gray-100 rounded-lg p-3 sm:p-4 mt-4">
                         <h4 className="text-sm font-bold text-gray-900 mb-3">
                           تفاصيل الحملات
@@ -3432,50 +3267,6 @@ export default function ReportsClient({
                           </div>
                         )}
                       </div>
-                      ) : (
-                      <div className="border border-gray-100 rounded-lg p-3 sm:p-4 mt-4">
-                        {googleAdsNoConnection ? (
-                          <div className="text-center py-10 text-gray-500">
-                            <p className="text-sm">لا توجد حسابات Google مربوطة</p>
-                          </div>
-                        ) : googleAdsLoading && googleAds.length === 0 ? (
-                          <div className="text-center py-10 text-gray-500">
-                            <p className="text-sm">جاري التحميل...</p>
-                          </div>
-                        ) : googleAdsError === "fetch_failed" ? (
-                          <div className="text-center py-10 text-gray-500">
-                            <p className="text-sm text-red-600">تعذّر تحميل الإعلانات</p>
-                            <button
-                              onClick={() => refreshGoogleAds()}
-                              className="mt-2 text-sm text-indigo-600 hover:underline"
-                            >
-                              إعادة المحاولة
-                            </button>
-                          </div>
-                        ) : googleAds.length === 0 ? (
-                          <div className="text-center py-10 text-gray-500">
-                            <p className="text-sm">لا توجد إعلانات بإنفاق في هذه الفترة</p>
-                          </div>
-                        ) : (
-                          <>
-                            <h4 className="text-sm font-bold text-gray-900 mb-3">
-                              تفاصيل الإعلانات
-                            </h4>
-                            <CreativesGrid
-                              ads={googleAds}
-                              loading={googleAdsLoading}
-                              accountCurrency={"USD" as Currency}
-                              displayCurrency={currency}
-                            />
-                            {googleAdsError === "partial_failure" && (
-                              <p className="text-xs text-amber-600 mt-2 text-center">
-                                ⚠️ بعض الحسابات لم يتم تحميلها — قد تكون البيانات غير مكتملة
-                              </p>
-                            )}
-                          </>
-                        )}
-                      </div>
-                      )}
                     </div>
                   )}
                 </div>
