@@ -134,6 +134,15 @@ export interface UnifiedAd {
   // Identity
   id: string;
   name: string;
+
+  /**
+   * Account currency (ISO 4217 — "SAR", "USD", "AED", etc.) at the time of fetch.
+   * Optional for backward compatibility with cached rows pre-extension.
+   * Phase 4.8 M5 Commit 1B — enables per-ad currency conversion for
+   * multi-account workspaces with mixed currencies.
+   * Pattern mirrors UnifiedInsight.currency (Phase 4.7 C0, ADR-005).
+   */
+  currency?: string;
   // Status: every non-ACTIVE / non-DELETED state from Meta (PAUSED, ARCHIVED,
   // CAMPAIGN_PAUSED, ADSET_PAUSED, IN_PROCESS, WITH_ISSUES, …) is normalized
   // to PAUSED — users only care about whether the ad is currently running.
@@ -150,12 +159,30 @@ export interface UnifiedAd {
   imageUrl?: string; // Image ads
   thumbnailUrl?: string; // Video ad preview
   videoId?: string; // Meta video ID
-  creativeType: "image" | "video" | "carousel" | "catalog" | "unknown";
+  creativeType:
+    | "image"
+    | "video"
+    | "carousel"
+    | "catalog"
+    | "text"
+    | "unknown";
 
   // Creative content
   title?: string;
   body?: string;
   callToAction?: string;
+
+  /**
+   * Multiple headlines (Google RSA up to 15, RDA up to 5).
+   * Phase 4.8 M5 Commit 1 — enables creative-level analysis for text ads.
+   */
+  headlines?: string[];
+
+  /**
+   * Multiple descriptions (Google RSA up to 4, RDA up to 5).
+   * Phase 4.8 M5 Commit 1 — enables creative-level analysis for text ads.
+   */
+  descriptions?: string[];
 
   // Catalog-specific
   productSetId?: string;
