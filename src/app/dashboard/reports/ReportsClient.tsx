@@ -389,6 +389,10 @@ function CreativeCard({
     ad.carouselImages.length > 1;
   const isText =
     ad.creativeType === "text" && (ad.headlines?.length ?? 0) > 0;
+  const extensionCount =
+    (ad.extensions?.sitelinks?.length ?? 0) +
+    (ad.extensions?.callouts?.length ?? 0) +
+    (ad.extensions?.structuredSnippets?.length ?? 0);
 
   return (
     <div
@@ -584,6 +588,13 @@ function CreativeCard({
               {formatAndConvert(ad.spend, (ad.currency as Currency) || accountCurrency, displayCurrency)}
             </p>
           </div>
+          {extensionCount > 0 && (
+            <div className="col-span-2 mt-1">
+              <span className="inline-block text-[10px] text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full border border-purple-100">
+                +{extensionCount} إضافة
+              </span>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -898,6 +909,105 @@ function AdDetailModal({
               </ol>
             </div>
           )}
+
+          {/* Phase 4.8 M6 — Asset Extensions (Google-only) per ADR-012 */}
+          {ad.extensions?.sitelinks && ad.extensions.sitelinks.length > 0 && (
+            <div>
+              <p className="text-xs text-gray-500 mb-2">
+                روابط مرتبطة ({ad.extensions.sitelinks.length})
+              </p>
+              <div className="space-y-2">
+                {ad.extensions.sitelinks.map((sl, i) =>
+                  sl.finalUrl ? (
+                    <a
+                      key={i}
+                      href={sl.finalUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block bg-blue-50 hover:bg-blue-100 transition-colors rounded-lg p-3 border border-blue-100 group"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-sm font-medium text-blue-700 group-hover:text-blue-800 flex-1 min-w-0">
+                          {sl.text}
+                        </div>
+                        <svg
+                          className="w-4 h-4 text-blue-400 group-hover:text-blue-600 flex-shrink-0"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
+                          />
+                        </svg>
+                      </div>
+                    </a>
+                  ) : (
+                    <div
+                      key={i}
+                      className="bg-blue-50 rounded-lg p-3 border border-blue-100"
+                    >
+                      <div className="text-sm font-medium text-blue-700">
+                        {sl.text}
+                      </div>
+                    </div>
+                  )
+                )}
+              </div>
+            </div>
+          )}
+
+          {ad.extensions?.callouts && ad.extensions.callouts.length > 0 && (
+            <div>
+              <p className="text-xs text-gray-500 mb-2">
+                إضافات نصية ({ad.extensions.callouts.length})
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {ad.extensions.callouts.map((co, i) => (
+                  <span
+                    key={i}
+                    className="inline-block bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-full text-sm border border-emerald-100"
+                  >
+                    {co}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {ad.extensions?.structuredSnippets &&
+            ad.extensions.structuredSnippets.length > 0 && (
+              <div>
+                <p className="text-xs text-gray-500 mb-2">
+                  بيانات تفصيلية ({ad.extensions.structuredSnippets.length})
+                </p>
+                <div className="space-y-3">
+                  {ad.extensions.structuredSnippets.map((ss, i) => (
+                    <div
+                      key={i}
+                      className="bg-purple-50 rounded-lg p-3 border border-purple-100"
+                    >
+                      <div className="text-sm font-semibold text-purple-700 mb-2">
+                        {ss.header}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {ss.values.map((v, j) => (
+                          <span
+                            key={j}
+                            className="inline-block bg-white text-purple-600 px-2.5 py-1 rounded text-xs border border-purple-100"
+                          >
+                            {v}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
           {hasCatalogProducts && (
             <div>
