@@ -1,6 +1,18 @@
 import { createClient } from "@/lib/supabase/server";
 import type { Json } from "@/lib/supabase/database.types";
 
+/**
+ * Bump this when UnifiedAd or UnifiedInsight schema changes incompatibly.
+ * Forces all callers to miss the cache and refetch with the new shape.
+ *
+ * History:
+ * - v1: initial (implicit)
+ * - v2: Phase 4.8 M5 — UnifiedAd gained headlines, descriptions, currency,
+ *       imageUrl, carouselImages. UnifiedInsight gained status (M4) and
+ *       currency. Old cache entries lack these fields.
+ */
+const CACHE_SCHEMA_VERSION = "v2";
+
 const CACHE_TTL_MINUTES = 15;
 
 // Insights SWR windows. fresh_until / stale_until are plain columns now
@@ -30,6 +42,13 @@ export interface SWRCacheResult<T> {
 // below see consistent timestamps.
 // =================================================================
 
+/**
+ * Suffix the caller's cache_key with the current schema version so that
+ * post-bump reads/writes hit a fresh row. Old v1 rows become unreachable.
+ */
+const versionedKey = (cacheKey: string): string =>
+  `${cacheKey}:${CACHE_SCHEMA_VERSION}`;
+
 export async function getCachedData<T>(
   connectionId: number,
   provider: AdProvider,
@@ -42,7 +61,7 @@ export async function getCachedData<T>(
     .select("data, expires_at")
     .eq("connection_id", connectionId)
     .eq("provider", provider)
-    .eq("cache_key", cacheKey)
+    .eq("cache_key", versionedKey(cacheKey))
     .gt("expires_at", new Date().toISOString())
     .single();
 
@@ -71,7 +90,7 @@ export async function setCachedData<T>(
     {
       connection_id: connectionId,
       provider,
-      cache_key: cacheKey,
+      cache_key: versionedKey(cacheKey),
       data: data as Json,
       fetched_at: now.toISOString(),
       expires_at: expiresAt.toISOString(),
@@ -114,7 +133,7 @@ export async function getCachedDataSWR<T>(
     .select("data, fetched_at, fresh_until, stale_until")
     .eq("connection_id", connectionId)
     .eq("provider", provider)
-    .eq("cache_key", cacheKey)
+    .eq("cache_key", versionedKey(cacheKey))
     .maybeSingle();
 
   if (error || !data) return null;
@@ -150,7 +169,7 @@ export async function getCachedCreatives<T>(params: {
     .eq("user_id", params.userId)
     .eq("provider", params.provider)
     .eq("account_id", params.accountId)
-    .eq("date_range", params.dateRange)
+    .eq("date_range", versionedKey(params.dateRange))
     .maybeSingle();
 
   if (error || !data) return null;
@@ -189,7 +208,7 @@ export async function setCachedCreatives<T>(params: {
       user_id: params.userId,
       provider: params.provider,
       account_id: params.accountId,
-      date_range: params.dateRange,
+      date_range: versionedKey(params.dateRange),
       data: params.data as unknown as Json,
       fetched_at: now.toISOString(),
       fresh_until: freshUntil.toISOString(),
