@@ -10,8 +10,10 @@ import type { Json } from "@/lib/supabase/database.types";
  * - v2: Phase 4.8 M5 — UnifiedAd gained headlines, descriptions, currency,
  *       imageUrl, carouselImages. UnifiedInsight gained status (M4) and
  *       currency. Old cache entries lack these fields.
+ * - v3: Phase 4.8 M6 — UnifiedAd gained extensions (sitelinks, callouts,
+ *       structured snippets). Pre-v3 entries lack this field. See ADR-012.
  */
-const CACHE_SCHEMA_VERSION = "v2";
+const CACHE_SCHEMA_VERSION = "v3";
 
 const CACHE_TTL_MINUTES = 15;
 

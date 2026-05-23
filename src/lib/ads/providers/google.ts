@@ -5,6 +5,7 @@ import {
   type UnifiedInsight,
   type UnifiedAccount,
   type UnifiedAd,
+  type UnifiedAdExtensions,
   type DateRangeInput,
   type TimeIncrement,
   isCustomRange,
@@ -13,6 +14,7 @@ import {
 import { fetchCampaigns, type CampaignRow } from "@/lib/google-ads/campaigns";
 import { fetchAds, type AdRow } from "@/lib/google-ads/ads";
 import { fetchAssetUrls } from "@/lib/google-ads/assets";
+import { fetchAdExtensions } from "@/lib/google-ads/extensions";
 import {
   fetchTimeSeries,
   type TimeSeriesPoint,
@@ -199,20 +201,36 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       }
     }
 
-    // Pass 3: batch-resolve to URLs (single API call regardless of ad count).
-    // Empty set short-circuits to an empty map without firing a request.
-    const urlMap =
+    // Pass 3 + 4: parallel — image URLs AND asset extensions.
+    // Both reach Google Ads API independently; running in parallel keeps
+    // wall time = max(image URL latency, extensions latency) instead of sum.
+    // Empty image-set short-circuits without firing a request.
+    const [urlMap, extensionsMap] = await Promise.all([
       allResourceNames.size > 0
-        ? await fetchAssetUrls({
+        ? fetchAssetUrls({
             customerId: this.customerId,
             refreshToken: this.refreshToken,
             loginCustomerId: this.loginCustomerId,
             resourceNames: Array.from(allResourceNames),
           })
-        : new Map<string, string>();
+        : Promise.resolve(new Map<string, string>()),
+      // Phase 4.8 M6 — Asset Extensions per ADR-012
+      fetchAdExtensions({
+        customerId: this.customerId,
+        refreshToken: this.refreshToken,
+        loginCustomerId: this.loginCustomerId,
+        dateFrom,
+        dateTo,
+        adIdToCampaignId: new Map(
+          activeAds.map((ad) => [ad.id, ad.campaign_id])
+        ),
+      }),
+    ]);
 
-    // Pass 4: normalize with URL lookups baked in.
-    return activeAds.map((ad) => this.normalizeAd(ad, urlMap));
+    // Pass 5: normalize with URL lookups + extensions baked in.
+    return activeAds.map((ad) =>
+      this.normalizeAd(ad, urlMap, extensionsMap)
+    );
   }
 
   // ───────────────────────────────────────────────────────────────
@@ -653,7 +671,8 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
    */
   private normalizeAd = (
     ad: AdRow,
-    urlMap?: Map<string, string>
+    urlMap?: Map<string, string>,
+    extensionsMap?: Map<string, UnifiedAdExtensions>
   ): UnifiedAd => {
     // Resolve collected asset resource names to URLs via the batched map.
     const resolvedUrls: string[] = [];
@@ -669,6 +688,10 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     const imageUrl = resolvedUrls.length > 0 ? resolvedUrls[0] : undefined;
     const carouselImages =
       resolvedUrls.length > 1 ? resolvedUrls : undefined;
+
+    // Phase 4.8 M6 — attach extensions if any (Google-only; undefined when
+    // the ad has no extensions or fetchAdExtensions returned empty).
+    const extensions = extensionsMap?.get(ad.id);
 
     return {
       id: ad.id,
@@ -691,6 +714,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       headlines: ad.headlines,
       descriptions: ad.descriptions,
       carouselImages,
+      extensions,
       spend: ad.spend,
       revenue: ad.revenue,
       roas: ad.roas,
