@@ -192,6 +192,7 @@ Fallback per-asset visual when `performance_label` rejects: `primary_status` ind
 - **Stage 3 Q3 unverified at asset level** — `performance_label` rejected at runtime; must validate `asset_group_asset` field names individually during commit 3 implementation (M5 lesson: trust nothing without GAQL verification)
 - **Cache v3 → v4 invalidation cascade** — users see one slower fetch per account on first deploy (~30-min transition window). Acceptable per M5→M6 precedent
 - **Component refactor touches M5/M6 tested production code** — mitigated by TypeScript compiler + `npm run check` + local repro before each push; the all-in-one milestone reduces verification overhead vs splitting
+- **Component extraction deferred to post-M-PMax milestone** — the M5/M6 inline rendering in `ReportsClient.tsx` remains as inline JSX through Commit 12. New PMax card components are imported sibling files. Mixed-rendering pattern is temporary but functional. The extraction (originally Commit 9) is queued as a dedicated milestone with focused session time, lower regression risk than mid-session refactor.
 
 ## Alternatives considered
 
@@ -213,6 +214,7 @@ Fallback per-asset visual when `performance_label` rejects: `primary_status` ind
 - **Retail surface adds GAQL field-isolation testing burden** — per the M5+M6+M-PMax trifecta lesson, every new SELECT field needs an isolated test query before reaching production. This adds dev-time overhead but is the only reliable detection method for SDK runtime rejections.
 - **Component extraction risk to M5/M6 production paths** — mitigated by TypeScript compiler (no consumer that misses a narrowing site compiles) + `npm run check` gating + local repro before each push. Risk is real but bounded by the verification protocol.
 - **`performance_label` deferred to v2 if still rejected** — UI design accommodates the v1-without-label state via `primary_status` fallback. JSONB `type_data` shape adds `performanceLabel?` later with zero migration cost. This is a constraint-driven exception to the no-deferrals principle — Google's API itself rejects the field at runtime (third instance of the SDK-field-vs-runtime-queryability trap). We ship the fallback design now and revisit when Google enables or our field-isolation test during commit 5 reveals an alternative path.
+- **Deferred M5/M6 extraction adds 1-2 hours to a future dedicated session** — instead of being amortized into M-PMax's atomic boundary. Acceptable trade because the regression risk of mid-session refactor on production rendering code outweighs the verification-cost saving. The new PMax card files (Commits 10-11) establish the extraction target pattern that the deferred Commit 9 will follow.
 
 ## Implementation plan (atomic commits)
 
@@ -228,12 +230,13 @@ Fallback per-asset visual when `performance_label` rejects: `primary_status` ind
 - Commit 7: Add `PMAX_SHOPPING_PRODUCT` variant to `UnifiedAd` discriminated union with 6-field shape (`productId` required, 5 optional). Google adapter — `fetchShoppingProducts` query (`FROM shopping_performance_view`, retail per-product metrics). Adds `PRODUCT_CONDITION_MAP` integer→string helper verified against `ProductConditionEnum` proto. Image/price/cross-reference fields explicitly deferred per Alternative 6 rationale.
 - Commit 8a: Google adapter — `fetchPurchaseProductGroupTotals` (ADR-011 sibling at product_group level, sixth merger of the family). Restores filtered purchase data on `PMAX_PRODUCT_GROUP` rows.
 - Commit 8b: Google adapter — `fetchPurchaseShoppingProductTotals` (ADR-011 sibling at shopping_product level, seventh merger). Restores filtered purchase data on `PMAX_SHOPPING_PRODUCT` rows.
-- Commit 9: UI extraction — `MetaCreativeCard.tsx` + `GoogleCreativeCard.tsx` from inline; shared helpers module created
-- Commit 10: UI new — `PMaxAssetGroupCard.tsx`
-- Commit 11: UI new — `PMaxProductGroupCard.tsx`
-- Commit 12: UI new — `PMaxShoppingProductCard.tsx`
-- Commit 13: ReportsClient integration — dispatcher switch on `ad.ad_type` + sub-tab navigation for asset_group / product_group / shopping_product views
-- Commit 14: e2e verification + close-out — verify on imaa retail account (Stage 3 baseline), CLAUDE.md update, M-PMax closed in milestone list, gh issue with `tech-debt` label for any deferred items (e.g., `performance_label` if still rejected)
+- Commit 9: **DEFERRED post-M-PMax** — UI extraction (`MetaCreativeCard` + `GoogleCreativeCard` from inline `ReportsClient.tsx` rendering). Originally planned as part of M-PMax to amortize verification cost against the discriminated-union refactor, but deferred to a dedicated session to reduce regression risk on M5/M6 production rendering. The component extraction pattern (sibling card files in `src/components/creatives/`) is still established by Commits 10-12; M5/M6 will follow the same pattern when extracted.
+- Commit 10: UI new — `PMaxAssetGroupCard.tsx` in `src/components/creatives/` (new file, zero risk to existing rendering). Renders `PMAX_ASSET_GROUP` variant: `ad_strength` badge, `asset_coverage` indicators, nested asset chips (text + image + video) with optional `performance_label` support.
+- Commit 11: UI new — `PMaxProductGroupCard.tsx` + `PMaxShoppingProductCard.tsx` in `src/components/creatives/` (two new files, zero risk to existing). `PMaxProductGroupCard` renders `PMAX_PRODUCT_GROUP` rows (product dimension breadcrumb + metrics + ROAS-colored border per Memory #29 retail patterns). `PMaxShoppingProductCard` renders `PMAX_SHOPPING_PRODUCT` rows (title + brand + condition badge + metrics — image/price/cross-reference deferred per ADR Alternative 6).
+- Commit 12: `ReportsClient.tsx` integration — dispatcher switch on `ad.ad_type` that imports and renders the three new PMax card components inline alongside the existing inline M5/M6 `CreativeCard` rendering. Mixed-rendering temporary state: M5/M6 stays as inline JSX (unchanged), PMax variants delegated to imported components. This is the first commit that makes PMax data **visible** to users in the UI. Vercel preview deploy + manual verification on imaa Meta + Google + PMax data after this commit.
+- Commit 13: e2e verification + close-out — verify on imaa retail account (Stage 3 baseline), CLAUDE.md update, M-PMax closed in milestone list, gh issue with `tech-debt` label for any deferred items including deferred-Commit-9 extraction.
+
+(One commit removed from plan vs 14 → 13. Commit 9 reappears later as a standalone post-M-PMax milestone.)
 
 The final atomic-commit count may merge or split during execution (e.g., commits 3 and 4 may bundle if asset_group_asset is sufficiently coupled to asset_group). The structure above is the planning target, not a hard contract.
 
@@ -261,4 +264,5 @@ The final atomic-commit count may merge or split during execution (e.g., commits
 - `6af2626` — feat(google): fetchProductGroups query — retail PMax product-level rows (Commit 6, ADR-013)
 - `1d129dd` — docs(adr): ADR-013 update — add PMAX_SHOPPING_PRODUCT variant + post-Commit-6 housekeeping
 - *(next)* — docs(adr): ADR-013 update — PMAX_SHOPPING_PRODUCT shape revisions post-Q8 field-isolation
+- *(next)* — docs(adr): ADR-013 update — defer Commit 9 (M5/M6 UI extraction) post-M-PMax
 - *(further SHAs added as commits land)*
