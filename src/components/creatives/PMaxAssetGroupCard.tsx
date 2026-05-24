@@ -1,3 +1,4 @@
+import { Sparkles } from "lucide-react";
 import type { UnifiedAd } from "@/lib/ads/types";
 import { formatAndConvert, type Currency } from "@/lib/currency";
 
@@ -49,19 +50,10 @@ const STATUS_LABELS_AR: Record<string, string> = {
   DELETED: "محذوف",
 };
 
-const AD_STRENGTH_BADGE_CONFIG: Record<
-  string,
-  { label: string; className: string }
-> = {
-  EXCELLENT: { label: "ممتاز", className: "bg-green-100 text-green-800" },
-  GOOD: { label: "جيد", className: "bg-blue-100 text-blue-800" },
-  AVERAGE: { label: "متوسط", className: "bg-amber-100 text-amber-800" },
-  POOR: { label: "ضعيف", className: "bg-red-100 text-red-800" },
-  NO_ADS: { label: "لا توجد إعلانات", className: "bg-gray-100 text-gray-700" },
-  PENDING: { label: "قيد المراجعة", className: "bg-gray-100 text-gray-600" },
-  UNSPECIFIED: { label: "غير محدد", className: "bg-gray-100 text-gray-600" },
-  UNKNOWN: { label: "غير معروف", className: "bg-gray-100 text-gray-600" },
-};
+// ad_strength badge removed from the card per Stage 5 UX feedback —
+// users found a bare "متوسط" confusing without context. The strength
+// label still surfaces inside PMaxAssetGroupModalContent where it has
+// room to be explained alongside ad_strength and primary_status.
 
 // -----------------------------------------------------------------
 // Helpers
@@ -132,10 +124,6 @@ export function PMaxAssetGroupCard({
   const heroImageUrl = pickHeroImageUrl(ad.type_data.assets);
   const counts = countAssets(ad.type_data.assets);
 
-  const strengthCfg =
-    AD_STRENGTH_BADGE_CONFIG[ad.type_data.adStrength] ??
-    AD_STRENGTH_BADGE_CONFIG.UNKNOWN;
-
   // Asset counts hint — only render the segments that have items, so
   // an account with no videos doesn't show "0 فيديو" noise.
   const hintParts: string[] = [];
@@ -180,22 +168,12 @@ export function PMaxAssetGroupCard({
           </div>
         )}
 
-        {/* Top-left: Performance Max identifier badge */}
+        {/* Top-left: Performance Max identifier badge — Sparkles icon
+            from lucide-react mirrors the brand visual treatment used in
+            PMaxAssetGroupModalContent's sticky header. */}
         <div className="absolute top-2 left-2">
           <span className="px-2 py-0.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded text-[10px] font-semibold flex items-center gap-1">
-            <svg
-              className="w-3 h-3"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth="2"
-                d="M13 10V3L4 14h7v7l9-11h-7z"
-              />
-            </svg>
+            <Sparkles className="w-3 h-3" />
             PMax
           </span>
         </div>
@@ -210,24 +188,27 @@ export function PMaxAssetGroupCard({
             {STATUS_LABELS_AR[ad.status] ?? ad.status}
           </span>
         </div>
-
-        {/* Bottom-left: ad_strength chip (PMax-specific overlay) */}
-        <div className="absolute bottom-2 left-2">
-          <span
-            className={`px-2 py-0.5 rounded text-[10px] font-semibold ${strengthCfg.className}`}
-          >
-            {strengthCfg.label}
-          </span>
-        </div>
       </div>
 
       <div className="p-3">
+        {/* Primary line = campaign name (users think in campaigns, not
+            asset_groups). asset_group name surfaces as the subtitle so
+            the row still distinguishes multiple asset_groups under the
+            same PMax campaign. campaignName is populated by the adapter
+            from the GAQL JOIN; ad.name is the asset_group name fallback
+            if campaignName is somehow empty. */}
         <h4
-          className="font-semibold text-gray-900 text-xs line-clamp-2 mb-2 min-h-[2rem]"
+          className="font-semibold text-gray-900 text-xs line-clamp-1"
+          title={ad.campaignName ?? ad.name}
+        >
+          {ad.campaignName ?? ad.name}
+        </h4>
+        <p
+          className="text-[10px] text-gray-500 mb-2 line-clamp-1"
           title={ad.name}
         >
           {ad.name}
-        </h4>
+        </p>
 
         <div className="grid grid-cols-2 gap-2 text-xs">
           <div>
