@@ -366,9 +366,39 @@ export interface UnifiedAdMeta extends UnifiedAdCommon {
 export interface UnifiedAdPmaxAssetGroup extends UnifiedAdCommon {
   ad_type: "PMAX_ASSET_GROUP";
   type_data: {
-    /** Mapped from Google's integer enum via AD_STRENGTH_MAP in pmax.ts. */
-    adStrength: "EXCELLENT" | "GOOD" | "AVERAGE" | "POOR" | "NO_ADS";
-    primaryStatus: "ENABLED" | "PAUSED";
+    /**
+     * Mapped from Google's integer enum via AD_STRENGTH_MAP in
+     * `providers/google.ts`. Full enum surface per the Google Ads proto
+     * definitions (verified against ad_strength_pb2). UI palette colors
+     * EXCELLENT/GOOD/AVERAGE/POOR/NO_ADS; UNSPECIFIED/UNKNOWN/PENDING
+     * collapse to a neutral fallback badge.
+     */
+    adStrength:
+      | "UNSPECIFIED"
+      | "UNKNOWN"
+      | "PENDING"
+      | "NO_ADS"
+      | "POOR"
+      | "AVERAGE"
+      | "GOOD"
+      | "EXCELLENT";
+    /**
+     * Mapped from Google's integer enum via PRIMARY_STATUS_MAP in
+     * `providers/google.ts`. Full enum surface per asset_group_primary_status_pb2.
+     * The narrower common-level `status` field collapses these into
+     * ACTIVE/PAUSED/DELETED via `normalizeAssetGroupStatus`; this raw value
+     * is preserved here for richer UI access (e.g. distinguishing LIMITED
+     * from PAUSED in a tooltip).
+     */
+    primaryStatus:
+      | "UNSPECIFIED"
+      | "UNKNOWN"
+      | "ELIGIBLE"
+      | "PAUSED"
+      | "REMOVED"
+      | "NOT_ELIGIBLE"
+      | "LIMITED"
+      | "PENDING";
     /**
      * Assets bundled under this asset_group. Each asset surfaces its raw
      * Google field_type (HEADLINE / DESCRIPTION / MARKETING_IMAGE / etc.)

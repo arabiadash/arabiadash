@@ -20,6 +20,98 @@ import {
   type TimeSeriesPoint,
 } from "@/lib/google-ads/timeseries";
 
+// ──────────────────────────────────────────────────────────────────
+// Performance Max enum maps (ADR-013)
+// ──────────────────────────────────────────────────────────────────
+// Integer values verified against Google Ads proto definitions
+// (ad_strength_pb2 + asset_group_primary_status_pb2). The SDK can
+// serialize enum fields as EITHER the integer or the string label
+// depending on call site / response shape — the readers below handle
+// both modes (see `readAdStrength` / `readPrimaryStatus`).
+//
+// Trap avoided: an earlier recon note assumed ad_strength=5 meant GOOD.
+// Per the proto, 5 = AVERAGE. Always cross-check with proto, not docs.
+const AD_STRENGTH_MAP = {
+  0: "UNSPECIFIED",
+  1: "UNKNOWN",
+  2: "PENDING",
+  3: "NO_ADS",
+  4: "POOR",
+  5: "AVERAGE",
+  6: "GOOD",
+  7: "EXCELLENT",
+} as const;
+
+type AdStrengthLabel = (typeof AD_STRENGTH_MAP)[keyof typeof AD_STRENGTH_MAP];
+
+const PRIMARY_STATUS_MAP = {
+  0: "UNSPECIFIED",
+  1: "UNKNOWN",
+  2: "ELIGIBLE",
+  3: "PAUSED",
+  4: "REMOVED",
+  5: "NOT_ELIGIBLE",
+  6: "LIMITED",
+  7: "PENDING",
+} as const;
+
+type PrimaryStatusLabel =
+  (typeof PRIMARY_STATUS_MAP)[keyof typeof PRIMARY_STATUS_MAP];
+
+function readAdStrength(raw: unknown): AdStrengthLabel {
+  if (typeof raw === "number") {
+    return AD_STRENGTH_MAP[raw as keyof typeof AD_STRENGTH_MAP] ?? "UNKNOWN";
+  }
+  if (typeof raw === "string") {
+    return (Object.values(AD_STRENGTH_MAP) as string[]).includes(raw)
+      ? (raw as AdStrengthLabel)
+      : "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
+
+function readPrimaryStatus(raw: unknown): PrimaryStatusLabel {
+  if (typeof raw === "number") {
+    return (
+      PRIMARY_STATUS_MAP[raw as keyof typeof PRIMARY_STATUS_MAP] ?? "UNKNOWN"
+    );
+  }
+  if (typeof raw === "string") {
+    return (Object.values(PRIMARY_STATUS_MAP) as string[]).includes(raw)
+      ? (raw as PrimaryStatusLabel)
+      : "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
+
+/**
+ * Collapse asset_group.primary_status into the UnifiedAdCommon 3-value
+ * status union. Mirrors `normalizeAdStatus`'s precedent (Google has many
+ * statuses; the common-level field stays ACTIVE/PAUSED/DELETED only).
+ *
+ * The raw primary_status label is preserved in `type_data.primaryStatus`
+ * for richer UI (tooltip can distinguish LIMITED from a plain PAUSED).
+ */
+function normalizeAssetGroupStatus(
+  primaryStatus: PrimaryStatusLabel
+): "ACTIVE" | "PAUSED" | "DELETED" {
+  switch (primaryStatus) {
+    case "ELIGIBLE":
+      return "ACTIVE";
+    case "PAUSED":
+      return "PAUSED";
+    case "REMOVED":
+      return "DELETED";
+    case "NOT_ELIGIBLE":
+    case "LIMITED":
+    case "PENDING":
+    case "UNSPECIFIED":
+    case "UNKNOWN":
+    default:
+      return "PAUSED";
+  }
+}
+
 /**
  * GoogleAdsAdapter wraps the Google Ads-specific fetchers and normalizes
  * their output to the Unified shapes consumed by /api/ads/* endpoints.
@@ -228,9 +320,17 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     ]);
 
     // Pass 5: normalize with URL lookups + extensions baked in.
-    return activeAds.map((ad) =>
+    const normalizedAds = activeAds.map((ad) =>
       this.normalizeAd(ad, urlMap, extensionsMap)
     );
+
+    // Pass 6 (M-PMax / ADR-013): asset_group rows. PMax campaigns return
+    // ZERO rows from passes 1-5 (no ad_group_ad), so this pass is the
+    // sole surface for Performance Max creative units. assets[] starts
+    // empty — populated by fetchAssetGroupAssets in Commit 4.
+    const assetGroupRows = await this.fetchAssetGroupRows(dateFrom, dateTo);
+
+    return [...normalizedAds, ...assetGroupRows];
   }
 
   // ───────────────────────────────────────────────────────────────
@@ -776,5 +876,131 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     if (googleStatus === "ENABLED") return "ACTIVE";
     if (googleStatus === "REMOVED") return "DELETED";
     return "PAUSED";
+  }
+
+  /**
+   * Performance Max asset_group rows (ADR-013, Commit 3).
+   *
+   * One GAQL pass against `FROM asset_group` with 11 confirmed-working
+   * fields (Stage 3 recon). PMax campaigns expose no `ad_group_ad`, so this
+   * is the sole creative-unit surface for them. Returns UnifiedAd rows of
+   * the PMAX_ASSET_GROUP variant; `assets[]` is intentionally empty here
+   * and populated by `fetchAssetGroupAssets` in Commit 4.
+   *
+   * Fields explicitly NOT in the SELECT (per ADR-013 field-isolation
+   * discipline):
+   *  - `asset_group.asset_coverage` (v19+ field, not Stage-3 tested)
+   *  - `asset_group.status` (richer `primary_status` already covers it)
+   *  - `asset_group_asset.performance_label` (proven runtime-rejected in
+   *    Stage 3 — bundled into the future v2 work)
+   *
+   * Error handling mirrors `fetchPurchaseCampaignTotals`: a GoogleAdsFailure
+   * (or any thrown error) is logged and degrades the result to []. Callers
+   * concatenate the result with prior passes, so [] is a safe no-op for
+   * accounts without PMax campaigns.
+   */
+  private async fetchAssetGroupRows(
+    dateFrom: string,
+    dateTo: string
+  ): Promise<UnifiedAd[]> {
+    try {
+      const api = new GoogleAdsApi({
+        client_id: process.env.GOOGLE_ADS_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_ADS_CLIENT_SECRET!,
+        developer_token: process.env.GOOGLE_ADS_DEVELOPER_TOKEN!,
+      });
+
+      const customer = api.Customer({
+        customer_id: this.customerId,
+        refresh_token: this.refreshToken,
+        ...(this.loginCustomerId
+          ? { login_customer_id: this.loginCustomerId }
+          : {}),
+      });
+
+      const query = `
+        SELECT
+          campaign.id,
+          campaign.name,
+          asset_group.id,
+          asset_group.name,
+          asset_group.ad_strength,
+          asset_group.primary_status,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM asset_group
+        WHERE segments.date BETWEEN '${dateFrom}' AND '${dateTo}'
+      `;
+
+      const rows = await customer.query(query);
+
+      const out: UnifiedAd[] = [];
+      for (const row of rows) {
+        const assetGroupId = String(row.asset_group?.id ?? "");
+        if (!assetGroupId) continue;
+
+        const impressions = Number(row.metrics?.impressions) || 0;
+        const clicks = Number(row.metrics?.clicks) || 0;
+        const costMicros = Number(row.metrics?.cost_micros) || 0;
+        const spend = costMicros / 1_000_000;
+
+        // Drop zero-activity rows — same convention as fetchAds active filter.
+        if (impressions === 0 && spend === 0) continue;
+
+        // CTR computed client-side from clicks/impressions instead of metrics.ctr.
+        // Mathematically equivalent (Google's metrics.ctr = clicks/impressions).
+        // Choice rationale: minimize GAQL field surface to reduce M5-class
+        // field-rejection risk.
+        const ctr = impressions > 0 ? (clicks / impressions) * 100 : 0;
+        const cpc = clicks > 0 ? spend / clicks : 0;
+
+        const adStrength = readAdStrength(row.asset_group?.ad_strength);
+        const primaryStatus = readPrimaryStatus(
+          row.asset_group?.primary_status
+        );
+
+        out.push({
+          ad_type: "PMAX_ASSET_GROUP",
+          id: assetGroupId,
+          name: String(row.asset_group?.name ?? ""),
+          accountId: this.customerId,
+          currency: this.accountInfo.currency,
+          status: normalizeAssetGroupStatus(primaryStatus),
+          campaignId: String(row.campaign?.id ?? ""),
+          campaignName: String(row.campaign?.name ?? ""),
+          spend,
+          revenue: 0,
+          roas: 0,
+          purchases: 0,
+          impressions,
+          clicks,
+          ctr,
+          cpc,
+          provider: "google",
+          type_data: {
+            adStrength,
+            primaryStatus,
+            assets: [],
+          },
+        });
+      }
+
+      return out;
+    } catch (err) {
+      const message =
+        err instanceof errors.GoogleAdsFailure
+          ? err.errors?.map((e) => e.message).join("; ") ??
+            "GoogleAdsFailure (no detail)"
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      console.warn(
+        `[GoogleAdsAdapter] fetchAssetGroupRows failed for ${this.customerId}: ${message}. Returning [] (no PMax asset_group rows this fetch).`
+      );
+      return [];
+    }
   }
 }
