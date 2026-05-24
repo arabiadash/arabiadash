@@ -428,6 +428,157 @@ async function main() {
   // in Stage 3 Q3. Re-testing here would just re-confirm the trap.
 
   // ---------------------------------------------------------------
+  // Q7 — Phase 3 RETAIL field-isolation (M-PMax Commit 6)
+  //
+  // asset_group_product_group_view is the retail-PMax product-level row
+  // resource. Per Google's retail-reporting docs, joins to
+  // asset_group + asset_group_listing_group_filter are documented. We
+  // iterate additively to surface any SDK-vs-runtime traps (M5 / M6 /
+  // M-PMax trifecta — never trust the docs without runtime verification).
+  // ---------------------------------------------------------------
+  results.q7a_pgv_base = await runQuery(
+    customer,
+    "Q7a — asset_group_product_group_view BASE (6 fields)",
+    `
+      SELECT
+        asset_group.id,
+        asset_group.name,
+        asset_group_product_group_view.resource_name,
+        metrics.impressions,
+        metrics.clicks,
+        metrics.cost_micros
+      FROM asset_group_product_group_view
+      WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+      LIMIT 20
+    `
+  );
+  if (results.q7a_pgv_base.ok) {
+    console.log("\nFirst 3 rows:");
+    console.log(JSON.stringify(results.q7a_pgv_base.rows.slice(0, 3), null, 2));
+  }
+
+  if (results.q7a_pgv_base.ok) {
+    results.q7b_pgv_conversions = await runQuery(
+      customer,
+      "Q7b — base + conversions + conversions_value + campaign context",
+      `
+        SELECT
+          campaign.id,
+          campaign.name,
+          asset_group.id,
+          asset_group.name,
+          asset_group_product_group_view.resource_name,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM asset_group_product_group_view
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        LIMIT 20
+      `
+    );
+    if (results.q7b_pgv_conversions.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q7b_pgv_conversions.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q7b_pgv_conversions = { ok: false, error: "skipped (Q7a failed)" };
+  }
+
+  if (results.q7b_pgv_conversions.ok) {
+    results.q7c_lgf_join = await runQuery(
+      customer,
+      "Q7c — + asset_group_listing_group_filter.id + .path",
+      `
+        SELECT
+          campaign.id,
+          campaign.name,
+          asset_group.id,
+          asset_group.name,
+          asset_group_product_group_view.resource_name,
+          asset_group_listing_group_filter.id,
+          asset_group_listing_group_filter.path,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM asset_group_product_group_view
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        LIMIT 20
+      `
+    );
+    if (results.q7c_lgf_join.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q7c_lgf_join.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q7c_lgf_join = { ok: false, error: "skipped (Q7b failed)" };
+  }
+
+  if (results.q7c_lgf_join.ok) {
+    results.q7d_case_value = await runQuery(
+      customer,
+      "Q7d — + asset_group_listing_group_filter.case_value.product_brand.value (probe oneof access)",
+      `
+        SELECT
+          asset_group.id,
+          asset_group_product_group_view.resource_name,
+          asset_group_listing_group_filter.id,
+          asset_group_listing_group_filter.path,
+          asset_group_listing_group_filter.case_value.product_brand.value,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros
+        FROM asset_group_product_group_view
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        LIMIT 20
+      `
+    );
+    if (results.q7d_case_value.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q7d_case_value.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q7d_case_value = { ok: false, error: "skipped (Q7c failed)" };
+  }
+
+  if (results.q7c_lgf_join.ok) {
+    results.q7e_type_vertical = await runQuery(
+      customer,
+      "Q7e — + asset_group_listing_group_filter.type + .vertical (metadata)",
+      `
+        SELECT
+          asset_group.id,
+          asset_group_product_group_view.resource_name,
+          asset_group_listing_group_filter.id,
+          asset_group_listing_group_filter.path,
+          asset_group_listing_group_filter.type,
+          asset_group_listing_group_filter.vertical,
+          metrics.impressions
+        FROM asset_group_product_group_view
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        LIMIT 20
+      `
+    );
+    if (results.q7e_type_vertical.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q7e_type_vertical.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q7e_type_vertical = { ok: false, error: "skipped (Q7c failed)" };
+  }
+
+  // ---------------------------------------------------------------
   // Summary
   // ---------------------------------------------------------------
   console.log(`\n${"=".repeat(70)}`);
@@ -466,6 +617,21 @@ async function main() {
         q6c_video: results.q6c_video.ok
           ? `${results.q6c_video.rows.length} rows`
           : `FAILED: ${results.q6c_video.error}`,
+        q7a_pgv_base: results.q7a_pgv_base.ok
+          ? `${results.q7a_pgv_base.rows.length} rows`
+          : `FAILED: ${results.q7a_pgv_base.error}`,
+        q7b_pgv_conversions: results.q7b_pgv_conversions.ok
+          ? `${results.q7b_pgv_conversions.rows.length} rows`
+          : `FAILED: ${results.q7b_pgv_conversions.error}`,
+        q7c_lgf_join: results.q7c_lgf_join.ok
+          ? `${results.q7c_lgf_join.rows.length} rows`
+          : `FAILED: ${results.q7c_lgf_join.error}`,
+        q7d_case_value: results.q7d_case_value.ok
+          ? `${results.q7d_case_value.rows.length} rows`
+          : `FAILED: ${results.q7d_case_value.error}`,
+        q7e_type_vertical: results.q7e_type_vertical.ok
+          ? `${results.q7e_type_vertical.rows.length} rows`
+          : `FAILED: ${results.q7e_type_vertical.error}`,
       },
       null,
       2

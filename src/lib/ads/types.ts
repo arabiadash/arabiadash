@@ -456,15 +456,11 @@ export interface UnifiedAdPmaxAssetGroup extends UnifiedAdCommon {
  * Performance Max accounts (per ADR-013 Decision 2 — row-per-asset-group
  * AND row-per-product-group as top-level UnifiedAd entries).
  *
- * PROVISIONAL SHAPE — finalized during commit 6 (renumbered from 7) via
- * GAQL field-isolation testing against `asset_group_product_group_view`.
- * The fields below are the planning-target shape per ADR-013; expect
- * additions/refinements once we confirm which fields the resource actually
- * returns at runtime (SDK field index ≠ runtime queryability trap — bit us
- * three times across M5, M6, and PMax recon Stage 3).
- *
- * Retail-specific metrics (per-product spend/revenue/etc.) live in the
- * common-level performance fields — same shape as every other variant.
+ * Shape FINALIZED in Commit 6 via Q7 field-isolation testing against
+ * `asset_group_product_group_view` — see docs/recon/pmax-recon-stage-2-3-
+ * 2026-05-24.md Phase 3 Retail section. Common metrics live in the
+ * UnifiedAdCommon block; variant-specific identifiers + the structured
+ * dimension path live here.
  */
 export interface UnifiedAdPmaxProductGroup extends UnifiedAdCommon {
   ad_type: "PMAX_PRODUCT_GROUP";
@@ -473,13 +469,32 @@ export interface UnifiedAdPmaxProductGroup extends UnifiedAdCommon {
     assetGroupId: string;
     assetGroupName: string;
     /**
-     * Ordered dimension path describing where this product_group sits in
-     * the retail hierarchy (e.g. ["Brand: Nike", "Category: Shoes"]).
-     * Surfaced as breadcrumbs in the PMaxProductGroupCard UI.
+     * Listing-group-filter resource ID (numeric, stringified) — stable
+     * cross-reference key with `shopping_performance_view` (Commit 7) and
+     * with the per-product-group purchase merger (Commit 8). The
+     * `asset_group_product_group_view.resource_name` has this ID as its
+     * `~`-separated suffix, but exposing it as a first-class field keeps
+     * downstream joins explicit.
      */
-    productGroupDimensionPath: string[];
-    /** Number of products matched by this product_group, when available. */
-    productCount?: number;
+    listingGroupFilterId: string;
+    /**
+     * Structured dimension path from `asset_group_listing_group_filter.path`.
+     * Each entry is one dimension level in the listing-group tree. Tri-state:
+     *  - Empty array = root catch-all ("All products" / everything-else bucket)
+     *  - Entry with `value` undefined = subdivision parent (no specific bucket,
+     *    just "split by this dimension" — e.g. `{dimension: "product_item_id"}`)
+     *  - Entry with `value` defined = specific leaf bucket
+     *    (e.g. `{dimension: "product_item_id", value: "1001595639"}`)
+     * Multi-level paths are arrays of multiple entries (each level subdivides
+     * further). UI renders as breadcrumbs in the PMaxProductGroupCard.
+     */
+    productGroupDimensionPath: Array<{ dimension: string; value?: string }>;
+    /**
+     * Derived flag — true iff `productGroupDimensionPath.length === 0`
+     * (root catch-all row). Surfaced for cheap UI branching so the card
+     * doesn't have to re-derive emptiness at render time.
+     */
+    isRootGroup: boolean;
   };
 }
 

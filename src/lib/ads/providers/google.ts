@@ -103,6 +103,58 @@ function readAssetFieldType(
   return "UNKNOWN";
 }
 
+/**
+ * Parse `asset_group_listing_group_filter.path` into the structured shape
+ * the PMAX_PRODUCT_GROUP variant expects. Q7c data shapes observed in imaa:
+ *   - Root catch-all:       `{}` (no `dimensions` array)
+ *   - Subdivision parent:   `{ dimensions: [{ product_item_id: {} }] }`
+ *   - Leaf bucket:          `{ dimensions: [{ product_item_id: { value: "..." } }] }`
+ * Each dimension is a oneof keyed by the dimension type. Malformed entries
+ * are skipped (defensive — never throw, return [] on garbage).
+ */
+function parseProductGroupPath(
+  rawPath: unknown
+): Array<{ dimension: string; value?: string }> {
+  if (rawPath == null || typeof rawPath !== "object") return [];
+  const dimensions = (rawPath as { dimensions?: unknown }).dimensions;
+  if (!Array.isArray(dimensions)) return [];
+
+  const out: Array<{ dimension: string; value?: string }> = [];
+  for (const entry of dimensions) {
+    if (entry == null || typeof entry !== "object") continue;
+    const keys = Object.keys(entry as Record<string, unknown>);
+    if (keys.length === 0) continue;
+    // Take the first key — the oneof structure guarantees exactly one per entry.
+    const dimensionKey = keys[0];
+    const body = (entry as Record<string, unknown>)[dimensionKey];
+    const rawValue =
+      body && typeof body === "object"
+        ? (body as { value?: unknown }).value
+        : undefined;
+    const value = typeof rawValue === "string" ? rawValue : undefined;
+    out.push(value !== undefined ? { dimension: dimensionKey, value } : { dimension: dimensionKey });
+  }
+  return out;
+}
+
+/**
+ * Build the display name for a PMAX_PRODUCT_GROUP row from its parsed path.
+ *  - Empty path  → "All products" (root catch-all)
+ *  - Non-empty   → "product_item_id: 1001595639 > product_category_level1: …"
+ *    (subdivisions with no value render as just the dimension key)
+ *
+ * Conservative English string ("All products" matches Google Ads' own UI
+ * label for the everything-else bucket). UI layer can localize at render.
+ */
+function deriveProductGroupName(
+  path: Array<{ dimension: string; value?: string }>
+): string {
+  if (path.length === 0) return "All products";
+  return path
+    .map((p) => (p.value !== undefined ? `${p.dimension}: ${p.value}` : p.dimension))
+    .join(" > ");
+}
+
 function readAdStrength(raw: unknown): AdStrengthLabel {
   if (typeof raw === "number") {
     return AD_STRENGTH_MAP[raw as keyof typeof AD_STRENGTH_MAP] ?? "UNKNOWN";
@@ -376,17 +428,24 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     );
 
     // Pass 6 (M-PMax / ADR-013): asset_group rows + per-asset enrichment
-    // + asset_group purchase merger (Commit 5). PMax campaigns return ZERO
-    // rows from passes 1-5 (no ad_group_ad), so this pass is the sole
-    // creative-unit surface for them. The three queries run in parallel —
-    // they reach Google independently (different GAQL resources / different
-    // segment constraints), so none blocks the others.
-    const [assetGroupRows, assetsByGroupId, assetGroupPurchaseTotals] =
-      await Promise.all([
-        this.fetchAssetGroupRows(dateFrom, dateTo),
-        this.fetchAssetGroupAssets(),
-        this.fetchPurchaseAssetGroupTotals(dateFrom, dateTo),
-      ]);
+    // + asset_group purchase merger (Commit 5), plus Pass 7 (Commit 6):
+    // retail product_group rows from asset_group_product_group_view. PMax
+    // campaigns return ZERO rows from passes 1-5 (no ad_group_ad), so
+    // passes 6+7 are the sole creative-unit surface for them. All four
+    // queries run in parallel — they reach Google independently (different
+    // GAQL resources / different segment constraints), so none blocks the
+    // others. fetchProductGroups returns [] for non-retail PMax accounts.
+    const [
+      assetGroupRows,
+      assetsByGroupId,
+      assetGroupPurchaseTotals,
+      productGroupRows,
+    ] = await Promise.all([
+      this.fetchAssetGroupRows(dateFrom, dateTo),
+      this.fetchAssetGroupAssets(),
+      this.fetchPurchaseAssetGroupTotals(dateFrom, dateTo),
+      this.fetchProductGroups(dateFrom, dateTo),
+    ]);
 
     // Merge: layer in `type_data.assets` + purchase-attribution trio onto
     // each asset_group row. Pure-functional rebuild (no in-place mutation
@@ -426,7 +485,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       };
     });
 
-    return [...normalizedAds, ...enrichedAssetGroups];
+    return [...normalizedAds, ...enrichedAssetGroups, ...productGroupRows];
   }
 
   // ───────────────────────────────────────────────────────────────
@@ -1462,6 +1521,159 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
         `[GoogleAdsAdapter] fetchAssetGroupAssets failed for ${this.customerId}: ${message}. Returning empty Map (asset_group rows will render with no per-asset detail).`
       );
       return new Map();
+    }
+  }
+
+  /**
+   * Retail Performance Max product-group rows (ADR-013, Commit 6).
+   *
+   * One GAQL pass against `FROM asset_group_product_group_view` with 12
+   * confirmed-working fields (Q7a-d iterations in scripts/_pmax-recon.mjs
+   * — all four passed against imaa; Q7e revealed
+   * `asset_group_listing_group_filter.vertical` as the fourth instance of
+   * the SDK-vs-runtime trap, so `.vertical` stays out of this SELECT).
+   *
+   * Non-retail PMax accounts (no Merchant Center linkage) return zero rows
+   * from this query — same handling as `fetchAssetGroupRows`: empty result
+   * is acceptable, no defensive merchant_id pre-check needed.
+   *
+   * IMPORTANT — bug-prevention: purchases/revenue/roas/hasConversionData
+   * are initialized to null/false here. The raw `metrics.conversions`
+   * returned by this query counts ALL conversion-action types (purchase +
+   * add_to_cart + page_view + newsletter_signup + etc), NOT just
+   * purchases. Surfacing it as `purchases` would repeat the bug
+   * discovered in Commit 4b (ccf2dd3) for Google M5/M6 ad-level
+   * rendering, where raw conversions were falsely displayed as purchases
+   * in arabiadash.com production UI for months. Commit 8
+   * (fetchPurchaseProductGroupTotals) merges properly-filtered purchase
+   * data via the ADR-011 pattern — purchase action IDs from
+   * google_conversion_actions table — and the Pass 7 merge step there
+   * will overwrite these defaults. Do NOT remove this guard without
+   * Commit 8 wired through.
+   */
+  private async fetchProductGroups(
+    dateFrom: string,
+    dateTo: string
+  ): Promise<UnifiedAd[]> {
+    try {
+      const api = new GoogleAdsApi({
+        client_id: process.env.GOOGLE_ADS_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_ADS_CLIENT_SECRET!,
+        developer_token: process.env.GOOGLE_ADS_DEVELOPER_TOKEN!,
+      });
+
+      const customer = api.Customer({
+        customer_id: this.customerId,
+        refresh_token: this.refreshToken,
+        ...(this.loginCustomerId
+          ? { login_customer_id: this.loginCustomerId }
+          : {}),
+      });
+
+      const query = `
+        SELECT
+          campaign.id,
+          campaign.name,
+          asset_group.id,
+          asset_group.name,
+          asset_group_product_group_view.resource_name,
+          asset_group_listing_group_filter.id,
+          asset_group_listing_group_filter.path,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM asset_group_product_group_view
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+          AND segments.date BETWEEN '${dateFrom}' AND '${dateTo}'
+      `;
+
+      const rows = await customer.query(query);
+
+      const out: UnifiedAd[] = [];
+      for (const row of rows) {
+        const resourceName = String(
+          row.asset_group_product_group_view?.resource_name ?? ""
+        );
+        if (!resourceName) continue;
+
+        const listingGroupFilterId = String(
+          row.asset_group_listing_group_filter?.id ?? ""
+        );
+        if (!listingGroupFilterId) {
+          console.warn(
+            `[GoogleAdsAdapter] fetchProductGroups: row missing asset_group_listing_group_filter.id (resource_name=${resourceName}). Skipping.`
+          );
+          continue;
+        }
+
+        const path = parseProductGroupPath(
+          row.asset_group_listing_group_filter?.path
+        );
+        const isRootGroup = path.length === 0;
+        const name = deriveProductGroupName(path);
+
+        const impressions = Number(row.metrics?.impressions) || 0;
+        const clicks = Number(row.metrics?.clicks) || 0;
+        const costMicros = Number(row.metrics?.cost_micros) || 0;
+        const spend = costMicros / 1_000_000;
+
+        // CTR / CPC computed client-side (same rationale as
+        // fetchAssetGroupRows: minimize GAQL field surface to reduce
+        // M5-class field-rejection risk). Mathematically equivalent to
+        // metrics.ctr / metrics.average_cpc.
+        const ctr = impressions > 0 ? (clicks / impressions) * 100 : 0;
+        const cpc = clicks > 0 ? spend / clicks : 0;
+
+        out.push({
+          ad_type: "PMAX_PRODUCT_GROUP",
+          id: resourceName,
+          name,
+          accountId: this.customerId,
+          currency: this.accountInfo.currency,
+          // No primary_status field at product_group level. Presence in
+          // the query result implies the row is live in the listing tree.
+          // Match fetchAssetGroupRows default-to-ACTIVE convention.
+          status: "ACTIVE",
+          campaignId: String(row.campaign?.id ?? ""),
+          campaignName: String(row.campaign?.name ?? ""),
+          spend,
+          // Purchase trio + hasConversionData start as "no data" defaults —
+          // Commit 8 will overwrite via fetchPurchaseProductGroupTotals.
+          // See docblock above for bug-prevention rationale.
+          revenue: null,
+          roas: null,
+          purchases: null,
+          hasConversionData: false,
+          impressions,
+          clicks,
+          ctr,
+          cpc,
+          provider: "google",
+          type_data: {
+            assetGroupId: String(row.asset_group?.id ?? ""),
+            assetGroupName: String(row.asset_group?.name ?? ""),
+            listingGroupFilterId,
+            productGroupDimensionPath: path,
+            isRootGroup,
+          },
+        });
+      }
+
+      return out;
+    } catch (err) {
+      const message =
+        err instanceof errors.GoogleAdsFailure
+          ? err.errors?.map((e) => e.message).join("; ") ??
+            "GoogleAdsFailure (no detail)"
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      console.warn(
+        `[GoogleAdsAdapter] fetchProductGroups failed for ${this.customerId}: ${message}. Returning [] (no PMax product_group rows this fetch).`
+      );
+      return [];
     }
   }
 }

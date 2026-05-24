@@ -411,3 +411,127 @@ This is the most important success: it confirms the field name is correct and th
 ### Field not in Q6 (flagged for follow-up)
 
 - `asset_group_asset.primary_status` — needed for the optional `assets[i].primaryStatus` slot in `PMAX_ASSET_GROUP.type_data.assets`. Not added to Q6 to keep the iteration scope tight; can be added in a follow-up with the same field-isolation discipline. The shape's optional `?` means omitting is safe.
+
+---
+
+## Phase 3 Retail field-isolation results (M-PMax Commit 6, 2026-05-24)
+
+Web-search prep:
+- [asset_group_product_group_view (v23)](https://developers.google.com/google-ads/api/fields/v23/asset_group_product_group_view) — confirmed resource + metrics availability
+- [Retail Performance Max reporting](https://developers.google.com/google-ads/api/performance-max/retail-reporting) — documented GAQL examples for `asset_group_listing_group_filter.case_value.product_brand.value` and `asset_group_listing_group_filter.path`
+- [Listing Groups for Retail](https://developers.google.com/google-ads/api/performance-max/listing-groups) — confirmed listing groups apply at AssetGroup level via `AssetGroupListingGroupFilter`
+
+### Q7a — base 6 fields
+
+**Status:** ✓ PASSED (20 rows)
+
+```
+SELECT
+  asset_group.id, asset_group.name,
+  asset_group_product_group_view.resource_name,
+  metrics.impressions, metrics.clicks, metrics.cost_micros
+FROM asset_group_product_group_view
+WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+LIMIT 20
+```
+
+imaa's retail PMax returned 20 product_groups, all under a single Asset Group ("Asset Group 1"). Top row: 7.2M impressions, 26.3K clicks, 41.86K SAR spend.
+
+### Q7b — + conversion metrics + campaign context
+
+**Status:** ✓ PASSED (20 rows). Conversions: top row 1271.8 conversions, 279K SAR conversions_value. Campaign: "Performance Max" (id 21330832483).
+
+### Q7c — + `asset_group_listing_group_filter.id` + `.path`
+
+**Status:** ✓ PASSED (20 rows). **Critical shape discovery:**
+
+`asset_group_listing_group_filter.path` returns a STRUCTURED object, not a string:
+
+```jsonc
+// Root catch-all (UNIT_INCLUDED everything-else node):
+"path": {}
+
+// Subdivision row (parent that further subdivides on product_item_id):
+"path": { "dimensions": [ { "product_item_id": {} } ] }
+
+// Leaf row (specific product offer ID):
+"path": {
+  "dimensions": [
+    { "product_item_id": { "value": "1001595639" } }
+  ]
+}
+```
+
+Each dimension entry is a oneof with a key (`product_item_id`, `product_brand`, `product_category_level1`, etc.) and a body that's either `{}` (wildcard / parent subdivision) or `{ value: "X" }` (specific bucket). Multi-level paths are arrays of multiple dimension entries.
+
+### Q7d — + `asset_group_listing_group_filter.case_value.product_brand.value` (oneof probe)
+
+**Status:** ✓ PASSED (20 rows). The SDK accepted the nested per-dimension oneof path, but every row's `case_value.product_brand.value` was empty because imaa's tree subdivides on `product_item_id`, not `product_brand`. Confirms case_value access works in principle; reading per-dimension values requires a separate SELECT per dimension type.
+
+**Implication for the variant shape:** `.path` is the unified surface we should use — it gives us the structured tree without needing per-dimension SELECTs. `.case_value` access would only be useful for future filtering/grouping queries.
+
+### Q7e — + `asset_group_listing_group_filter.type` + `.vertical`
+
+**Status:** ✗ FAILED.
+
+> "Unrecognized field in the query: 'asset_group_listing_group_filter.vertical'." (query_error 32)
+
+**Fourth instance of the SDK-vs-runtime trap** (after M5 `image_ad.image_asset`, M6 `sitelink_asset.description1/2`, M-PMax `asset_group_asset.performance_label`). Documented in the Google Ads API field listings, rejected at runtime by SDK v23.
+
+Q7e bundled both `.type` and `.vertical`, so `.type` couldn't be isolated in this iteration. Whether `.type` alone is queryable is unknown without a follow-up Q7f probe. The PMAX_PRODUCT_GROUP shape doesn't strictly need `.type` — `path` already lets the UI distinguish root vs leaf via `dimensions.length`, so we can ship without it and add later if a use case emerges.
+
+### Q7 summary
+
+| Iteration | Field added | Status |
+|---|---|---|
+| Q7a | base 6 fields | ✓ 20 rows |
+| Q7b | + conversions + campaign context | ✓ 20 rows |
+| Q7c | + `asset_group_listing_group_filter.id` + `.path` | ✓ 20 rows |
+| Q7d | + `case_value.product_brand.value` oneof probe | ✓ 20 rows |
+| Q7e | + `.type` + `.vertical` | ✗ FAILED (`.vertical` rejected; `.type` couldn't be isolated) |
+
+**Confirmed-working production GAQL field surface for `fetchProductGroups`:**
+
+```
+SELECT
+  campaign.id,
+  campaign.name,
+  asset_group.id,
+  asset_group.name,
+  asset_group_product_group_view.resource_name,
+  asset_group_listing_group_filter.id,
+  asset_group_listing_group_filter.path,
+  metrics.impressions,
+  metrics.clicks,
+  metrics.cost_micros,
+  metrics.conversions,
+  metrics.conversions_value
+FROM asset_group_product_group_view
+WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+  AND segments.date BETWEEN '<from>' AND '<to>'
+```
+
+12 fields. `metrics.conversions` + `metrics.conversions_value` are RAW (all conversion-action types — same caveat as the M5/M6 ad-level data); the purchase-filtered values come in Commit 8 via `fetchPurchaseProductGroupTotals`. Until then PMAX_PRODUCT_GROUP rows surface raw spend/impressions/clicks with `purchases/revenue/roas: null` + `hasConversionData: false` per the Commit 4 retrofit pattern.
+
+### Shape revisions needed for `PMAX_PRODUCT_GROUP.type_data`
+
+Provisional shape from ADR-013:
+```ts
+PMAX_PRODUCT_GROUP: {
+  assetGroupId: string;
+  assetGroupName: string;
+  productGroupDimensionPath: string[];
+  productCount?: number;
+};
+```
+
+Q7 forces these revisions:
+1. **`productGroupDimensionPath` should be `Array<{ dimension: string; value?: string }>`**, NOT `string[]`. Pure string array loses the dimension-type metadata. Example:
+   ```
+   [{ dimension: "product_item_id", value: "1001595639" }]   // leaf
+   [{ dimension: "product_item_id" }]                        // subdivision (no value)
+   []                                                         // root catch-all
+   ```
+2. **`productCount` is not exposed by `asset_group_product_group_view`** — comes from `shopping_performance_view` (Commit 7) if needed. Either drop the field or keep optional and source from Commit 7's join. Recommend drop now, re-add in Commit 7 if Commit 7 work surfaces a clean per-product-group count.
+3. **Add `listingGroupFilterId: string`** — enables cross-referencing with future shopping_performance_view rows and is a stable identifier for the row (resource_name has `~`-separated suffix that includes it, but explicit is cleaner).
+4. **Add `isRootGroup: boolean`** — derived from `path.dimensions` being empty. UI uses this to distinguish "All products (catch-all)" rows from specific subdivisions/leaves. Cheap to compute at adapter time.
