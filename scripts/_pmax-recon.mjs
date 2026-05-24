@@ -674,6 +674,136 @@ async function main() {
   }
 
   // ---------------------------------------------------------------
+  // Q9 — Stage 5 follow-up: effective ad serving status rollup
+  //
+  // PURPOSE
+  //   Verify (a) campaign.status + ad_group.status are SELECTable from
+  //   `FROM ad_group_ad` in SDK v23 (high confidence yes — campaign.id +
+  //   ad_group.id already work — but per the 8-instance integer-drift /
+  //   SDK-trap history we probe before shipping), and (b) detect rows
+  //   where ad_group_ad.status=ENABLED while campaign.status=PAUSED —
+  //   the empirical bug scenario.
+  //
+  // CONTEXT
+  //   User reported "نشط" badges on creative cards whose parent campaigns
+  //   are PAUSED on Google Ads. Diagnostic traced root cause to
+  //   normalizeAdStatus in google.ts directly mirroring ad_group_ad.status
+  //   with zero parent rollup. Google's effective serving status is the
+  //   min-restrictive of (campaign, ad_group, ad_group_ad).status — a
+  //   PAUSED parent blocks serving regardless of child state.
+  //
+  //   Integer enums (verified via Google docs): 2=ENABLED, 3=PAUSED,
+  //   4=REMOVED across CampaignStatusEnum + AdGroupStatusEnum +
+  //   AdGroupAdStatusEnum proto definitions.
+  //
+  // CURRENT STATUS (2026-05-25)
+  //   Probe code complete, awaiting re-authentication of imaa's Google
+  //   connection. First attempt returned `invalid_grant` from Google
+  //   OAuth — refresh token rejected (token expiry / revocation /
+  //   rotation). This is the known OAuth Testing-mode 7-day refresh
+  //   limit per tech-debt #4 — Google rotates refresh tokens for apps
+  //   in Testing mode every ~7 days, and our `connections` row stored
+  //   value goes stale.
+  //
+  // WHEN CONNECTION IS RESTORED
+  //   1. User re-authenticates imaa in /dashboard/connections/google
+  //      → fresh refresh_token written to connections.access_token
+  //   2. Re-run: `node scripts/_pmax-recon.mjs` — Q9 will execute,
+  //      print the bucket distribution + mismatch list, and either
+  //      confirm the bug is empirically reproducible on imaa (expected)
+  //      or report "(none in this date range — bug exists in theory
+  //      but not reproducible on imaa right now)" if all campaigns are
+  //      currently aligned.
+  //   3. Proceed to Commit 2 (production fix in google.ts + ads.ts +
+  //      cache.ts) using Q9 results as the verification trail.
+  // ---------------------------------------------------------------
+  const stage5DateFrom = "2026-04-25";
+  const stage5DateTo = "2026-05-25";
+  results.q9_1_status_select = await runQuery(
+    customer,
+    "Q9-1 — campaign.status + ad_group.status from FROM ad_group_ad",
+    `
+      SELECT
+        ad_group_ad.ad.id,
+        ad_group_ad.status,
+        ad_group.id,
+        ad_group.status,
+        campaign.id,
+        campaign.status,
+        campaign.name
+      FROM ad_group_ad
+      WHERE segments.date BETWEEN '${stage5DateFrom}' AND '${stage5DateTo}'
+        AND ad_group_ad.status != 'REMOVED'
+      LIMIT 50
+    `
+  );
+
+  if (results.q9_1_status_select.ok) {
+    const rows = results.q9_1_status_select.rows;
+    console.log(`\n✓ SELECT accepted. ${rows.length} rows returned.`);
+
+    // 2=ENABLED, 3=PAUSED, 4=REMOVED. Min-restrictive: REMOVED > PAUSED > ENABLED.
+    const statusName = (n) =>
+      n === 2 ? "ENABLED" : n === 3 ? "PAUSED" : n === 4 ? "REMOVED" : `OTHER_${n}`;
+    const effective = (c, ag, ad) => {
+      const all = [c, ag, ad];
+      if (all.some((s) => s === 4)) return "REMOVED";
+      if (all.some((s) => s === 3)) return "PAUSED";
+      if (all.every((s) => s === 2)) return "ENABLED";
+      return "OTHER";
+    };
+
+    // Q9-2: count rows grouped by (campaign.status, ad_group_ad.status).
+    // The (3, 2) bucket is the bug scenario — parent paused, ad enabled.
+    const bucketCounts = new Map();
+    const mismatchRows = [];
+    for (const row of rows) {
+      const c = Number(row.campaign?.status);
+      const ag = Number(row.ad_group?.status);
+      const ad = Number(row.ad_group_ad?.status);
+      const key = `(campaign=${c}/${statusName(c)}, ad=${ad}/${statusName(ad)})`;
+      bucketCounts.set(key, (bucketCounts.get(key) ?? 0) + 1);
+
+      // Bug instance: ad is ENABLED but campaign is not ENABLED.
+      if (ad === 2 && c !== 2) {
+        mismatchRows.push({
+          campaign_id: String(row.campaign?.id ?? ""),
+          campaign_name: String(row.campaign?.name ?? ""),
+          campaign_status: statusName(c),
+          ad_group_status: statusName(ag),
+          ad_group_ad_status: statusName(ad),
+          effective: effective(c, ag, ad),
+          ad_id: String(row.ad_group_ad?.ad?.id ?? ""),
+        });
+      }
+    }
+
+    console.log(`\nBucket distribution (campaign.status, ad_group_ad.status):`);
+    for (const [bucket, n] of [...bucketCounts.entries()].sort()) {
+      console.log(`  ${bucket}: ${n} rows`);
+    }
+    results.q9_2_buckets = Object.fromEntries(bucketCounts);
+
+    console.log(
+      `\nMismatch rows (ad ENABLED but parent campaign not ENABLED) — the bug instances:`
+    );
+    if (mismatchRows.length === 0) {
+      console.log("  (none in this date range — bug exists in theory but not reproducible on imaa right now)");
+    } else {
+      for (const r of mismatchRows.slice(0, 10)) {
+        console.log(
+          `  ad_id=${r.ad_id} campaign="${r.campaign_name}" status=campaign:${r.campaign_status}/ag:${r.ad_group_status}/ad:${r.ad_group_ad_status} → effective=${r.effective}`
+        );
+      }
+      if (mismatchRows.length > 10) {
+        console.log(`  … and ${mismatchRows.length - 10} more`);
+      }
+    }
+    results.q9_2_mismatch_count = mismatchRows.length;
+    results.q9_2_mismatch_sample = mismatchRows.slice(0, 5);
+  }
+
+  // ---------------------------------------------------------------
   // Q7 — Phase 3 RETAIL field-isolation (M-PMax Commit 6)
   //
   // asset_group_product_group_view is the retail-PMax product-level row
@@ -900,6 +1030,12 @@ async function main() {
         q6f_status_filtered: results.q6f_status_filtered.ok
           ? `${results.q6f_status_filtered.rows.length} rows`
           : `FAILED: ${results.q6f_status_filtered.error}`,
+        q9_1_status_select: results.q9_1_status_select?.ok
+          ? `${results.q9_1_status_select.rows.length} rows`
+          : `FAILED: ${results.q9_1_status_select?.error ?? "not run"}`,
+        q9_2_buckets: results.q9_2_buckets ?? null,
+        q9_2_mismatch_count: results.q9_2_mismatch_count ?? null,
+        q9_2_mismatch_sample: results.q9_2_mismatch_sample ?? null,
       },
       null,
       2
