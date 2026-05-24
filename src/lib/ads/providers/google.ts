@@ -220,9 +220,8 @@ function readPrimaryStatus(raw: unknown): PrimaryStatusLabel {
 
 /**
  * Collapse asset_group.primary_status into the UnifiedAdCommon 3-value
- * status union. Mirrors the same "collapse-to-3-states" precedent
- * `computeEffectiveAdStatus` uses for the ad-level rollup (Google has
- * many statuses; the common-level field stays ACTIVE/PAUSED/DELETED only).
+ * status union. Mirrors `normalizeAdStatus`'s precedent (Google has many
+ * statuses; the common-level field stays ACTIVE/PAUSED/DELETED only).
  *
  * The raw primary_status label is preserved in `type_data.primaryStatus`
  * for richer UI (tooltip can distinguish LIMITED from a plain PAUSED).
@@ -1544,11 +1543,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       id: ad.id,
       name: `${ad.campaign_name} — ${ad.ad_group_name}`,
       currency: this.accountInfo.currency,
-      status: this.computeEffectiveAdStatus(
-        ad.campaign_status,
-        ad.ad_group_status,
-        ad.status
-      ),
+      status: this.normalizeAdStatus(ad.status),
       campaignId: ad.campaign_id,
       campaignName: ad.campaign_name,
       adsetId: ad.ad_group_id,
@@ -1627,29 +1622,9 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     }
   };
 
-  /**
-   * Computes effective ad serving status as min-restrictive rollup of
-   * (campaign.status, ad_group.status, ad_group_ad.status). Matches
-   * Google Ads UI's "Status" column logic — a PAUSED parent blocks
-   * serving regardless of child status.
-   *
-   * Priority: REMOVED > PAUSED > ENABLED. Replaces the prior
-   * normalizeAdStatus which directly mirrored ad_group_ad.status only
-   * and surfaced "نشط" badges on ads whose parent campaigns were paused
-   * (Stage 5 user report — root cause analysis in chat).
-   */
-  private computeEffectiveAdStatus(
-    campaignStatus: string,
-    adGroupStatus: string,
-    adStatus: string
-  ): UnifiedAd["status"] {
-    const statuses = [campaignStatus, adGroupStatus, adStatus];
-    if (statuses.includes("REMOVED")) return "DELETED";
-    if (statuses.includes("PAUSED")) return "PAUSED";
-    if (statuses.every((s) => s === "ENABLED")) return "ACTIVE";
-    // Conservative fallback — any UNSPECIFIED / UNKNOWN / future-enum
-    // value in the chain collapses to PAUSED rather than misleadingly
-    // claiming the ad is serving.
+  private normalizeAdStatus(googleStatus: string): UnifiedAd["status"] {
+    if (googleStatus === "ENABLED") return "ACTIVE";
+    if (googleStatus === "REMOVED") return "DELETED";
     return "PAUSED";
   }
 

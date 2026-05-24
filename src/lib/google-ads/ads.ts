@@ -54,30 +54,6 @@ const AD_STATUS_MAP: Record<number, string> = {
   4: "REMOVED",
 };
 
-// CampaignStatus and AdGroupStatus share the same {0..4} integer encoding
-// as AdGroupAdStatus today, but Google defines them as distinct enums
-// (CampaignStatusEnum, AdGroupStatusEnum, AdGroupAdStatusEnum). Separate
-// maps keep us safe if Google ever diverges them in a future version —
-// 9th instance of the documented integer-drift pattern. Used by
-// computeEffectiveAdStatus in providers/google.ts to derive the
-// effective ad serving status from the (campaign, ad_group, ad)
-// status rollup. See feedback_google_ads_sdk_field_index.md.
-const CAMPAIGN_STATUS_MAP: Record<number, string> = {
-  0: "UNSPECIFIED",
-  1: "UNKNOWN",
-  2: "ENABLED",
-  3: "PAUSED",
-  4: "REMOVED",
-};
-
-const AD_GROUP_STATUS_MAP: Record<number, string> = {
-  0: "UNSPECIFIED",
-  1: "UNKNOWN",
-  2: "ENABLED",
-  3: "PAUSED",
-  4: "REMOVED",
-};
-
 function mapAdType(value: unknown): string {
   const num = Number(value);
   return AD_TYPE_MAP[num] ?? `UNKNOWN_${num}`;
@@ -88,41 +64,12 @@ function mapAdStatus(value: unknown): string {
   return AD_STATUS_MAP[num] ?? "UNKNOWN";
 }
 
-function mapCampaignStatus(rawStatus: unknown): string {
-  if (typeof rawStatus === "number") {
-    return CAMPAIGN_STATUS_MAP[rawStatus] ?? "UNKNOWN";
-  }
-  if (typeof rawStatus === "string") return rawStatus;
-  return "UNKNOWN";
-}
-
-function mapAdGroupStatus(rawStatus: unknown): string {
-  if (typeof rawStatus === "number") {
-    return AD_GROUP_STATUS_MAP[rawStatus] ?? "UNKNOWN";
-  }
-  if (typeof rawStatus === "string") return rawStatus;
-  return "UNKNOWN";
-}
-
 export interface AdRow {
   id: string;
   type: string;
   status: string;
-  /**
-   * Parent ad_group's status as ENABLED / PAUSED / REMOVED / UNKNOWN
-   * (mapped from the integer enum). Used by computeEffectiveAdStatus
-   * in providers/google.ts to roll up the effective serving status.
-   */
-  ad_group_status: string;
   ad_group_id: string;
   ad_group_name: string;
-  /**
-   * Parent campaign's status — same enum shape as ad_group_status.
-   * Surfaced for the effective-status rollup; a PAUSED campaign blocks
-   * all child ad_groups + ads from serving regardless of their own
-   * status fields.
-   */
-  campaign_status: string;
   campaign_id: string;
   campaign_name: string;
   final_url: string | null;
@@ -227,10 +174,8 @@ export async function fetchAds(
       ad_group_ad.status,
       ad_group.id,
       ad_group.name,
-      ad_group.status,
       campaign.id,
       campaign.name,
-      campaign.status,
       metrics.cost_micros,
       metrics.impressions,
       metrics.clicks,
@@ -327,10 +272,8 @@ export async function fetchAds(
         id: String(ad?.id ?? ""),
         type: mapAdType(ad?.type),
         status: mapAdStatus(row.ad_group_ad?.status),
-        ad_group_status: mapAdGroupStatus(row.ad_group?.status),
         ad_group_id: String(row.ad_group?.id ?? ""),
         ad_group_name: String(row.ad_group?.name ?? ""),
-        campaign_status: mapCampaignStatus(row.campaign?.status),
         campaign_id: String(row.campaign?.id ?? ""),
         campaign_name: String(row.campaign?.name ?? ""),
         final_url: finalUrl,
