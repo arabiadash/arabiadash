@@ -1789,6 +1789,14 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
    *  - `asset_group_asset.primary_status` — not in Q6 iterations; can be
    *    added in a follow-up with field-isolation verification. The
    *    `assets[i].primaryStatus?` slot stays empty for now.
+   *
+   * Status filter (Stage 4 hotfix): `AND asset_group_asset.status !=
+   * 'REMOVED'` filters out historical unlinked assets. Verified
+   * SELECTable + WHERE-filterable via Q6f probe — see
+   * `docs/recon/pmax-recon-stage-4-2026-05-24.md`. Same pattern as
+   * `ad_group_ad.status != 'REMOVED'` in `fetchAds`. PAUSED links still
+   * surface (intentional — they're "currently attached, advertiser-
+   * paused" which is a distinct state from "unlinked").
    */
   private async fetchAssetGroupAssets(): Promise<
     Map<string, AssetGroupAssetEntry[]>
@@ -1808,6 +1816,16 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
           : {}),
       });
 
+      // `AND asset_group_asset.status != 'REMOVED'` matches the same
+      // precedent used by `fetchAds` at google-ads/ads.ts:188 for
+      // ad_group_ad. Without this filter, Google returns every link the
+      // asset_group has ever recorded — on imaa that meant 207 rows
+      // including 160 REMOVED historical entries (assets unlinked months
+      // ago). 77% payload reduction (207 → 47 active rows). Q6f probe
+      // (Stage 4 recon) verified the field is SELECTable in SDK v23 and
+      // that GAQL accepts the string literal 'REMOVED' in WHERE even
+      // though the response payload returns the integer enum value (3).
+      // See docs/recon/pmax-recon-stage-4-2026-05-24.md.
       const query = `
         SELECT
           asset_group.id,
@@ -1820,6 +1838,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
           asset.youtube_video_asset.youtube_video_id
         FROM asset_group_asset
         WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+          AND asset_group_asset.status != 'REMOVED'
       `;
 
       const rows = await customer.query(query);

@@ -428,6 +428,89 @@ async function main() {
   // in Stage 3 Q3. Re-testing here would just re-confirm the trap.
 
   // ---------------------------------------------------------------
+  // Q6f — Stage 5 probe (post-M-PMax-merge): asset_group_asset.status
+  //
+  // imaa's PMAX_ASSET_GROUP card is rendering ~163 assets including
+  // historical assets the user removed months ago. fetchAssetGroupAssets
+  // in google.ts has no status filter on its WHERE clause — returns
+  // every link Google has ever recorded, REMOVED included. This probe
+  // verifies (a) asset_group_asset.status is SELECTable in SDK v23
+  // (not another SDK-vs-runtime trap) and (b) measures the population
+  // distribution + payload reduction from adding the analogous filter
+  // that fetchAds already uses for ad_group_ad.status.
+  // ---------------------------------------------------------------
+  results.q6f_status_unfiltered = await runQuery(
+    customer,
+    "Q6f-1 — asset_group_asset.status (SELECTability probe, NO status filter)",
+    `
+      SELECT
+        asset_group.id,
+        asset_group_asset.field_type,
+        asset_group_asset.status,
+        asset.id,
+        asset.type
+      FROM asset_group_asset
+      WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+    `
+  );
+  if (results.q6f_status_unfiltered.ok) {
+    const rows = results.q6f_status_unfiltered.rows;
+    console.log(`\nFirst 5 rows:`);
+    console.log(JSON.stringify(rows.slice(0, 5), null, 2));
+
+    // Distribution of asset_group_asset.status across all rows.
+    const distribution = new Map();
+    for (const row of rows) {
+      const raw = row.asset_group_asset?.status;
+      const key = raw === undefined || raw === null ? "(unset)" : String(raw);
+      distribution.set(key, (distribution.get(key) ?? 0) + 1);
+    }
+    const sorted = [...distribution.entries()].sort((a, b) => b[1] - a[1]);
+    console.log(`\nDistinct asset_group_asset.status values (with counts):`);
+    for (const [value, count] of sorted) {
+      console.log(`  ${value}: ${count} rows`);
+    }
+    results.q6f_status_distribution = Object.fromEntries(sorted);
+    console.log(`\nTotal rows returned (unfiltered): ${rows.length}`);
+  }
+
+  if (results.q6f_status_unfiltered.ok) {
+    results.q6f_status_filtered = await runQuery(
+      customer,
+      "Q6f-2 — same SELECT, WHERE adds status != 'REMOVED' (proposed prod filter)",
+      `
+        SELECT
+          asset_group.id,
+          asset_group_asset.field_type,
+          asset_group_asset.status,
+          asset.id,
+          asset.type
+        FROM asset_group_asset
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+          AND asset_group_asset.status != 'REMOVED'
+      `
+    );
+    if (results.q6f_status_filtered.ok) {
+      const filtered = results.q6f_status_filtered.rows.length;
+      const unfiltered = results.q6f_status_unfiltered.rows.length;
+      const reduction =
+        unfiltered > 0
+          ? `${(((unfiltered - filtered) / unfiltered) * 100).toFixed(1)}%`
+          : "n/a";
+      console.log(
+        `\nTotal rows returned (filtered): ${filtered}` +
+          `\nReduction vs unfiltered: ${unfiltered} → ${filtered} (${reduction})`
+      );
+    }
+  } else {
+    console.log(`\n[Q6f-2 skipped — Q6f-1 failed; no status field to filter on]`);
+    results.q6f_status_filtered = {
+      ok: false,
+      error: "skipped (Q6f-1 failed)",
+    };
+  }
+
+  // ---------------------------------------------------------------
   // Q8 — Phase 4 SHOPPING field-isolation (M-PMax Commit 7)
   //
   // shopping_performance_view is the per-product (SKU-level) retail
@@ -810,6 +893,13 @@ async function main() {
         q8e_spv_metadata: results.q8e_spv_metadata.ok
           ? `${results.q8e_spv_metadata.rows.length} rows`
           : `FAILED: ${results.q8e_spv_metadata.error}`,
+        q6f_status_unfiltered: results.q6f_status_unfiltered.ok
+          ? `${results.q6f_status_unfiltered.rows.length} rows`
+          : `FAILED: ${results.q6f_status_unfiltered.error}`,
+        q6f_status_distribution: results.q6f_status_distribution ?? null,
+        q6f_status_filtered: results.q6f_status_filtered.ok
+          ? `${results.q6f_status_filtered.rows.length} rows`
+          : `FAILED: ${results.q6f_status_filtered.error}`,
       },
       null,
       2
