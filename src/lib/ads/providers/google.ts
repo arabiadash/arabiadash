@@ -475,19 +475,58 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     // different segment constraints), so none blocks the others.
     // fetchProductGroups + fetchShoppingProducts return [] for non-retail
     // PMax accounts (no Merchant Center linkage → zero rows naturally).
+    // 6-way Promise.all after Commit 8a — adds the product_group purchase
+    // merger (ADR-011 sibling, sixth of the family). fetchProductGroups
+    // stays parameter-stable; the merger Map is applied to its result in a
+    // post-fetch enriched-merge step below (the merger Map is itself a
+    // pending Promise here — can't be passed in until it's resolved). Same
+    // pattern as the asset_group enriched-merge.
     const [
       assetGroupRows,
       assetsByGroupId,
       assetGroupPurchaseTotals,
       productGroupRows,
       shoppingProductRows,
+      productGroupPurchaseTotals,
     ] = await Promise.all([
       this.fetchAssetGroupRows(dateFrom, dateTo),
       this.fetchAssetGroupAssets(),
       this.fetchPurchaseAssetGroupTotals(dateFrom, dateTo),
       this.fetchProductGroups(dateFrom, dateTo),
       this.fetchShoppingProducts(dateFrom, dateTo),
+      this.fetchPurchaseProductGroupTotals(dateFrom, dateTo),
     ]);
+
+    // Layer purchase trio + hasConversionData onto each product_group row.
+    // We can't pass the Map into fetchProductGroups directly within
+    // Promise.all (the merger fires in parallel — its result isn't
+    // available yet), so we do the lookup here in the merge step. Same
+    // pattern as the asset_group enriched-merge below.
+    const enrichedProductGroups: UnifiedAd[] = productGroupRows.map((row) => {
+      if (row.ad_type !== "PMAX_PRODUCT_GROUP") return row;
+
+      const purchaseEntry = productGroupPurchaseTotals?.get(row.id);
+      const hasConversionData =
+        productGroupPurchaseTotals != null && purchaseEntry !== undefined;
+      const purchases: number | null = hasConversionData
+        ? purchaseEntry!.purchases
+        : null;
+      const revenue: number | null = hasConversionData
+        ? purchaseEntry!.revenue
+        : null;
+      const roas: number | null =
+        hasConversionData && row.spend > 0
+          ? purchaseEntry!.revenue / row.spend
+          : null;
+
+      return {
+        ...row,
+        purchases,
+        revenue,
+        roas,
+        hasConversionData,
+      };
+    });
 
     // Merge: layer in `type_data.assets` + purchase-attribution trio onto
     // each asset_group row. Pure-functional rebuild (no in-place mutation
@@ -530,7 +569,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     return [
       ...normalizedAds,
       ...enrichedAssetGroups,
-      ...productGroupRows,
+      ...enrichedProductGroups,
       ...shoppingProductRows,
     ];
   }
@@ -916,6 +955,118 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
           : String(err);
       console.warn(
         `[GoogleAdsAdapter] fetchPurchaseAssetGroupTotals failed for ${this.customerId}: ${message}. Degrading PMax asset_group purchases to null.`
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Segmented purchase merger at PMAX PRODUCT_GROUP LEVEL (Commit 8a,
+   * ADR-013). Sixth sibling of the ADR-011 merger family (campaign,
+   * time-series, ad, asset_group, and now product_group; shopping_product
+   * follows in Commit 8b). Same two-query GAQL pattern — cost+clicks live
+   * in `fetchProductGroups` (Commit 6), this query carries only
+   * conversions segmented by `segments.conversion_action` and filtered to
+   * the customer's purchase action IDs.
+   *
+   * Returns null on cache miss, no purchase actions configured, or API
+   * failure. Returned Map: `asset_group_product_group_view.resource_name`
+   * (string) -> { purchases, revenue }. "First sighting" Map semantic
+   * preserved — entry present with {0,0} means "tracking configured, zero
+   * purchases attributed to this product_group" (renders `0`); entry
+   * absent / null Map means "not configured / no data" (renders `—`).
+   *
+   * Map key MUST match the `id` field on PMAX_PRODUCT_GROUP rows
+   * constructed by `fetchProductGroups` — both use the raw
+   * `asset_group_product_group_view.resource_name` string. Any future
+   * change to either side must update both together to keep the lookup
+   * consistent.
+   */
+  private async fetchPurchaseProductGroupTotals(
+    dateFrom: string,
+    dateTo: string
+  ): Promise<Map<string, { purchases: number; revenue: number }> | null> {
+    if (this.purchaseActionIds === null) return null;
+    if (this.purchaseActionIds.size === 0) return null;
+
+    try {
+      const api = new GoogleAdsApi({
+        client_id: process.env.GOOGLE_ADS_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_ADS_CLIENT_SECRET!,
+        developer_token: process.env.GOOGLE_ADS_DEVELOPER_TOKEN!,
+      });
+
+      const customer = api.Customer({
+        customer_id: this.customerId,
+        refresh_token: this.refreshToken,
+        ...(this.loginCustomerId
+          ? { login_customer_id: this.loginCustomerId }
+          : {}),
+      });
+
+      // `campaign.advertising_channel_type` MUST appear in SELECT when used
+      // in WHERE on this resource (per-resource GAQL semantic — also true
+      // of `shopping_performance_view` in Commit 7's fetchShoppingProducts).
+      // Stripping the field will fail at runtime with query_error 16
+      // (MISSING_REQUIRED_FIELD_IN_SELECT_CLAUSE).
+      const query = `
+        SELECT
+          asset_group_product_group_view.resource_name,
+          segments.conversion_action,
+          metrics.conversions,
+          metrics.conversions_value,
+          campaign.advertising_channel_type
+        FROM asset_group_product_group_view
+        WHERE segments.date BETWEEN '${dateFrom}' AND '${dateTo}'
+          AND campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+      `;
+
+      const rows = await customer.query(query);
+
+      const byProductGroup = new Map<
+        string,
+        { purchases: number; revenue: number }
+      >();
+
+      for (const row of rows) {
+        const resourceName = String(
+          row.asset_group_product_group_view?.resource_name ?? ""
+        );
+        if (!resourceName) continue;
+
+        // First-sighting init: every product_group with any GAQL row ends
+        // up with hasConversionData=true even when none of its rows match
+        // a purchase action (legitimate 0 purchase count).
+        const existing = byProductGroup.get(resourceName) ?? {
+          purchases: 0,
+          revenue: 0,
+        };
+
+        const resourcePath = String(row.segments?.conversion_action ?? "");
+        const actionId = resourcePath.split("/").pop() ?? "";
+
+        if (this.purchaseActionIds.has(actionId)) {
+          const conversions = Number(row.metrics?.conversions) || 0;
+          const conversionsValue =
+            Number(row.metrics?.conversions_value) || 0;
+          existing.purchases += conversions;
+          existing.revenue += conversionsValue;
+        }
+
+        byProductGroup.set(resourceName, existing);
+      }
+
+      return byProductGroup;
+    } catch (err) {
+      const message =
+        err instanceof errors.GoogleAdsFailure
+          ? err.errors?.map((e) => e.message).join("; ") ??
+            "GoogleAdsFailure (no detail)"
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      console.warn(
+        `[GoogleAdsAdapter] fetchPurchaseProductGroupTotals failed for ${this.customerId}: ${message}. Degrading PMax product_group purchases to null.`
       );
       return null;
     }
@@ -1591,12 +1742,16 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
    * purchases. Surfacing it as `purchases` would repeat the bug
    * discovered in Commit 4b (ccf2dd3) for Google M5/M6 ad-level
    * rendering, where raw conversions were falsely displayed as purchases
-   * in arabiadash.com production UI for months. Commit 8
-   * (fetchPurchaseProductGroupTotals) merges properly-filtered purchase
-   * data via the ADR-011 pattern — purchase action IDs from
-   * google_conversion_actions table — and the Pass 7 merge step there
-   * will overwrite these defaults. Do NOT remove this guard without
-   * Commit 8 wired through.
+   * in arabiadash.com production UI for months.
+   *
+   * As of Commit 8a, `fetchPurchaseProductGroupTotals` is wired and the
+   * `enrichedProductGroups` merge step in getAds() overwrites the null
+   * defaults with properly-filtered purchase data (via the ADR-011
+   * pattern — purchase action IDs from google_conversion_actions). The
+   * defaults here remain the failsafe: if the merger Map is null (cache
+   * miss / no purchase actions / API failure) or this row's resource_name
+   * isn't in the Map, the row falls through with hasConversionData=false
+   * and renders "—". Do NOT remove this guard.
    */
   private async fetchProductGroups(
     dateFrom: string,
@@ -1687,8 +1842,10 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
           campaignName: String(row.campaign?.name ?? ""),
           spend,
           // Purchase trio + hasConversionData start as "no data" defaults —
-          // Commit 8 will overwrite via fetchPurchaseProductGroupTotals.
-          // See docblock above for bug-prevention rationale.
+          // the enrichedProductGroups merge step in getAds() overwrites
+          // them per-row using fetchPurchaseProductGroupTotals (Commit 8a).
+          // Defaults remain the failsafe when the merger Map is null or
+          // this row's resource_name has no entry. See docblock above.
           revenue: null,
           roas: null,
           purchases: null,
