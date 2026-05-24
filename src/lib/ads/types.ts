@@ -167,87 +167,87 @@ export interface UnifiedAdExtensions {
 }
 
 // =================================================================
-// Unified Ad (with creative + performance, for the Ad Creatives view)
+// Unified Ad — discriminated union (Phase 4.8 M-PMax / ADR-013)
 // =================================================================
-export interface UnifiedAd {
+//
+// Locked decisions:
+//  - `ad_type` is the SOLE structural discriminator. No overlapping
+//    render-hint fields (previous `creativeType` removed; Meta sub-types
+//    moved into META_AD's `type_data.subType`).
+//  - Common metrics + identity stay as top-level fields (indexable for
+//    future cross-ad-type aggregation queries).
+//  - Variant-specific data lives in `type_data` — future ad types add new
+//    union variants with their own `type_data` shape (zero schema sprawl).
+//
+// Phase 7+ extension path: TikTok / Snap / Salla / Zid each add their own
+// `ad_type` literal + their own `type_data` shape. No new columns, no
+// migrations.
+
+/**
+ * Top-level structural discriminator. Every variant has exactly one of these.
+ *
+ *  - RSA: Google Responsive Search Ad (text-only with headlines/descriptions)
+ *  - RDA: Google Responsive Display Ad (text + asset-resolved images)
+ *  - IMAGE_AD: Google legacy Image Ad (image-only; SDK currently can't surface
+ *    the image URL — placeholder for v2 when SDK supports it)
+ *  - META_AD: All Meta ad types (image/video/carousel/catalog disambiguated
+ *    via `type_data.subType`)
+ *  - PMAX_ASSET_GROUP: Google Performance Max asset_group (M-PMax)
+ *  - PMAX_PRODUCT_GROUP: Google Performance Max retail product_group row
+ *    (M-PMax retail surface — sibling row to PMAX_ASSET_GROUP for accounts
+ *    with Shopping/retail product feeds)
+ *  - UNKNOWN_GOOGLE: Google ad types not yet specifically modeled (Shopping,
+ *    App, Call, Smart Campaign, Demand Gen, etc.) — render falls through to
+ *    placeholder; type kept for diagnostic visibility
+ */
+export type AdType =
+  | "RSA"
+  | "RDA"
+  | "IMAGE_AD"
+  | "META_AD"
+  | "PMAX_ASSET_GROUP"
+  | "PMAX_PRODUCT_GROUP"
+  | "UNKNOWN_GOOGLE";
+
+/**
+ * Fields common to every UnifiedAd variant. Always populated, never optional
+ * unless explicitly marked. Performance metrics are uniform across ad types
+ * so they live at the common level (indexable in any future analytics table).
+ */
+export interface UnifiedAdCommon {
   // Identity
   id: string;
   name: string;
+  ad_type: AdType;
 
   /**
-   * Account currency (ISO 4217 — "SAR", "USD", "AED", etc.) at the time of fetch.
-   * Optional for backward compatibility with cached rows pre-extension.
-   * Phase 4.8 M5 Commit 1B — enables per-ad currency conversion for
+   * Source ad account ID. Stamped by multi-account hooks (`useProviderAds`).
+   * Optional — single-account hooks (`useAds`) leave it undefined.
+   */
+  accountId?: string;
+
+  /**
+   * Account currency (ISO 4217 — "SAR", "USD", "AED", etc.) at fetch time.
+   * Optional for backward compatibility with pre-M5-Commit-1B cached rows.
+   * Per Phase 4.8 M5 Commit 1B — enables per-ad currency conversion for
    * multi-account workspaces with mixed currencies.
-   * Pattern mirrors UnifiedInsight.currency (Phase 4.7 C0, ADR-005).
    */
   currency?: string;
-  // Status: every non-ACTIVE / non-DELETED state from Meta (PAUSED, ARCHIVED,
-  // CAMPAIGN_PAUSED, ADSET_PAUSED, IN_PROCESS, WITH_ISSUES, …) is normalized
-  // to PAUSED — users only care about whether the ad is currently running.
+
+  /**
+   * Normalized status. Every non-ACTIVE / non-DELETED state (PAUSED,
+   * ARCHIVED, CAMPAIGN_PAUSED, ADSET_PAUSED, IN_PROCESS, WITH_ISSUES, …)
+   * collapses to PAUSED — users only care if the ad is currently running.
+   */
   status: "ACTIVE" | "PAUSED" | "DELETED";
 
-  // Hierarchy
+  // Hierarchy (optional — varies by ad type / platform)
   campaignId?: string;
   campaignName?: string;
   adsetId?: string;
   adsetName?: string;
 
-  // Creative
-  creativeId?: string;
-  imageUrl?: string; // Image ads
-  thumbnailUrl?: string; // Video ad preview
-  videoId?: string; // Meta video ID
-  creativeType:
-    | "image"
-    | "video"
-    | "carousel"
-    | "catalog"
-    | "text"
-    | "unknown";
-
-  // Creative content
-  title?: string;
-  body?: string;
-  callToAction?: string;
-
-  /**
-   * Multiple headlines (Google RSA up to 15, RDA up to 5).
-   * Phase 4.8 M5 Commit 1 — enables creative-level analysis for text ads.
-   */
-  headlines?: string[];
-
-  /**
-   * Multiple descriptions (Google RSA up to 4, RDA up to 5).
-   * Phase 4.8 M5 Commit 1 — enables creative-level analysis for text ads.
-   */
-  descriptions?: string[];
-
-  // Catalog-specific
-  productSetId?: string;
-  catalogProducts?: Array<{
-    id: string;
-    name?: string;
-    imageUrl?: string;
-  }>;
-
-  // Carousel images (when creativeType === 'carousel')
-  carouselImages?: string[];
-
-  // Intermediate: hashes pulled from asset_feed_spec.images that still need
-  // resolution to URLs via /act_{id}/adimages. Removed after batch resolution.
-  carouselImageHashes?: string[];
-
-  /**
-   * Asset Extensions (Google-only). Phase 4.8 M6.
-   * See ADR-012 for query strategy + attribution.
-   */
-  extensions?: UnifiedAdExtensions;
-
-  // Always-available shareable link to the ad preview on Facebook
-  previewLink?: string;
-
-  // Performance
+  // Performance metrics — uniform shape across all ad types
   spend: number;
   revenue: number;
   roas: number;
@@ -257,8 +257,198 @@ export interface UnifiedAd {
   ctr: number;
   cpc: number;
 
+  /**
+   * Asset Extensions (Google-only currently). Per ADR-012.
+   * Lives at common level — applies across Google ad types (RSA/RDA/etc.)
+   * regardless of variant; Meta variants leave it undefined.
+   */
+  extensions?: UnifiedAdExtensions;
+
   provider: AdProvider;
 }
+
+/**
+ * RSA — Google Responsive Search Ad.
+ * Text-only; headlines + descriptions arrays surfaced from GAQL
+ * responsive_search_ad fields (Phase 4.8 M5 Commit 1).
+ */
+export interface UnifiedAdRsa extends UnifiedAdCommon {
+  ad_type: "RSA";
+  type_data: {
+    headlines: string[];
+    descriptions: string[];
+    /** First final_url from the ad's final_urls list. */
+    finalUrl?: string;
+  };
+}
+
+/**
+ * RDA — Google Responsive Display Ad.
+ * Text + asset-resolved marketing images. Phase 4.8 M5 Commit 1 (text) +
+ * Commit 2 (marketing_images → asset URL resolution).
+ */
+export interface UnifiedAdRda extends UnifiedAdCommon {
+  ad_type: "RDA";
+  type_data: {
+    headlines: string[];
+    descriptions: string[];
+    /** Resolved CDN URLs for marketing_images asset references. */
+    marketingImages?: string[];
+    /** First final_url from the ad's final_urls list. */
+    finalUrl?: string;
+  };
+}
+
+/**
+ * IMAGE_AD — Google legacy Image Ad.
+ * SDK currently rejects `image_ad.image_asset` SELECT (query_error 23,
+ * confirmed in M5). Variant kept for forward-compat — `imageUrl` will be
+ * populated when SDK supports the field. Today renders as placeholder.
+ */
+export interface UnifiedAdImageAd extends UnifiedAdCommon {
+  ad_type: "IMAGE_AD";
+  type_data: {
+    imageUrl?: string;
+    finalUrl?: string;
+  };
+}
+
+/**
+ * META_AD — all Meta ad types (image / video / carousel / catalog).
+ * `subType` is the Meta-internal sub-discriminator (replaces the old
+ * top-level `creativeType` field, which was conflated with Google's
+ * `creativeType` — now structurally separated per ADR-013).
+ */
+export interface UnifiedAdMeta extends UnifiedAdCommon {
+  ad_type: "META_AD";
+  type_data: {
+    /** Meta-internal sub-type. Drives the CreativeCard render branch. */
+    subType: "image" | "video" | "carousel" | "catalog" | "unknown";
+    creativeId?: string;
+    imageUrl?: string;
+    thumbnailUrl?: string;
+    /** Meta video ID (for previewing in modal). */
+    videoId?: string;
+    /** Creative text fields (Meta-specific). */
+    title?: string;
+    body?: string;
+    callToAction?: string;
+    /** Catalog ad — product set linkage. */
+    productSetId?: string;
+    /** Resolved top products for catalog ads (post-batch enrichment). */
+    catalogProducts?: Array<{
+      id: string;
+      name?: string;
+      imageUrl?: string;
+    }>;
+    /** Carousel images (resolved URLs). Present when subType === "carousel". */
+    carouselImages?: string[];
+    /**
+     * Intermediate: image hashes from asset_feed_spec.images pending
+     * resolution to URLs via /act_{id}/adimages. Removed after the batch
+     * resolution pass completes (see MetaAdapter.getAds).
+     */
+    carouselImageHashes?: string[];
+    /** Always-available shareable link to the ad preview on Facebook. */
+    previewLink?: string;
+  };
+}
+
+/**
+ * PMAX_ASSET_GROUP — Google Performance Max asset_group.
+ * Phase 4.8 M-PMax. Asset_group is the row-level entity in PMax (replaces
+ * the ad_group_ad-shaped row in Search/Display campaigns).
+ *
+ * `performance_label` per-asset categorical badge is DEFERRED to M-PMax v2
+ * (SDK currently rejects the field). When SDK supports it, add to
+ * `assets[i].performanceLabel` — zero migration cost per JSONB shape.
+ */
+export interface UnifiedAdPmaxAssetGroup extends UnifiedAdCommon {
+  ad_type: "PMAX_ASSET_GROUP";
+  type_data: {
+    /** Mapped from Google's integer enum via AD_STRENGTH_MAP in pmax.ts. */
+    adStrength: "EXCELLENT" | "GOOD" | "AVERAGE" | "POOR" | "NO_ADS";
+    primaryStatus: "ENABLED" | "PAUSED";
+    /**
+     * Assets bundled under this asset_group. Each asset surfaces its raw
+     * Google field_type (HEADLINE / DESCRIPTION / MARKETING_IMAGE / etc.)
+     * plus the resolved value (text or image URL).
+     */
+    assets: Array<{
+      fieldType: string;
+      assetType: string;
+      primaryStatus?: string;
+      text?: string;
+      imageUrl?: string;
+      youtubeVideoId?: string;
+      // performanceLabel?: string; — deferred to M-PMax v2
+    }>;
+  };
+}
+
+/**
+ * PMAX_PRODUCT_GROUP — Google Performance Max retail product_group row.
+ * Phase 4.8 M-PMax. Sibling row to PMAX_ASSET_GROUP for retail/Shopping
+ * Performance Max accounts (per ADR-013 Decision 2 — row-per-asset-group
+ * AND row-per-product-group as top-level UnifiedAd entries).
+ *
+ * PROVISIONAL SHAPE — finalized during commit 6 (renumbered from 7) via
+ * GAQL field-isolation testing against `asset_group_product_group_view`.
+ * The fields below are the planning-target shape per ADR-013; expect
+ * additions/refinements once we confirm which fields the resource actually
+ * returns at runtime (SDK field index ≠ runtime queryability trap — bit us
+ * three times across M5, M6, and PMax recon Stage 3).
+ *
+ * Retail-specific metrics (per-product spend/revenue/etc.) live in the
+ * common-level performance fields — same shape as every other variant.
+ */
+export interface UnifiedAdPmaxProductGroup extends UnifiedAdCommon {
+  ad_type: "PMAX_PRODUCT_GROUP";
+  type_data: {
+    /** Parent asset_group reference — product_groups live under asset_groups. */
+    assetGroupId: string;
+    assetGroupName: string;
+    /**
+     * Ordered dimension path describing where this product_group sits in
+     * the retail hierarchy (e.g. ["Brand: Nike", "Category: Shoes"]).
+     * Surfaced as breadcrumbs in the PMaxProductGroupCard UI.
+     */
+    productGroupDimensionPath: string[];
+    /** Number of products matched by this product_group, when available. */
+    productCount?: number;
+  };
+}
+
+/**
+ * UNKNOWN_GOOGLE — fallback for Google ad types not yet specifically modeled
+ * (Shopping, App, Call, Smart Campaign, Demand Gen, Video, etc.). Renders as
+ * "بدون صورة" placeholder; type kept for diagnostic visibility (the raw
+ * Google type string is preserved in `googleAdType`).
+ */
+export interface UnifiedAdUnknownGoogle extends UnifiedAdCommon {
+  ad_type: "UNKNOWN_GOOGLE";
+  type_data: {
+    /** Original Google ad type string for diagnostic / future surfacing. */
+    googleAdType: string;
+    finalUrl?: string;
+  };
+}
+
+/**
+ * Discriminated union — every `UnifiedAd` is exactly one of these variants.
+ * Narrow via `ad.ad_type === "..."` to access variant-specific `type_data`.
+ *
+ * Adding a new ad type: add a new variant interface above, append to this
+ * union. Zero schema migration; cache version bump triggers reread.
+ */
+export type UnifiedAd =
+  | UnifiedAdRsa
+  | UnifiedAdRda
+  | UnifiedAdImageAd
+  | UnifiedAdMeta
+  | UnifiedAdPmaxAssetGroup
+  | UnifiedAdPmaxProductGroup
+  | UnifiedAdUnknownGoogle;
 
 // =================================================================
 // Unified Account Info

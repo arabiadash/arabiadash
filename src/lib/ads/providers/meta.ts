@@ -96,13 +96,35 @@ export class MetaAdapter implements AdProviderAdapter {
       (ad) => ad.spend > 0 || ad.impressions > 0
     );
 
+    // metaAdToUnified always returns META_AD variant — narrow once here so
+    // downstream enrichment can read/write type_data without re-narrowing
+    // per access. Per ADR-013 / Memory #27: explicit narrowing > optional-
+    // field sprawl.
+    const metaAds = filteredAds.filter(
+      (ad): ad is Extract<UnifiedAd, { ad_type: "META_AD" }> =>
+        ad.ad_type === "META_AD"
+    );
+
     // Resolve carouselImageHashes → URLs in one batched call.
     const allHashes = new Set<string>();
-    for (const ad of filteredAds) {
-      if (ad.creativeType === "carousel" && ad.carouselImageHashes) {
-        ad.carouselImageHashes.forEach((h) => allHashes.add(h));
+    for (const ad of metaAds) {
+      if (
+        ad.type_data.subType === "carousel" &&
+        ad.type_data.carouselImageHashes
+      ) {
+        ad.type_data.carouselImageHashes.forEach((h) => allHashes.add(h));
       }
     }
+
+    // Build a per-ad-id hash-resolution result (used in the pure rebuild
+    // below). Empty map when no hashes need resolving.
+    type ResolvedCarousel = {
+      carouselImages?: string[];
+      // If resolution returned <2 URLs, the row falls back to a regular
+      // image ad — record the subType change so the rebuild applies it.
+      subTypeOverride?: "image";
+    };
+    const resolvedByAdId = new Map<string, ResolvedCarousel>();
 
     if (allHashes.size > 0) {
       const hashToUrl = await resolveImageHashesToUrls(
@@ -111,29 +133,34 @@ export class MetaAdapter implements AdProviderAdapter {
         Array.from(allHashes)
       );
 
-      for (const ad of filteredAds) {
-        if (ad.creativeType === "carousel" && ad.carouselImageHashes) {
-          const resolved = ad.carouselImageHashes
+      for (const ad of metaAds) {
+        if (
+          ad.type_data.subType === "carousel" &&
+          ad.type_data.carouselImageHashes
+        ) {
+          const resolved = ad.type_data.carouselImageHashes
             .map((h) => hashToUrl.get(h))
             .filter((url): url is string => !!url);
 
           if (resolved.length >= 2) {
-            ad.carouselImages = resolved;
+            resolvedByAdId.set(ad.id, { carouselImages: resolved });
           } else {
-            // Couldn't resolve enough URLs — fall back to a regular image ad
-            // (image_url from the legacy creative will be used by the UI).
-            ad.creativeType = "image";
-            ad.carouselImages = undefined;
+            // Couldn't resolve enough URLs — fall back to image subtype
+            // (image_url from legacy creative will be used by the UI).
+            resolvedByAdId.set(ad.id, {
+              carouselImages: undefined,
+              subTypeOverride: "image",
+            });
           }
-          delete ad.carouselImageHashes;
         }
       }
     }
 
     // Enrich catalog ads with their top products (parallel, capped to avoid
     // hitting Meta rate limits on accounts with many catalog ads).
-    const catalogAds = filteredAds.filter(
-      (ad) => ad.creativeType === "catalog" && ad.productSetId
+    const catalogAds = metaAds.filter(
+      (ad) =>
+        ad.type_data.subType === "catalog" && ad.type_data.productSetId
     );
     // Cap initial eager fetches at 5 (was 10) to keep p95 dashboard loads
     // snappy. Catalog ads beyond this fall back to the smart placeholder; the
@@ -142,11 +169,12 @@ export class MetaAdapter implements AdProviderAdapter {
 
     const productResults = await Promise.all(
       catalogAdsToFetch.map(async (ad) => {
-        if (!ad.productSetId) return { adId: ad.id, products: [] };
+        const productSetId = ad.type_data.productSetId;
+        if (!productSetId) return { adId: ad.id, products: [] };
         try {
           const products = await getCatalogTopProducts(
             this.accessToken,
-            ad.productSetId,
+            productSetId,
             4
           );
           return { adId: ad.id, products };
@@ -164,19 +192,43 @@ export class MetaAdapter implements AdProviderAdapter {
       productResults.map((r) => [r.adId, r.products])
     );
 
-    return filteredAds.map((ad) => {
-      if (ad.creativeType === "catalog" && productsByAdId.has(ad.id)) {
-        const products = productsByAdId.get(ad.id) ?? [];
-        return {
-          ...ad,
-          catalogProducts: products.map((p) => ({
-            id: p.id,
-            name: p.name,
-            imageUrl: p.image_url,
-          })),
-        };
+    // Pure-functional rebuild — emit new UnifiedAd objects with all
+    // enrichment applied. Avoids discriminated-union narrowing traps
+    // that come with in-place mutation per Memory #27 long-term-fit principle.
+    return metaAds.map((ad): UnifiedAd => {
+      const carouselResolution = resolvedByAdId.get(ad.id);
+      const productMatch = productsByAdId.get(ad.id);
+
+      // Build updated type_data — copy original, layer enrichments.
+      const newTypeData = {
+        ...ad.type_data,
+        // Carousel hash resolution: drop the intermediate hashes field
+        // regardless of outcome (resolved or fallback).
+        carouselImageHashes: undefined,
+      };
+
+      if (carouselResolution) {
+        newTypeData.carouselImages = carouselResolution.carouselImages;
+        if (carouselResolution.subTypeOverride) {
+          newTypeData.subType = carouselResolution.subTypeOverride;
+        }
       }
-      return ad;
+
+      if (
+        ad.type_data.subType === "catalog" &&
+        productMatch !== undefined
+      ) {
+        newTypeData.catalogProducts = productMatch.map((p) => ({
+          id: p.id,
+          name: p.name,
+          imageUrl: p.image_url,
+        }));
+      }
+
+      return {
+        ...ad,
+        type_data: newTypeData,
+      };
     });
   }
 

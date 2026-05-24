@@ -664,10 +664,12 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
   };
 
   /**
-   * AdRow → UnifiedAd. Composite name from campaign + ad group since Google
-   * ads lack a user-friendly name field. Creative content (headlines, images,
-   * video assets) is NOT included — Google has 35+ ad types with wildly
-   * different schemas; surfacing them needs a separate fetcher.
+   * AdRow → UnifiedAd discriminated variant. Branches on Google's internal
+   * ad type, returns one of: RSA, RDA, IMAGE_AD, UNKNOWN_GOOGLE (Phase 4.8
+   * M-PMax / ADR-013).
+   *
+   * Composite name from campaign + ad group since Google ads lack a
+   * user-friendly name field.
    */
   private normalizeAd = (
     ad: AdRow,
@@ -683,17 +685,12 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       }
     }
 
-    // Single image → imageUrl; multiple → carouselImages (reuses Meta's
-    // CarouselImage / CarouselDisplay render path with zero UI changes).
-    const imageUrl = resolvedUrls.length > 0 ? resolvedUrls[0] : undefined;
-    const carouselImages =
-      resolvedUrls.length > 1 ? resolvedUrls : undefined;
-
     // Phase 4.8 M6 — attach extensions if any (Google-only; undefined when
     // the ad has no extensions or fetchAdExtensions returned empty).
     const extensions = extensionsMap?.get(ad.id);
 
-    return {
+    // Common fields shared across all Google variants.
+    const common = {
       id: ad.id,
       name: `${ad.campaign_name} — ${ad.ad_group_name}`,
       currency: this.accountInfo.currency,
@@ -702,19 +699,6 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       campaignName: ad.campaign_name,
       adsetId: ad.ad_group_id,
       adsetName: ad.ad_group_name,
-      creativeId: undefined,
-      imageUrl,
-      thumbnailUrl: undefined,
-      videoId: undefined,
-      creativeType: this.adTypeToCreativeType(
-        ad.type,
-        resolvedUrls.length > 0
-      ),
-      previewLink: ad.final_url ?? undefined,
-      headlines: ad.headlines,
-      descriptions: ad.descriptions,
-      carouselImages,
-      extensions,
       spend: ad.spend,
       revenue: ad.revenue,
       roas: ad.roas,
@@ -723,39 +707,74 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       clicks: ad.clicks,
       ctr: ad.ctr * 100,
       cpc: ad.cpc,
-      provider: "google",
+      extensions,
+      provider: "google" as const,
     };
+
+    const finalUrl = ad.final_url ?? undefined;
+    const headlines = ad.headlines ?? [];
+    const descriptions = ad.descriptions ?? [];
+
+    // Branch by Google's internal ad type → discriminated variant.
+    switch (ad.type) {
+      case "RESPONSIVE_SEARCH_AD":
+      case "EXPANDED_TEXT_AD":
+        return {
+          ...common,
+          ad_type: "RSA",
+          type_data: {
+            headlines,
+            descriptions,
+            finalUrl,
+          },
+        };
+
+      case "RESPONSIVE_DISPLAY_AD":
+      case "LEGACY_RESPONSIVE_DISPLAY_AD":
+        return {
+          ...common,
+          ad_type: "RDA",
+          type_data: {
+            headlines,
+            descriptions,
+            marketingImages:
+              resolvedUrls.length > 0 ? resolvedUrls : undefined,
+            finalUrl,
+          },
+        };
+
+      case "IMAGE_AD":
+        return {
+          ...common,
+          ad_type: "IMAGE_AD",
+          type_data: {
+            // SDK currently rejects image_ad.image_asset SELECT (M5); this
+            // stays undefined until SDK supports the field. Variant kept
+            // for forward-compat per ADR-013.
+            imageUrl: resolvedUrls.length > 0 ? resolvedUrls[0] : undefined,
+            finalUrl,
+          },
+        };
+
+      default:
+        // Shopping, App, Call, Smart Campaigns, Demand Gen, Video, etc.
+        // No specific render branch in v1 — falls through to placeholder.
+        // Original Google type preserved in type_data.googleAdType for
+        // diagnostic visibility.
+        return {
+          ...common,
+          ad_type: "UNKNOWN_GOOGLE",
+          type_data: {
+            googleAdType: ad.type,
+            finalUrl,
+          },
+        };
+    }
   };
 
   private normalizeAdStatus(googleStatus: string): UnifiedAd["status"] {
     if (googleStatus === "ENABLED") return "ACTIVE";
     if (googleStatus === "REMOVED") return "DELETED";
     return "PAUSED";
-  }
-
-  /**
-   * Best-effort mapping from Google's ad type strings → Unified creativeType.
-   * Phase 4.8 M5 Commit 2: when image assets resolved successfully, prefer
-   * "image" so the UI uses the photo render branch instead of the SERP-style
-   * text card. RDA falls back to "text" only when its marketing_images
-   * couldn't be resolved (rare — usually a transient asset API failure).
-   */
-  private adTypeToCreativeType(
-    googleType: string,
-    hasResolvedImages: boolean = false
-  ): UnifiedAd["creativeType"] {
-    if (googleType.includes("VIDEO")) return "video";
-    if (hasResolvedImages) return "image";
-    if (googleType === "IMAGE_AD") return "image";
-    if (
-      googleType === "RESPONSIVE_SEARCH_AD" ||
-      googleType === "EXPANDED_TEXT_AD" ||
-      googleType === "RESPONSIVE_DISPLAY_AD" ||
-      googleType === "LEGACY_RESPONSIVE_DISPLAY_AD"
-    ) {
-      return "text";
-    }
-    // Shopping, App, Call, Smart Campaigns, Demand Gen — no surface yet.
-    return "unknown";
   }
 }

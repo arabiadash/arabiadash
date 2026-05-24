@@ -12,8 +12,11 @@ import type { Json } from "@/lib/supabase/database.types";
  *       currency. Old cache entries lack these fields.
  * - v3: Phase 4.8 M6 — UnifiedAd gained extensions (sitelinks, callouts,
  *       structured snippets). Pre-v3 entries lack this field. See ADR-012.
+ * - v4: Phase 4.8 M-PMax — UnifiedAd restructured as discriminated union
+ *       with ad_type discriminator + type_data variant shape. Old flat
+ *       entries crash on ad_type narrowing. See ADR-013.
  */
-const CACHE_SCHEMA_VERSION = "v3";
+const CACHE_SCHEMA_VERSION = "v4";
 
 const CACHE_TTL_MINUTES = 15;
 

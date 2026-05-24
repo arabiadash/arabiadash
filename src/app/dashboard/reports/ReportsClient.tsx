@@ -375,20 +375,65 @@ function CreativeCard({
   displayCurrency,
   onClick,
 }: CreativeCardProps) {
-  const imageUrl = ad.imageUrl || ad.thumbnailUrl;
-  const isVideo = ad.creativeType === "video";
-  const isCatalog = ad.creativeType === "catalog";
-  const isCarousel = ad.creativeType === "carousel";
+  // Variant narrowing — ad_type is the sole discriminator per ADR-013.
+  // All variant-specific access goes through type_data after this point.
+  const metaData = ad.ad_type === "META_AD" ? ad.type_data : undefined;
+  const isMeta = ad.ad_type === "META_AD";
+  const isVideo = metaData?.subType === "video";
+  const isCatalog = metaData?.subType === "catalog";
+  const isCarouselMeta = metaData?.subType === "carousel";
+
+  // Cross-variant data accessors
+  const headlines =
+    ad.ad_type === "RSA" || ad.ad_type === "RDA"
+      ? ad.type_data.headlines
+      : undefined;
+  const descriptions =
+    ad.ad_type === "RSA" || ad.ad_type === "RDA"
+      ? ad.type_data.descriptions
+      : undefined;
+
+  // Image URL — pulled from whichever variant owns it.
+  const imageUrl: string | undefined = (() => {
+    if (isMeta) return metaData?.imageUrl ?? metaData?.thumbnailUrl;
+    if (ad.ad_type === "IMAGE_AD") return ad.type_data.imageUrl;
+    // Single RDA marketing image → render as image.
+    if (
+      ad.ad_type === "RDA" &&
+      ad.type_data.marketingImages?.length === 1
+    ) {
+      return ad.type_data.marketingImages[0];
+    }
+    return undefined;
+  })();
+
+  // Multi-image carousel — Meta carousel OR RDA with ≥2 marketing images.
+  const carouselImages: string[] | undefined = (() => {
+    if (
+      metaData?.carouselImages &&
+      metaData.carouselImages.length > 1
+    ) {
+      return metaData.carouselImages;
+    }
+    if (
+      ad.ad_type === "RDA" &&
+      ad.type_data.marketingImages &&
+      ad.type_data.marketingImages.length > 1
+    ) {
+      return ad.type_data.marketingImages;
+    }
+    return undefined;
+  })();
+  const hasCarouselImages = !!carouselImages;
+
+  const catalogProducts = metaData?.catalogProducts;
   const hasCatalogProducts =
     isCatalog &&
-    Array.isArray(ad.catalogProducts) &&
-    ad.catalogProducts.length > 0;
-  const hasCarouselImages =
-    isCarousel &&
-    Array.isArray(ad.carouselImages) &&
-    ad.carouselImages.length > 1;
-  const isText =
-    ad.creativeType === "text" && (ad.headlines?.length ?? 0) > 0;
+    Array.isArray(catalogProducts) &&
+    catalogProducts.length > 0;
+
+  const isText = (headlines?.length ?? 0) > 0;
+
   const extensionCount =
     (ad.extensions?.sitelinks?.length ?? 0) +
     (ad.extensions?.callouts?.length ?? 0) +
@@ -401,10 +446,10 @@ function CreativeCard({
     >
       <div className="aspect-square relative bg-gray-100 overflow-hidden">
         {hasCarouselImages ? (
-          <CarouselImage images={ad.carouselImages!} />
+          <CarouselImage images={carouselImages!} />
         ) : hasCatalogProducts ? (
           <div className="w-full h-full grid grid-cols-2 grid-rows-2 gap-px bg-gray-200">
-            {ad.catalogProducts!.slice(0, 4).map((product) => (
+            {catalogProducts!.slice(0, 4).map((product) => (
               <div key={product.id} className="bg-gray-100 overflow-hidden">
                 {product.imageUrl ? (
                   // eslint-disable-next-line @next/next/no-img-element
@@ -425,7 +470,7 @@ function CreativeCard({
               </div>
             ))}
             {Array.from({
-              length: Math.max(0, 4 - ad.catalogProducts!.length),
+              length: Math.max(0, 4 - catalogProducts!.length),
             }).map((_, i) => (
               <div
                 key={`empty-${i}`}
@@ -466,27 +511,27 @@ function CreativeCard({
               (e.target as HTMLImageElement).style.display = "none";
             }}
           />
-        ) : isText ? (
+        ) : isText && headlines ? (
           <div className="w-full h-full bg-gradient-to-br from-blue-50 to-indigo-50 p-3 flex flex-col justify-center">
             <div className="text-sm font-semibold text-blue-700 line-clamp-2 mb-1">
-              {ad.headlines![0]}
+              {headlines[0]}
             </div>
-            {ad.headlines![1] && (
+            {headlines[1] && (
               <div className="text-xs text-blue-600 line-clamp-1 mb-2">
-                {ad.headlines![1]}
+                {headlines[1]}
               </div>
             )}
-            {ad.descriptions && ad.descriptions.length > 0 && (
+            {descriptions && descriptions.length > 0 && (
               <div className="text-xs text-gray-700 line-clamp-2 leading-relaxed">
-                {ad.descriptions[0]}
+                {descriptions[0]}
               </div>
             )}
-            {(ad.headlines!.length > 2 ||
-              (ad.descriptions?.length ?? 0) > 1) && (
+            {(headlines.length > 2 ||
+              (descriptions?.length ?? 0) > 1) && (
               <div className="text-[10px] text-blue-400 mt-2 text-center">
                 +
-                {Math.max(0, ad.headlines!.length - 2) +
-                  Math.max(0, (ad.descriptions?.length ?? 0) - 1)}{" "}
+                {Math.max(0, headlines.length - 2) +
+                  Math.max(0, (descriptions?.length ?? 0) - 1)}{" "}
                 عنصر إضافي
               </div>
             )}
@@ -714,18 +759,67 @@ function AdDetailModal({
   displayCurrency,
   onClose,
 }: AdDetailModalProps) {
-  const imageUrl = ad.imageUrl || ad.thumbnailUrl;
-  const isCatalog = ad.creativeType === "catalog";
-  const isVideo = ad.creativeType === "video";
+  // Variant narrowing — ad_type is the sole discriminator per ADR-013.
+  const metaData = ad.ad_type === "META_AD" ? ad.type_data : undefined;
+  const isMeta = ad.ad_type === "META_AD";
+  const isVideo = metaData?.subType === "video";
+  const isCatalog = metaData?.subType === "catalog";
+
+  // Cross-variant accessors
+  const headlines =
+    ad.ad_type === "RSA" || ad.ad_type === "RDA"
+      ? ad.type_data.headlines
+      : undefined;
+  const descriptions =
+    ad.ad_type === "RSA" || ad.ad_type === "RDA"
+      ? ad.type_data.descriptions
+      : undefined;
+
+  const imageUrl: string | undefined = (() => {
+    if (isMeta) return metaData?.imageUrl ?? metaData?.thumbnailUrl;
+    if (ad.ad_type === "IMAGE_AD") return ad.type_data.imageUrl;
+    if (
+      ad.ad_type === "RDA" &&
+      ad.type_data.marketingImages?.length === 1
+    ) {
+      return ad.type_data.marketingImages[0];
+    }
+    return undefined;
+  })();
+
+  // Multi-image gallery — Meta carousel OR RDA with ≥2 marketing images.
+  const carouselImages: string[] | undefined = (() => {
+    if (
+      metaData?.carouselImages &&
+      metaData.carouselImages.length >= 2
+    ) {
+      return metaData.carouselImages;
+    }
+    if (
+      ad.ad_type === "RDA" &&
+      ad.type_data.marketingImages &&
+      ad.type_data.marketingImages.length >= 2
+    ) {
+      return ad.type_data.marketingImages;
+    }
+    return undefined;
+  })();
+  const hasCarouselImages = !!carouselImages;
+
+  const catalogProducts = metaData?.catalogProducts;
   const hasCatalogProducts =
     isCatalog &&
-    Array.isArray(ad.catalogProducts) &&
-    ad.catalogProducts.length > 0;
-  // Show multi-image gallery whenever 2+ images exist — works for classic
-  // carousels AND Meta's Flexible Ads (asset_feed_spec.images).
-  const hasCarouselImages = (ad.carouselImages?.length ?? 0) >= 2;
-  const isText =
-    ad.creativeType === "text" && (ad.headlines?.length ?? 0) > 0;
+    Array.isArray(catalogProducts) &&
+    catalogProducts.length > 0;
+
+  const isText = (headlines?.length ?? 0) > 0;
+
+  // Meta-only text fields
+  const title = metaData?.title;
+  const body = metaData?.body;
+  const callToAction = metaData?.callToAction;
+  const previewLink = metaData?.previewLink;
+  const thumbnailUrl = metaData?.thumbnailUrl;
 
   const [carouselIndex, setCarouselIndex] = useState(0);
 
@@ -751,11 +845,11 @@ function AdDetailModal({
         <div className="p-4 sm:p-6 space-y-4">
           <div className="rounded-lg overflow-hidden bg-gray-100">
             {isVideo ? (
-              ad.thumbnailUrl ? (
+              thumbnailUrl ? (
                 <div className="relative">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
-                    src={ad.thumbnailUrl}
+                    src={thumbnailUrl}
                     alt={ad.name}
                     className="w-full max-h-96 object-contain bg-gray-50"
                   />
@@ -778,13 +872,13 @@ function AdDetailModal({
               )
             ) : hasCarouselImages ? (
               <CarouselDisplay
-                images={ad.carouselImages!}
+                images={carouselImages!}
                 currentIndex={carouselIndex}
                 setCurrentIndex={setCarouselIndex}
               />
             ) : hasCatalogProducts ? (
               <div className="grid grid-cols-2 gap-1 aspect-square">
-                {ad.catalogProducts!.slice(0, 4).map((product) => (
+                {catalogProducts!.slice(0, 4).map((product) => (
                   <div key={product.id} className="bg-white overflow-hidden">
                     {product.imageUrl ? (
                       // eslint-disable-next-line @next/next/no-img-element
@@ -808,24 +902,19 @@ function AdDetailModal({
                 alt={ad.name}
                 className="w-full max-h-96 object-contain bg-gray-50"
               />
-            ) : isText ? (
+            ) : isText && headlines ? (
               <div className="w-full aspect-[4/3] bg-gradient-to-br from-blue-50 to-indigo-50 p-6 flex flex-col justify-center rounded-lg">
                 <div className="text-lg md:text-xl font-semibold text-blue-700 mb-2 leading-relaxed">
-                  {ad.headlines![0]}
+                  {headlines[0]}
                 </div>
-                {ad.headlines![1] && (
+                {headlines[1] && (
                   <div className="text-sm md:text-base text-blue-600 mb-3">
-                    {ad.headlines![1]}
+                    {headlines[1]}
                   </div>
                 )}
-                {ad.previewLink && (
-                  <div className="text-xs text-green-700 mb-3 truncate">
-                    {ad.previewLink.replace(/^https?:\/\//, "")}
-                  </div>
-                )}
-                {ad.descriptions && ad.descriptions.length > 0 && (
+                {descriptions && descriptions.length > 0 && (
                   <div className="text-sm text-gray-700 leading-relaxed">
-                    {ad.descriptions[0]}
+                    {descriptions[0]}
                   </div>
                 )}
               </div>
@@ -841,38 +930,38 @@ function AdDetailModal({
             <h4 className="font-semibold text-gray-900">{ad.name}</h4>
           </div>
 
-          {ad.title && (
+          {title && (
             <div>
               <p className="text-xs text-gray-500 mb-1">عنوان الإعلان</p>
-              <p className="text-sm font-medium text-gray-900">{ad.title}</p>
+              <p className="text-sm font-medium text-gray-900">{title}</p>
             </div>
           )}
 
-          {ad.body && (
+          {body && (
             <div>
               <p className="text-xs text-gray-500 mb-1">نص الإعلان</p>
               <p className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
-                {ad.body}
+                {body}
               </p>
             </div>
           )}
 
-          {ad.callToAction && (
+          {callToAction && (
             <div>
               <p className="text-xs text-gray-500 mb-1">زر الإجراء</p>
               <span className="inline-block px-3 py-1.5 bg-indigo-100 text-indigo-700 rounded-lg text-xs font-semibold">
-                {CTA_LABELS_AR[ad.callToAction] ?? ad.callToAction}
+                {CTA_LABELS_AR[callToAction] ?? callToAction}
               </span>
             </div>
           )}
 
-          {ad.headlines && ad.headlines.length > 0 && (
+          {headlines && headlines.length > 0 && (
             <div>
               <p className="text-xs text-gray-500 mb-2">
-                العناوين ({ad.headlines.length})
+                العناوين ({headlines.length})
               </p>
               <ol className="space-y-1.5">
-                {ad.headlines.map((headline, i) => (
+                {headlines.map((headline, i) => (
                   <li
                     key={i}
                     className="text-sm text-gray-700 flex gap-2 items-start"
@@ -887,13 +976,13 @@ function AdDetailModal({
             </div>
           )}
 
-          {ad.descriptions && ad.descriptions.length > 0 && (
+          {descriptions && descriptions.length > 0 && (
             <div>
               <p className="text-xs text-gray-500 mb-2">
-                الأوصاف ({ad.descriptions.length})
+                الأوصاف ({descriptions.length})
               </p>
               <ol className="space-y-1.5">
-                {ad.descriptions.map((description, i) => (
+                {descriptions.map((description, i) => (
                   <li
                     key={i}
                     className="text-sm text-gray-700 flex gap-2 items-start"
@@ -1009,13 +1098,13 @@ function AdDetailModal({
               </div>
             )}
 
-          {hasCatalogProducts && (
+          {hasCatalogProducts && catalogProducts && (
             <div>
               <p className="text-xs text-gray-500 mb-2">
                 أفضل المنتجات في الكتالوج
               </p>
               <div className="space-y-2">
-                {ad.catalogProducts!.map((product) => (
+                {catalogProducts.map((product) => (
                   <div
                     key={product.id}
                     className="flex items-center gap-3 p-2 bg-gray-50 rounded-lg"
@@ -1091,13 +1180,12 @@ function AdDetailModal({
             </div>
           </div>
 
-          {/* Facebook preview link — Meta only. Google's previewLink is the
-              landing-page URL, not the Google Ads editor, so we hide the
-              button for Google ads to avoid misleading the user. */}
-          {ad.provider !== "google" && ad.previewLink && (
+          {/* Facebook preview link — META_AD only per ADR-013 (previewLink
+              lives in META_AD's type_data, not at common level). */}
+          {previewLink && (
             <div className="border-t border-gray-100 pt-4">
               <a
-                href={ad.previewLink}
+                href={previewLink}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-sm font-semibold rounded-lg hover:opacity-90 transition"
