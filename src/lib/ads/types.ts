@@ -196,6 +196,9 @@ export interface UnifiedAdExtensions {
  *  - PMAX_PRODUCT_GROUP: Google Performance Max retail product_group row
  *    (M-PMax retail surface — sibling row to PMAX_ASSET_GROUP for accounts
  *    with Shopping/retail product feeds)
+ *  - PMAX_SHOPPING_PRODUCT: individual Merchant Center product row (SKU
+ *    level) from shopping_performance_view. Sibling to PMAX_PRODUCT_GROUP
+ *    — product_groups are filter buckets, shopping_products are leaf SKUs.
  *  - UNKNOWN_GOOGLE: Google ad types not yet specifically modeled (Shopping,
  *    App, Call, Smart Campaign, Demand Gen, etc.) — render falls through to
  *    placeholder; type kept for diagnostic visibility
@@ -207,6 +210,7 @@ export type AdType =
   | "META_AD"
   | "PMAX_ASSET_GROUP"
   | "PMAX_PRODUCT_GROUP"
+  | "PMAX_SHOPPING_PRODUCT"
   | "UNKNOWN_GOOGLE";
 
 /**
@@ -499,6 +503,67 @@ export interface UnifiedAdPmaxProductGroup extends UnifiedAdCommon {
 }
 
 /**
+ * PMAX_SHOPPING_PRODUCT — individual Merchant Center product row (SKU-level)
+ * from `shopping_performance_view`. Phase 4.8 M-PMax Commit 7. Sibling row
+ * to PMAX_PRODUCT_GROUP: product_groups are user-defined filter buckets in
+ * the listing tree, shopping_products are the leaf SKUs themselves.
+ *
+ * Shape finalized in Commit 7 via Q8 field-isolation testing — see
+ * docs/recon/pmax-recon-stage-2-3-2026-05-24.md Phase 4 Shopping section.
+ * Three fields from the original ADR-013 spec were dropped after Q8 proved
+ * them unpopulatable from this resource:
+ *  - productImageUrl, productPrice — not exposed by shopping_performance_view
+ *    segments; available only via separate `shopping_product` resource
+ *    (deferred to a future commit).
+ *  - assetGroupId / assetGroupName / listingGroupFilterId — JOIN from
+ *    shopping_performance_view to asset_group_listing_group_filter rejected
+ *    at runtime (query_error 48). Cross-reference deferred until a concrete
+ *    UI use case justifies post-fetch joining.
+ *
+ * See ADR-013 Alternative 6 (rejected lazy-data-availability anti-pattern)
+ * for the rationale on dropping rather than stubbing.
+ */
+export interface UnifiedAdPmaxShoppingProduct extends UnifiedAdCommon {
+  ad_type: "PMAX_SHOPPING_PRODUCT";
+  type_data: {
+    /**
+     * Merchant Center product offer ID. Mixed-format per Q8 recon: this
+     * resource returns SKUs with a `"p"` prefix (e.g. `"p1001595639"`)
+     * while `asset_group_listing_group_filter.path` returns them unprefixed
+     * (`"1001595639"`). Surfaced verbatim — any future cross-reference
+     * logic strips the prefix.
+     */
+    productId: string;
+    productTitle?: string;
+    /** Merchant Center brand attribute. Feed-dependent; often empty. */
+    productBrand?: string;
+    /**
+     * Raw resource_name format from `segments.product_category_level1`
+     * (e.g. `"productCategoryConstants/LEVEL1~469"`). Translation to a
+     * human-readable category name requires a separate
+     * `product_category_constant` lookup query — deferred to a future
+     * commit; v1 surfaces the raw value.
+     */
+    productCategoryLevel1?: string;
+    /** Merchant Center product_type level 1. Feed-dependent; often empty. */
+    productTypeL1?: string;
+    /**
+     * Product condition mapped from Google's `ProductConditionEnum` integer
+     * (verified against proto: 0=UNSPECIFIED, 1=UNKNOWN, 3=NEW, 4=REFURBISHED,
+     * 5=USED — non-contiguous, no value 2). Unknown integers fall through to
+     * `OTHER_${n}` per `readProductCondition` defensive fallback.
+     */
+    productCondition?:
+      | "UNSPECIFIED"
+      | "UNKNOWN"
+      | "NEW"
+      | "REFURBISHED"
+      | "USED"
+      | `OTHER_${number}`;
+  };
+}
+
+/**
  * UNKNOWN_GOOGLE — fallback for Google ad types not yet specifically modeled
  * (Shopping, App, Call, Smart Campaign, Demand Gen, Video, etc.). Renders as
  * "بدون صورة" placeholder; type kept for diagnostic visibility (the raw
@@ -527,6 +592,7 @@ export type UnifiedAd =
   | UnifiedAdMeta
   | UnifiedAdPmaxAssetGroup
   | UnifiedAdPmaxProductGroup
+  | UnifiedAdPmaxShoppingProduct
   | UnifiedAdUnknownGoogle;
 
 // =================================================================

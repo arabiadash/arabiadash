@@ -428,6 +428,169 @@ async function main() {
   // in Stage 3 Q3. Re-testing here would just re-confirm the trap.
 
   // ---------------------------------------------------------------
+  // Q8 — Phase 4 SHOPPING field-isolation (M-PMax Commit 7)
+  //
+  // shopping_performance_view is the per-product (SKU-level) retail
+  // PMax surface. Google's docs (developers.google.com/google-ads/api/
+  // performance-max/retail-reporting) say no JOIN is available from this
+  // view to asset_group / asset_group_listing_group_filter — Q8d probes
+  // that explicitly. Q8e probes the product metadata segments we'd want
+  // for the PMAX_SHOPPING_PRODUCT variant (title / brand / category /
+  // type / condition). Image URL + price are NOT exposed by this view
+  // per docs — would require shopping_product resource or Merchant
+  // Center API, out of scope for Commit 7.
+  // ---------------------------------------------------------------
+  const last30Start = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return d.toISOString().slice(0, 10);
+  })();
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const shoppingWhere = `campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND segments.date BETWEEN '${last30Start}' AND '${todayISO}'`;
+
+  results.q8a_spv_base = await runQuery(
+    customer,
+    "Q8a — shopping_performance_view BASE (product_item_id + metrics)",
+    `
+      SELECT
+        campaign.advertising_channel_type,
+        segments.product_item_id,
+        metrics.impressions,
+        metrics.clicks,
+        metrics.cost_micros
+      FROM shopping_performance_view
+      WHERE ${shoppingWhere}
+      LIMIT 20
+    `
+  );
+  if (results.q8a_spv_base.ok) {
+    console.log("\nFirst 3 rows:");
+    console.log(JSON.stringify(results.q8a_spv_base.rows.slice(0, 3), null, 2));
+  }
+
+  if (results.q8a_spv_base.ok) {
+    results.q8b_spv_conversions = await runQuery(
+      customer,
+      "Q8b — + conversions + conversions_value",
+      `
+        SELECT
+          campaign.advertising_channel_type,
+          segments.product_item_id,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM shopping_performance_view
+        WHERE ${shoppingWhere}
+        LIMIT 20
+      `
+    );
+    if (results.q8b_spv_conversions.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q8b_spv_conversions.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q8b_spv_conversions = { ok: false, error: "skipped (Q8a failed)" };
+  }
+
+  if (results.q8b_spv_conversions.ok) {
+    results.q8c_spv_campaign = await runQuery(
+      customer,
+      "Q8c — + campaign.id + campaign.name (low-risk context)",
+      `
+        SELECT
+          campaign.id,
+          campaign.name,
+          campaign.advertising_channel_type,
+          segments.product_item_id,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM shopping_performance_view
+        WHERE ${shoppingWhere}
+        LIMIT 20
+      `
+    );
+    if (results.q8c_spv_campaign.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q8c_spv_campaign.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q8c_spv_campaign = { ok: false, error: "skipped (Q8b failed)" };
+  }
+
+  if (results.q8c_spv_campaign.ok) {
+    results.q8d_spv_join_probe = await runQuery(
+      customer,
+      "Q8d — + asset_group + asset_group_listing_group_filter JOIN probe (docs say unsupported)",
+      `
+        SELECT
+          campaign.id,
+          campaign.advertising_channel_type,
+          asset_group.id,
+          asset_group.name,
+          asset_group_listing_group_filter.id,
+          segments.product_item_id,
+          metrics.impressions,
+          metrics.clicks
+        FROM shopping_performance_view
+        WHERE ${shoppingWhere}
+        LIMIT 20
+      `
+    );
+    if (results.q8d_spv_join_probe.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q8d_spv_join_probe.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q8d_spv_join_probe = {
+      ok: false,
+      error: "skipped (Q8c failed)",
+    };
+  }
+
+  if (results.q8c_spv_campaign.ok) {
+    results.q8e_spv_metadata = await runQuery(
+      customer,
+      "Q8e — + product metadata (title + brand + category_level1 + type_l1 + condition)",
+      `
+        SELECT
+          campaign.id,
+          campaign.advertising_channel_type,
+          segments.product_item_id,
+          segments.product_title,
+          segments.product_brand,
+          segments.product_category_level1,
+          segments.product_type_l1,
+          segments.product_condition,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros
+        FROM shopping_performance_view
+        WHERE ${shoppingWhere}
+        LIMIT 20
+      `
+    );
+    if (results.q8e_spv_metadata.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q8e_spv_metadata.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q8e_spv_metadata = { ok: false, error: "skipped (Q8c failed)" };
+  }
+
+  // ---------------------------------------------------------------
   // Q7 — Phase 3 RETAIL field-isolation (M-PMax Commit 6)
   //
   // asset_group_product_group_view is the retail-PMax product-level row
@@ -632,6 +795,21 @@ async function main() {
         q7e_type_vertical: results.q7e_type_vertical.ok
           ? `${results.q7e_type_vertical.rows.length} rows`
           : `FAILED: ${results.q7e_type_vertical.error}`,
+        q8a_spv_base: results.q8a_spv_base.ok
+          ? `${results.q8a_spv_base.rows.length} rows`
+          : `FAILED: ${results.q8a_spv_base.error}`,
+        q8b_spv_conversions: results.q8b_spv_conversions.ok
+          ? `${results.q8b_spv_conversions.rows.length} rows`
+          : `FAILED: ${results.q8b_spv_conversions.error}`,
+        q8c_spv_campaign: results.q8c_spv_campaign.ok
+          ? `${results.q8c_spv_campaign.rows.length} rows`
+          : `FAILED: ${results.q8c_spv_campaign.error}`,
+        q8d_spv_join_probe: results.q8d_spv_join_probe.ok
+          ? `${results.q8d_spv_join_probe.rows.length} rows`
+          : `FAILED: ${results.q8d_spv_join_probe.error}`,
+        q8e_spv_metadata: results.q8e_spv_metadata.ok
+          ? `${results.q8e_spv_metadata.rows.length} rows`
+          : `FAILED: ${results.q8e_spv_metadata.error}`,
       },
       null,
       2

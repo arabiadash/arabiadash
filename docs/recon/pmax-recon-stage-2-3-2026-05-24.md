@@ -535,3 +535,95 @@ Q7 forces these revisions:
 2. **`productCount` is not exposed by `asset_group_product_group_view`** — comes from `shopping_performance_view` (Commit 7) if needed. Either drop the field or keep optional and source from Commit 7's join. Recommend drop now, re-add in Commit 7 if Commit 7 work surfaces a clean per-product-group count.
 3. **Add `listingGroupFilterId: string`** — enables cross-referencing with future shopping_performance_view rows and is a stable identifier for the row (resource_name has `~`-separated suffix that includes it, but explicit is cleaner).
 4. **Add `isRootGroup: boolean`** — derived from `path.dimensions` being empty. UI uses this to distinguish "All products (catch-all)" rows from specific subdivisions/leaves. Cheap to compute at adapter time.
+
+---
+
+## Phase 4 Shopping field-isolation results (M-PMax Commit 7, 2026-05-24)
+
+Web-search prep:
+- [shopping_performance_view (v23)](https://developers.google.com/google-ads/api/fields/v23/shopping_performance_view) — confirmed resource, `segments.product_*` are the SKU-level dimensions
+- [Retail Performance Max reporting](https://developers.google.com/google-ads/api/performance-max/retail-reporting) — quote: *"No JOINs are used. Instead, Google recommends using asset_group_product_group_view for segmentation by asset groups and listing group filters — a separate view entirely, not joined within shopping_performance_view queries."*
+- [segments | Google Ads API](https://developers.google.com/google-ads/api/fields/v20/segments) — listing of available product_* segments
+
+**Critical pre-Q8 finding from web search:** `product_image_url` and `product_price` are **NOT** exposed as segments on `shopping_performance_view`. Image/price data lives in the separate `shopping_product` resource or in Merchant Center API. This affects the PMAX_SHOPPING_PRODUCT shape — the ADR-013 spec proposed both fields, but Q8 can't surface them. They'd need a follow-up commit (separate query against `shopping_product`).
+
+### Q8 — additive iterations against `shopping_performance_view`
+
+| Iteration | Field added | Status |
+|---|---|---|
+| Q8 retry pre-fix | (original SELECT missing `campaign.advertising_channel_type`) | ✗ failed with `query_error 16`, `MISSING_REQUIRED_FIELD_IN_SELECT_CLAUSE` — GAQL requires fields used in WHERE to also appear in SELECT for this resource. Fixed all iterations by adding `campaign.advertising_channel_type` to SELECT. Not an SDK trap, just a per-resource GAQL semantic. |
+| Q8a | base 5 fields (`product_item_id` + metrics + `advertising_channel_type`) | ✓ 20 rows |
+| Q8b | + `metrics.conversions` + `metrics.conversions_value` | ✓ 20 rows |
+| Q8c | + `campaign.id` + `campaign.name` (low-risk context) | ✓ 20 rows |
+| Q8d | + `asset_group` / `asset_group_listing_group_filter` JOIN probe | ✗ FAILED — `query_error 48`, "Cannot select fields from the following resources: 'ASSET_GROUP', 'ASSET_GROUP_LISTING_GROUP_FILTER', since the resource is incompatible with the resource in FROM clause." Confirms Google's docs — no JOIN available. |
+| Q8e | + product metadata (`product_title` + `product_brand` + `product_category_level1` + `product_type_l1` + `product_condition`) | ✓ 20 rows |
+
+### Sample row data shapes (imaa)
+
+**Q8a sample (base):**
+```json
+{
+  "campaign": { "resource_name": ".../campaigns/21330832483", "advertising_channel_type": 10 },
+  "segments": { "product_item_id": "125696999" },
+  "metrics":  { "impressions": 2634, "clicks": 7, "cost_micros": 23291821 },
+  "shopping_performance_view": { "resource_name": ".../shoppingPerformanceView" }
+}
+```
+
+**Q8e sample (metadata):**
+```json
+{
+  "campaign": { "id": 21330832483, "advertising_channel_type": 10 },
+  "segments": {
+    "product_item_id":         "p1001595639",
+    "product_title":           "N9 - 30ML",
+    "product_category_level1": "productCategoryConstants/LEVEL1~469",
+    "product_condition":       3
+  },
+  "metrics": { "impressions": 26, "clicks": 0, "cost_micros": 0 }
+}
+```
+
+### Critical data discoveries
+
+1. **`product_item_id` has mixed formats.** Q8 returned both bare numeric IDs (`"125696999"`, `"74550111"`) AND `"p"`-prefixed IDs (`"p1902182960"`, `"p1001595639"`). Q7c's `asset_group_listing_group_filter.path.dimensions[].product_item_id.value` returned the SAME product as `"1001595639"` (no `"p"` prefix). So the prefix is added by `shopping_performance_view` only — affects any future cross-reference logic between the two resources. Implementation should strip `"p"` prefix before comparing.
+2. **`product_brand` is queryable but empty in imaa.** Field SELECT didn't reject — the brand attribute simply isn't set on imaa's Merchant Center feed. Real Saudi/Gulf ecommerce accounts with proper feeds should populate it. Surface as-is; UI handles empty gracefully.
+3. **`product_category_level1` returned as resource_name path**, not as a human-readable string. Example: `"productCategoryConstants/LEVEL1~469"`. Would require a separate lookup against `product_category_constant` resource to translate to e.g. "Health & Beauty > Personal Care > Cosmetics". For Commit 7, surface the raw resource_name and let UI handle the translation in a future commit (or display as `Category #469`).
+4. **`product_condition` is an integer enum — VERIFIED mapping (NON-CONTIGUOUS, no value 2).** imaa returned `3`. Authoritative proto source (verified via web search before Commit 7 implementation — see commit body): `0=UNSPECIFIED, 1=UNKNOWN, 3=NEW, 4=REFURBISHED, 5=USED`. Note the gap at `2` (no enum value defined there). imaa's products are therefore **NEW** (perfume retail), not "USED" as a casual guess would suggest. Earlier draft of this section had the wrong guess (`2=NEW, 3=USED, 4=REFURBISHED`); corrected here in-place per the durable-recon-doc convention. Third instance of the integer-enum drift trap (after `AD_STRENGTH_MAP` and `field_type` resource_name shift) — reinforces `feedback_resource_name_over_integer_enums.md`: never trust memorized proto positions, always verify per-version. The implemented `PRODUCT_CONDITION_MAP` in `providers/google.ts` matches this verified mapping with `OTHER_${n}` defensive fallback.
+5. **`product_type_l1` not in sample data** — imaa's feed doesn't set product_type. Field returns no value for rows that don't populate it.
+6. **Q8d JOIN rejection confirms docs.** `shopping_performance_view` is resource-locked: cannot pull `asset_group.*` or `asset_group_listing_group_filter.*` from a single query. Cross-referencing between PMAX_SHOPPING_PRODUCT and PMAX_PRODUCT_GROUP rows must happen post-fetch (walk both result sets in the adapter merge step).
+7. **`campaign.advertising_channel_type` returned as integer enum** (`10` = PERFORMANCE_MAX). Used here only as a WHERE filter / SELECT-clause placeholder, no display surface — no map needed.
+
+### Shape revisions vs ADR-013 spec
+
+**ADR-013 proposed `PMAX_SHOPPING_PRODUCT.type_data`:**
+```ts
+{
+  productId: string;
+  productTitle?: string;
+  productImageUrl?: string;
+  productBrand?: string;
+  productPrice?: { amount: number; currency: string };
+  assetGroupId?: string;
+  assetGroupName?: string;
+  listingGroupFilterId?: string;
+}
+```
+
+**Realistically populatable from `shopping_performance_view` (Q8-confirmed):**
+
+| ADR field | Q8 verdict | Reality |
+|---|---|---|
+| `productId` | ✓ from `segments.product_item_id` | populated, mixed-format prefix (see discovery 1) |
+| `productTitle` | ✓ from `segments.product_title` | populated for products with titles |
+| `productBrand` | ✓ from `segments.product_brand` | queryable but empty in imaa (feed-dependent) |
+| `productImageUrl` | ✗ not exposable | needs `shopping_product` resource or Merchant Center API |
+| `productPrice` | ✗ not exposable | same — needs separate resource |
+| `assetGroupId` | ✗ JOIN rejected (Q8d) | only via post-fetch join with Commit 6 rows |
+| `assetGroupName` | ✗ JOIN rejected (Q8d) | same |
+| `listingGroupFilterId` | ✗ JOIN rejected (Q8d) | same |
+
+**Additional Q8e-confirmed fields not in ADR spec:**
+- `productCategoryLevel1?: string` (raw resource_name format from `segments.product_category_level1`)
+- `productTypeL1?: string` (from `segments.product_type_l1`, often empty)
+- `productCondition?: "NEW" | "REFURBISHED" | "USED" | "UNKNOWN" | "UNSPECIFIED" | "OTHER_${number}"` (mapped from integer enum `segments.product_condition` via new `PRODUCT_CONDITION_MAP` — verified non-contiguous mapping `0/1/3/4/5`, with `OTHER_${n}` fallback for any future Google additions or the undefined `2` slot)

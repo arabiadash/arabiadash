@@ -58,6 +58,43 @@ const PRIMARY_STATUS_MAP = {
 type PrimaryStatusLabel =
   (typeof PRIMARY_STATUS_MAP)[keyof typeof PRIMARY_STATUS_MAP];
 
+// ProductConditionEnum (Commit 7, ADR-013). Verified against the v4 proto
+// source — values are NON-CONTIGUOUS (no `2`). Caught an initial recon-doc
+// guess that mis-mapped 2=NEW/3=USED; the verified mapping is 3=NEW/5=USED
+// with a gap at 2 and 4=REFURBISHED. Third instance of the integer-enum
+// drift trap (see feedback_resource_name_over_integer_enums.md).
+type ProductConditionLabel =
+  | "UNSPECIFIED"
+  | "UNKNOWN"
+  | "NEW"
+  | "REFURBISHED"
+  | "USED";
+
+const PRODUCT_CONDITION_MAP: Record<number, ProductConditionLabel> = {
+  0: "UNSPECIFIED",
+  1: "UNKNOWN",
+  3: "NEW",
+  4: "REFURBISHED",
+  5: "USED",
+};
+
+function readProductCondition(
+  raw: unknown
+): ProductConditionLabel | `OTHER_${number}` {
+  if (typeof raw === "number") {
+    return (
+      PRODUCT_CONDITION_MAP[raw] ?? (`OTHER_${raw}` as `OTHER_${number}`)
+    );
+  }
+  if (typeof raw === "string" && raw.length > 0) {
+    const known = (Object.values(PRODUCT_CONDITION_MAP) as string[]).includes(
+      raw
+    );
+    return known ? (raw as ProductConditionLabel) : "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
+
 // AssetTypeEnum subset — the three values M-PMax actually disambiguates
 // (text vs image vs YouTube video drive the type_data render branch).
 // Other values (CALLOUT, SITELINK, PROMOTION, etc.) collapse to "OTHER"
@@ -429,22 +466,27 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
 
     // Pass 6 (M-PMax / ADR-013): asset_group rows + per-asset enrichment
     // + asset_group purchase merger (Commit 5), plus Pass 7 (Commit 6):
-    // retail product_group rows from asset_group_product_group_view. PMax
-    // campaigns return ZERO rows from passes 1-5 (no ad_group_ad), so
-    // passes 6+7 are the sole creative-unit surface for them. All four
-    // queries run in parallel — they reach Google independently (different
-    // GAQL resources / different segment constraints), so none blocks the
-    // others. fetchProductGroups returns [] for non-retail PMax accounts.
+    // retail product_group rows from asset_group_product_group_view, plus
+    // Pass 8 (Commit 7): individual Merchant Center product rows from
+    // shopping_performance_view. PMax campaigns return ZERO rows from
+    // passes 1-5 (no ad_group_ad), so passes 6+7+8 are the sole
+    // creative-unit surface for them. All five queries run in parallel —
+    // they reach Google independently (different GAQL resources /
+    // different segment constraints), so none blocks the others.
+    // fetchProductGroups + fetchShoppingProducts return [] for non-retail
+    // PMax accounts (no Merchant Center linkage → zero rows naturally).
     const [
       assetGroupRows,
       assetsByGroupId,
       assetGroupPurchaseTotals,
       productGroupRows,
+      shoppingProductRows,
     ] = await Promise.all([
       this.fetchAssetGroupRows(dateFrom, dateTo),
       this.fetchAssetGroupAssets(),
       this.fetchPurchaseAssetGroupTotals(dateFrom, dateTo),
       this.fetchProductGroups(dateFrom, dateTo),
+      this.fetchShoppingProducts(dateFrom, dateTo),
     ]);
 
     // Merge: layer in `type_data.assets` + purchase-attribution trio onto
@@ -485,7 +527,12 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       };
     });
 
-    return [...normalizedAds, ...enrichedAssetGroups, ...productGroupRows];
+    return [
+      ...normalizedAds,
+      ...enrichedAssetGroups,
+      ...productGroupRows,
+      ...shoppingProductRows,
+    ];
   }
 
   // ───────────────────────────────────────────────────────────────
@@ -1672,6 +1719,181 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
           : String(err);
       console.warn(
         `[GoogleAdsAdapter] fetchProductGroups failed for ${this.customerId}: ${message}. Returning [] (no PMax product_group rows this fetch).`
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Fetches individual Merchant Center product rows for retail PMax
+   * (Commit 7, ADR-013).
+   *
+   * One GAQL pass against `FROM shopping_performance_view` with 14
+   * confirmed-working fields (Q8a-e iterations against imaa, all four
+   * additive iterations passed; Q8d join probe rejected per Google's
+   * documented behavior — see Phase 4 Shopping section in the recon doc).
+   * Non-retail PMax accounts return zero rows naturally.
+   *
+   * IMPORTANT — bug-prevention: purchases/revenue/roas/hasConversionData
+   * are initialized to null/false. Raw `metrics.conversions` on
+   * shopping_performance_view counts ALL conversion-action types
+   * (purchase + add_to_cart + page_view + newsletter_signup + etc), NOT
+   * just purchases. Surfacing it as `purchases` would repeat the
+   * Commit 4b ad-level bug (raw conversions falsely displayed as
+   * purchases in arabiadash.com production for months — see
+   * feedback_existing_code_audit_during_retrofit.md). Commit 8b's
+   * `fetchPurchaseShoppingProductTotals` merges properly-filtered
+   * purchase data via the ADR-011 pattern. Do NOT remove this guard
+   * without Commit 8b wired through.
+   *
+   * Cross-reference to PMAX_PRODUCT_GROUP rows: `shopping_performance_view`
+   * cannot JOIN to `asset_group_listing_group_filter` (query_error 48,
+   * confirmed via Q8d). Cross-reference is deferred until a concrete UI
+   * use case justifies post-fetch joining — note that joining would
+   * only match leaf `product_item_id` listing_groups; brand/category-
+   * level groups produce no matches. See ADR-013 Alternative 6.
+   *
+   * Product image and price not exposed by this resource — available
+   * only via separate `shopping_product` resource (deferred).
+   */
+  private async fetchShoppingProducts(
+    dateFrom: string,
+    dateTo: string
+  ): Promise<UnifiedAd[]> {
+    try {
+      const api = new GoogleAdsApi({
+        client_id: process.env.GOOGLE_ADS_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_ADS_CLIENT_SECRET!,
+        developer_token: process.env.GOOGLE_ADS_DEVELOPER_TOKEN!,
+      });
+
+      const customer = api.Customer({
+        customer_id: this.customerId,
+        refresh_token: this.refreshToken,
+        ...(this.loginCustomerId
+          ? { login_customer_id: this.loginCustomerId }
+          : {}),
+      });
+
+      // `campaign.advertising_channel_type` MUST appear in SELECT when used
+      // in WHERE on this resource (query_error 16, MISSING_REQUIRED_FIELD_
+      // IN_SELECT_CLAUSE — per-resource GAQL semantic, surfaced during Q8).
+      const query = `
+        SELECT
+          segments.product_item_id,
+          segments.product_title,
+          segments.product_brand,
+          segments.product_category_level1,
+          segments.product_type_l1,
+          segments.product_condition,
+          campaign.id,
+          campaign.name,
+          campaign.advertising_channel_type,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM shopping_performance_view
+        WHERE segments.date BETWEEN '${dateFrom}' AND '${dateTo}'
+          AND campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+      `;
+
+      const rows = await customer.query(query);
+
+      const out: UnifiedAd[] = [];
+      for (const row of rows) {
+        const productId =
+          typeof row.segments?.product_item_id === "string"
+            ? row.segments.product_item_id
+            : "";
+        if (!productId) continue;
+
+        const productTitle =
+          typeof row.segments?.product_title === "string" &&
+          row.segments.product_title.length > 0
+            ? row.segments.product_title
+            : undefined;
+        const productBrand =
+          typeof row.segments?.product_brand === "string" &&
+          row.segments.product_brand.length > 0
+            ? row.segments.product_brand
+            : undefined;
+        const productCategoryLevel1 =
+          typeof row.segments?.product_category_level1 === "string" &&
+          row.segments.product_category_level1.length > 0
+            ? row.segments.product_category_level1
+            : undefined;
+        const productTypeL1 =
+          typeof row.segments?.product_type_l1 === "string" &&
+          row.segments.product_type_l1.length > 0
+            ? row.segments.product_type_l1
+            : undefined;
+
+        const rawCondition = row.segments?.product_condition;
+        const productCondition =
+          rawCondition === undefined || rawCondition === null
+            ? undefined
+            : readProductCondition(rawCondition);
+
+        const impressions = Number(row.metrics?.impressions) || 0;
+        const clicks = Number(row.metrics?.clicks) || 0;
+        const costMicros = Number(row.metrics?.cost_micros) || 0;
+        const spend = costMicros / 1_000_000;
+
+        const ctr = impressions > 0 ? (clicks / impressions) * 100 : 0;
+        const cpc = clicks > 0 ? spend / clicks : 0;
+
+        out.push({
+          ad_type: "PMAX_SHOPPING_PRODUCT",
+          id: productId,
+          name: productTitle ?? `Product ${productId}`,
+          accountId: this.customerId,
+          currency: this.accountInfo.currency,
+          // No status semantics at SKU-level in this view — match the
+          // fetchProductGroups default-to-ACTIVE convention. The product's
+          // presence in the report implies it's currently active in the
+          // PMax campaign's product feed.
+          status: "ACTIVE",
+          campaignId: String(row.campaign?.id ?? ""),
+          campaignName: String(row.campaign?.name ?? ""),
+          spend,
+          // Purchase trio + hasConversionData start as "no data" defaults —
+          // Commit 8b will overwrite via fetchPurchaseShoppingProductTotals.
+          // See docblock above for bug-prevention rationale.
+          revenue: null,
+          roas: null,
+          purchases: null,
+          hasConversionData: false,
+          impressions,
+          clicks,
+          ctr,
+          cpc,
+          provider: "google",
+          type_data: {
+            productId,
+            ...(productTitle !== undefined ? { productTitle } : {}),
+            ...(productBrand !== undefined ? { productBrand } : {}),
+            ...(productCategoryLevel1 !== undefined
+              ? { productCategoryLevel1 }
+              : {}),
+            ...(productTypeL1 !== undefined ? { productTypeL1 } : {}),
+            ...(productCondition !== undefined ? { productCondition } : {}),
+          },
+        });
+      }
+
+      return out;
+    } catch (err) {
+      const message =
+        err instanceof errors.GoogleAdsFailure
+          ? err.errors?.map((e) => e.message).join("; ") ??
+            "GoogleAdsFailure (no detail)"
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      console.warn(
+        `[GoogleAdsAdapter] fetchShoppingProducts failed for ${this.customerId}: ${message}. Returning [] (no PMax shopping_product rows this fetch).`
       );
       return [];
     }
