@@ -30,6 +30,12 @@ import {
 } from "lucide-react";
 import DashboardSidebar from "@/components/dashboard-sidebar";
 import KpiCard, { type KpiCardProps } from "@/components/reports/KpiCard";
+// Per-variant PMax card components (Commits 10-11, ADR-013). Dispatched
+// via renderAdCard below; M5/M6 variants continue using the inline
+// CreativeCard so existing render behavior stays byte-for-byte identical.
+import { PMaxAssetGroupCard } from "@/components/creatives/PMaxAssetGroupCard";
+import { PMaxProductGroupCard } from "@/components/creatives/PMaxProductGroupCard";
+import { PMaxShoppingProductCard } from "@/components/creatives/PMaxShoppingProductCard";
 import type { Workspace, WorkspaceConnection } from "@/lib/workspaces";
 import {
   useInsights,
@@ -1264,6 +1270,58 @@ type CreativeSortKey = "roas" | "spend" | "purchases";
 
 const CREATIVES_PAGE_SIZE = 20;
 
+/**
+ * Per-variant render dispatcher (ADR-013 Commit 12 — FIRST VISUAL CHECKPOINT).
+ *
+ * PMax variants route to the dedicated card components added in Commits 10-11;
+ * all other variants (including future ones not yet specifically modeled) fall
+ * through to the existing inline `CreativeCard`. M5/M6 render behavior stays
+ * byte-for-byte identical — the dispatcher is purely additive.
+ *
+ * v1 limitations (deferred to follow-up work):
+ *  - PMax cards render read-only (`onClick` intentionally omitted). The
+ *    AdDetailModal below is shaped for M5/M6 variants; opening it with a
+ *    PMax row would break. PMax detail/edit affordances land in a future
+ *    commit alongside a PMax-aware modal (or alternative drill-down UX).
+ *  - PMax cards use `ad.currency` directly; mixed-currency workspace
+ *    conversion (the `accountCurrency` → `displayCurrency` pass below) is
+ *    not yet wired into the PMax components.
+ */
+function renderAdCard(
+  ad: UnifiedAd,
+  sharedProps: {
+    accountCurrency: Currency;
+    displayCurrency: Currency;
+    onClick: () => void;
+  }
+): React.ReactElement {
+  switch (ad.ad_type) {
+    case "PMAX_ASSET_GROUP":
+      return <PMaxAssetGroupCard ad={ad} />;
+    case "PMAX_PRODUCT_GROUP":
+      return <PMaxProductGroupCard ad={ad} />;
+    case "PMAX_SHOPPING_PRODUCT":
+      return <PMaxShoppingProductCard ad={ad} />;
+    case "RSA":
+    case "RDA":
+    case "IMAGE_AD":
+    case "META_AD":
+    case "UNKNOWN_GOOGLE":
+    default:
+      // Default catches any future variants (Phase 7 TikTok, Phase 8 Snap,
+      // etc.) — they render as CreativeCard until dedicated components are
+      // added. Graceful degradation, not a TypeScript exhaustiveness gap.
+      return (
+        <CreativeCard
+          ad={ad}
+          accountCurrency={sharedProps.accountCurrency}
+          displayCurrency={sharedProps.displayCurrency}
+          onClick={sharedProps.onClick}
+        />
+      );
+  }
+}
+
 function CreativesGrid({
   ads,
   loading,
@@ -1369,13 +1427,13 @@ function CreativesGrid({
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
           {filteredAds.slice(0, visibleCount).map((ad) => (
-            <CreativeCard
-              key={ad.id}
-              ad={ad}
-              accountCurrency={accountCurrency}
-              displayCurrency={displayCurrency}
-              onClick={() => setSelectedAd(ad)}
-            />
+            <div key={ad.id}>
+              {renderAdCard(ad, {
+                accountCurrency,
+                displayCurrency,
+                onClick: () => setSelectedAd(ad),
+              })}
+            </div>
           ))}
           {visibleCount < filteredAds.length && (
             <div className="col-span-full flex flex-wrap justify-center gap-3 mt-6">
