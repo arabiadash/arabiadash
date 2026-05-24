@@ -23,8 +23,14 @@ import type { Json } from "@/lib/supabase/database.types";
  *       REMOVED). The discriminated-union shape didn't change, but the
  *       payload semantics did — bump to invalidate all caches universally
  *       and force a clean refetch with the active-only filter.
+ * - v6: Stage 5 follow-up (fix effective ad status) — UnifiedAd.status
+ *       semantics changed from ad-level only (ad_group_ad.status) to
+ *       effective serving status (min-restrictive rollup of campaign,
+ *       ad_group, ad_group_ad statuses). Cached rows from v5 contain
+ *       ad-level-only status; bump invalidates so badges accurately
+ *       reflect whether the ad is currently serving.
  */
-const CACHE_SCHEMA_VERSION = "v5";
+const CACHE_SCHEMA_VERSION = "v6";
 
 const CACHE_TTL_MINUTES = 15;
 
