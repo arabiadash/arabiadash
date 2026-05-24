@@ -375,25 +375,50 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       this.normalizeAd(ad, urlMap, extensionsMap, adPurchaseTotals)
     );
 
-    // Pass 6 (M-PMax / ADR-013): asset_group rows + per-asset enrichment.
-    // PMax campaigns return ZERO rows from passes 1-5 (no ad_group_ad), so
-    // this pass is the sole creative-unit surface for them. The two queries
-    // run in parallel — they reach Google independently and the assets
-    // query is FROM asset_group_asset (different resource than asset_group),
-    // so neither blocks the other.
-    const [assetGroupRows, assetsByGroupId] = await Promise.all([
-      this.fetchAssetGroupRows(dateFrom, dateTo),
-      this.fetchAssetGroupAssets(),
-    ]);
+    // Pass 6 (M-PMax / ADR-013): asset_group rows + per-asset enrichment
+    // + asset_group purchase merger (Commit 5). PMax campaigns return ZERO
+    // rows from passes 1-5 (no ad_group_ad), so this pass is the sole
+    // creative-unit surface for them. The three queries run in parallel —
+    // they reach Google independently (different GAQL resources / different
+    // segment constraints), so none blocks the others.
+    const [assetGroupRows, assetsByGroupId, assetGroupPurchaseTotals] =
+      await Promise.all([
+        this.fetchAssetGroupRows(dateFrom, dateTo),
+        this.fetchAssetGroupAssets(),
+        this.fetchPurchaseAssetGroupTotals(dateFrom, dateTo),
+      ]);
 
-    // Merge: populate each asset_group row's type_data.assets from the map.
-    // Pure-functional rebuild (no in-place mutation on the discriminated
-    // union — same pattern as MetaAdapter.getAds per ADR-013 long-term-fit).
+    // Merge: layer in `type_data.assets` + purchase-attribution trio onto
+    // each asset_group row. Pure-functional rebuild (no in-place mutation
+    // on the discriminated union — same pattern as MetaAdapter.getAds
+    // per ADR-013 long-term-fit). Purchase lookup mirrors the normalizeAd
+    // pattern from Commit 4b: entry present → hasConversionData=true even
+    // when purchases=0; entry absent / null Map → hasConversionData=false.
     const enrichedAssetGroups: UnifiedAd[] = assetGroupRows.map((row) => {
       if (row.ad_type !== "PMAX_ASSET_GROUP") return row;
+
       const assets = assetsByGroupId.get(row.id) ?? [];
+
+      const purchaseEntry = assetGroupPurchaseTotals?.get(row.id);
+      const hasConversionData =
+        assetGroupPurchaseTotals != null && purchaseEntry !== undefined;
+      const purchases: number | null = hasConversionData
+        ? purchaseEntry!.purchases
+        : null;
+      const revenue: number | null = hasConversionData
+        ? purchaseEntry!.revenue
+        : null;
+      const roas: number | null =
+        hasConversionData && row.spend > 0
+          ? purchaseEntry!.revenue / row.spend
+          : null;
+
       return {
         ...row,
+        purchases,
+        revenue,
+        roas,
+        hasConversionData,
         type_data: {
           ...row.type_data,
           assets,
@@ -484,9 +509,15 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
    * the results in normalizeCampaignToInsight + normalizeTotalsToInsight.
    *
    * Returns null when:
-   * - purchaseActionIds is null (cache not populated for this account)
+   * - `purchaseActionIds` is null (cache not populated for this customer)
+   * - `purchaseActionIds.size === 0` (configured but no PURCHASE/STORE_SALE
+   *   actions exist for the account — strict "tracking configured"
+   *   semantic, aligned across all four siblings in Commit 5 / ADR-013;
+   *   previously this branch proceeded with an empty Map which surfaced
+   *   hasConversionData=true + zeros — flagged in Commit 4b as the
+   *   loose/strict semantic divergence, resolved here).
    * - the Google API call fails (auth, quota, transient — caught here)
-   * Both null cases trigger purchases=null + hasConversionData=false in
+   * All null cases trigger purchases=null + hasConversionData=false in
    * the normalize functions, per ADR-011 / ADR-008.
    *
    * Returned map: campaign.id (string) -> { purchases, revenue } summed
@@ -503,6 +534,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     dateTo: string
   ): Promise<Map<string, { purchases: number; revenue: number }> | null> {
     if (this.purchaseActionIds === null) return null;
+    if (this.purchaseActionIds.size === 0) return null;
 
     try {
       const api = new GoogleAdsApi({
@@ -684,6 +716,106 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
   }
 
   /**
+   * Segmented purchase merger at PMAX ASSET_GROUP LEVEL (Commit 5, ADR-013).
+   * Sibling of fetchPurchaseAdTotals — same two-query GAQL pattern, same
+   * `segments.conversion_action` constraint (cost metrics live in the
+   * Pass 6 fetchAssetGroupRows query; this query carries only conversions),
+   * same strict "tracking configured" semantic.
+   *
+   * The `FROM asset_group` GAQL resource + `PERFORMANCE_MAX` channel filter
+   * scope the join to PMax campaigns only — same selector pattern the rest
+   * of the asset_group queries use (Stage 3 recon Q2/Q4 / ADR-013).
+   *
+   * Returns null in the same conditions as fetchPurchaseAdTotals: cache
+   * miss, no purchase actions configured, or Google API failure. Returned
+   * Map: `asset_group.id` (string) -> { purchases, revenue }. "First
+   * sighting" Map semantic preserved (entry present with {0,0} means
+   * "tracking configured, zero purchases attributed to this asset_group"
+   * — preserves the '—' vs '0' distinction at the asset_group card UI).
+   */
+  private async fetchPurchaseAssetGroupTotals(
+    dateFrom: string,
+    dateTo: string
+  ): Promise<Map<string, { purchases: number; revenue: number }> | null> {
+    if (this.purchaseActionIds === null) return null;
+    if (this.purchaseActionIds.size === 0) return null;
+
+    try {
+      const api = new GoogleAdsApi({
+        client_id: process.env.GOOGLE_ADS_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_ADS_CLIENT_SECRET!,
+        developer_token: process.env.GOOGLE_ADS_DEVELOPER_TOKEN!,
+      });
+
+      const customer = api.Customer({
+        customer_id: this.customerId,
+        refresh_token: this.refreshToken,
+        ...(this.loginCustomerId
+          ? { login_customer_id: this.loginCustomerId }
+          : {}),
+      });
+
+      const query = `
+        SELECT
+          asset_group.id,
+          segments.conversion_action,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM asset_group
+        WHERE segments.date BETWEEN '${dateFrom}' AND '${dateTo}'
+          AND campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+      `;
+
+      const rows = await customer.query(query);
+
+      const byAssetGroup = new Map<
+        string,
+        { purchases: number; revenue: number }
+      >();
+
+      for (const row of rows) {
+        const assetGroupId = String(row.asset_group?.id ?? "");
+        if (!assetGroupId) continue;
+
+        // First-sighting init: every asset_group with any GAQL row ends up
+        // with hasConversionData=true even if none of its rows match a
+        // purchase action (legitimate 0 purchase count).
+        const existing = byAssetGroup.get(assetGroupId) ?? {
+          purchases: 0,
+          revenue: 0,
+        };
+
+        const resourcePath = String(row.segments?.conversion_action ?? "");
+        const actionId = resourcePath.split("/").pop() ?? "";
+
+        if (this.purchaseActionIds.has(actionId)) {
+          const conversions = Number(row.metrics?.conversions) || 0;
+          const conversionsValue =
+            Number(row.metrics?.conversions_value) || 0;
+          existing.purchases += conversions;
+          existing.revenue += conversionsValue;
+        }
+
+        byAssetGroup.set(assetGroupId, existing);
+      }
+
+      return byAssetGroup;
+    } catch (err) {
+      const message =
+        err instanceof errors.GoogleAdsFailure
+          ? err.errors?.map((e) => e.message).join("; ") ??
+            "GoogleAdsFailure (no detail)"
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      console.warn(
+        `[GoogleAdsAdapter] fetchPurchaseAssetGroupTotals failed for ${this.customerId}: ${message}. Degrading PMax asset_group purchases to null.`
+      );
+      return null;
+    }
+  }
+
+  /**
    * Segmented Q2 query for purchase conversions per day.
    *
    * Time-series companion to fetchPurchaseCampaignTotals. Same GAQL
@@ -699,6 +831,8 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     dateTo: string
   ): Promise<Map<string, { purchases: number; revenue: number }> | null> {
     if (this.purchaseActionIds === null) return null;
+    // Strict semantic, aligned with the other three siblings in Commit 5.
+    if (this.purchaseActionIds.size === 0) return null;
 
     try {
       const api = new GoogleAdsApi({
@@ -1176,10 +1310,13 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
           campaignId: String(row.campaign?.id ?? ""),
           campaignName: String(row.campaign?.name ?? ""),
           spend,
-          // Purchase trio degrades to null pre-Commit-5 — the asset_group
-          // level purchase merger (fetchPurchaseAssetGroupTotals, ADR-013
-          // Commit 5) will replace these with real values + flip
-          // hasConversionData=true when populated.
+          // Purchase trio + hasConversionData start as the "no data" defaults
+          // here; the Pass 6 merge step overwrites them per-row using
+          // fetchPurchaseAssetGroupTotals (Commit 5). Keeping the defaults
+          // inline rather than threading the Map through means
+          // fetchAssetGroupRows stays focused on row construction and the
+          // merger lookup lives in one place (parallel structure to the
+          // type_data.assets merge).
           revenue: null,
           roas: null,
           purchases: null,
