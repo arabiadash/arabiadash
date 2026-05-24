@@ -1334,12 +1334,14 @@ function CreativesGrid({
   const [selectedAd, setSelectedAd] = useState<UnifiedAd | null>(null);
   const [visibleCount, setVisibleCount] = useState(CREATIVES_PAGE_SIZE);
 
-  // UI-only filter: hide PMAX_PRODUCT_GROUP + PMAX_SHOPPING_PRODUCT rows
-  // from the creatives grid. These represent Google Ads bidding categories
-  // (listing-group filters) and Merchant Center SKUs — not creative-level
-  // entities. PMAX_ASSET_GROUP remains visible as the campaign-level
-  // creative unit for PMax. Backend mergers stay intact for a future
-  // "PMax Product Deep Dive" surface.
+  // ADR-013: PMAX_PRODUCT_GROUP and PMAX_SHOPPING_PRODUCT are bidding
+  // categories and Merchant Center SKUs, not creative-level entities.
+  // Filter applies to Google data only — Meta API does not produce
+  // PMAX variants. See visibleGoogleAdsCount in ReportsClient (parent
+  // scope) for the duplicate site; extract to shared util on third use.
+  // PMAX_ASSET_GROUP stays visible as the campaign-level creative unit
+  // for PMax. Backend mergers stay intact for a future "PMax Product
+  // Deep Dive" surface.
   const visibleAds = useMemo(
     () =>
       ads.filter(
@@ -1787,6 +1789,21 @@ export default function ReportsClient({
     accountIds: googleAccountIds,
     ...dateRangeValueToOptions(dateRange),
   });
+
+  // ADR-013: PMAX_PRODUCT_GROUP and PMAX_SHOPPING_PRODUCT are bidding
+  // categories and Merchant Center SKUs, not creative-level entities.
+  // Filter applies to Google data only — Meta API does not produce
+  // PMAX variants. See visibleAds in CreativesGrid (ReportsClient
+  // ~L1343) for the duplicate site; extract to shared util on third use.
+  const visibleGoogleAdsCount = useMemo(
+    () =>
+      googleAds.filter(
+        (ad) =>
+          ad.ad_type !== "PMAX_PRODUCT_GROUP" &&
+          ad.ad_type !== "PMAX_SHOPPING_PRODUCT"
+      ).length,
+    [googleAds]
+  );
 
   // Phase 4.8 M4 Commit 2 — filter, status filter, sort pipeline
   const processedGoogleCampaigns = useMemo(() => {
@@ -3544,9 +3561,9 @@ export default function ReportsClient({
                             }`}
                           >
                             الإبداعات
-                            {googleAds.length > 0 && (
+                            {visibleGoogleAdsCount > 0 && (
                               <span className="mr-1.5 text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">
-                                {googleAds.length}
+                                {visibleGoogleAdsCount}
                               </span>
                             )}
                           </button>
