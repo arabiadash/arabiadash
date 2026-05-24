@@ -312,14 +312,20 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
   async getAds(range: DateRangeInput): Promise<UnifiedAd[]> {
     const { dateFrom, dateTo } = this.resolveDateRange(range);
 
-    // Pass 1: fetch ad rows (now includes imageAssetResourceNames)
-    const result = await fetchAds({
-      customerId: this.customerId,
-      refreshToken: this.refreshToken,
-      dateFrom,
-      dateTo,
-      loginCustomerId: this.loginCustomerId,
-    });
+    // Pass 1: parallel — ad rows (cost + creative fields) + ad-level
+    // purchase merger (ADR-011 sibling, Commit 4b). The merger query is
+    // independent of fetchAds output and runs against `FROM ad_group_ad`
+    // with the same date filter, so they share the wall-time path.
+    const [result, adPurchaseTotals] = await Promise.all([
+      fetchAds({
+        customerId: this.customerId,
+        refreshToken: this.refreshToken,
+        dateFrom,
+        dateTo,
+        loginCustomerId: this.loginCustomerId,
+      }),
+      this.fetchPurchaseAdTotals(dateFrom, dateTo),
+    ]);
 
     if (!result) return [];
 
@@ -364,9 +370,9 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       }),
     ]);
 
-    // Pass 5: normalize with URL lookups + extensions baked in.
+    // Pass 5: normalize with URL lookups + extensions + purchase merger.
     const normalizedAds = activeAds.map((ad) =>
-      this.normalizeAd(ad, urlMap, extensionsMap)
+      this.normalizeAd(ad, urlMap, extensionsMap, adPurchaseTotals)
     );
 
     // Pass 6 (M-PMax / ADR-013): asset_group rows + per-asset enrichment.
@@ -564,6 +570,114 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
           : String(err);
       console.warn(
         `[GoogleAdsAdapter] fetchPurchaseCampaignTotals failed for ${this.customerId}: ${message}. Degrading purchases to null.`
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Segmented purchase merger at AD LEVEL (Commit 4b, ADR-013).
+   * Sibling of fetchPurchaseCampaignTotals — same two-query GAQL pattern,
+   * same `segments.conversion_action` constraint (cost metrics live in the
+   * Pass 1 fetchAds query; this query carries only conversions). Restores
+   * semantically-correct purchases/revenue/ROAS on Google Search/Display
+   * ad cards after Commit 4 exposed that normalizeAd had been mapping
+   * raw `metrics.conversions` (all conversion-action types) into the
+   * `purchases` field — months-old ADR-011 violation surfaced by the
+   * retrofit (see feedback_existing_code_audit_during_retrofit.md).
+   *
+   * Returns null when:
+   * - `purchaseActionIds` is null (cache not populated for this customer)
+   * - `purchaseActionIds.size === 0` (configured but no PURCHASE/STORE_SALE-
+   *   categorized actions for the account — strict "tracking configured"
+   *   semantic per Commit 4b plan; diverges from the campaign-level
+   *   sibling, which proceeds with empty Set and surfaces 0/0 with
+   *   hasConversionData=true. The campaign-level path may want the same
+   *   stricter reading in a follow-up alignment commit.)
+   * - the Google API call fails (caught here, logged, degrades to null)
+   *
+   * Returned Map: `ad_group_ad.ad.id` (string) -> { purchases, revenue }.
+   * IMPORTANT: every ad that appears in the GAQL response gets an entry,
+   * even if NONE of its conversion-action rows matched a purchase ID
+   * (initialized at {0,0}). This preserves the "—" vs "0" distinction:
+   *  - entry present + values 0  →  "tracking configured, this ad had 0 purchases"
+   *  - entry absent (no GAQL rows at all)  →  hasConversionData=false → "—"
+   */
+  private async fetchPurchaseAdTotals(
+    dateFrom: string,
+    dateTo: string
+  ): Promise<Map<string, { purchases: number; revenue: number }> | null> {
+    if (this.purchaseActionIds === null) return null;
+    if (this.purchaseActionIds.size === 0) return null;
+
+    try {
+      const api = new GoogleAdsApi({
+        client_id: process.env.GOOGLE_ADS_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_ADS_CLIENT_SECRET!,
+        developer_token: process.env.GOOGLE_ADS_DEVELOPER_TOKEN!,
+      });
+
+      const customer = api.Customer({
+        customer_id: this.customerId,
+        refresh_token: this.refreshToken,
+        ...(this.loginCustomerId
+          ? { login_customer_id: this.loginCustomerId }
+          : {}),
+      });
+
+      // ad_group_ad.status filter matches the Pass 1 fetchAds query so the
+      // two result sets are joinable on ad.id without ghost rows.
+      const query = `
+        SELECT
+          ad_group_ad.ad.id,
+          segments.conversion_action,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM ad_group_ad
+        WHERE segments.date BETWEEN '${dateFrom}' AND '${dateTo}'
+          AND ad_group_ad.status != 'REMOVED'
+      `;
+
+      const rows = await customer.query(query);
+
+      const byAdId = new Map<
+        string,
+        { purchases: number; revenue: number }
+      >();
+
+      for (const row of rows) {
+        const adId = String(row.ad_group_ad?.ad?.id ?? "");
+        if (!adId) continue;
+
+        // Init on first sighting so this ad ends up with hasConversionData=true
+        // even when none of its rows match a purchase action (legitimate 0).
+        const existing = byAdId.get(adId) ?? { purchases: 0, revenue: 0 };
+
+        const resourcePath = String(row.segments?.conversion_action ?? "");
+        const actionId = resourcePath.split("/").pop() ?? "";
+
+        if (this.purchaseActionIds.has(actionId)) {
+          const conversions = Number(row.metrics?.conversions) || 0;
+          const conversionsValue =
+            Number(row.metrics?.conversions_value) || 0;
+          existing.purchases += conversions;
+          existing.revenue += conversionsValue;
+        }
+
+        byAdId.set(adId, existing);
+      }
+
+      return byAdId;
+    } catch (err) {
+      const message =
+        err instanceof errors.GoogleAdsFailure
+          ? err.errors?.map((e) => e.message).join("; ") ??
+            "GoogleAdsFailure (no detail)"
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      console.warn(
+        `[GoogleAdsAdapter] fetchPurchaseAdTotals failed for ${this.customerId}: ${message}. Degrading ad-level purchases to null.`
       );
       return null;
     }
@@ -839,7 +953,11 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
   private normalizeAd = (
     ad: AdRow,
     urlMap?: Map<string, string>,
-    extensionsMap?: Map<string, UnifiedAdExtensions>
+    extensionsMap?: Map<string, UnifiedAdExtensions>,
+    adPurchaseTotals?: Map<
+      string,
+      { purchases: number; revenue: number }
+    > | null
   ): UnifiedAd => {
     // Resolve collected asset resource names to URLs via the batched map.
     const resolvedUrls: string[] = [];
@@ -854,16 +972,27 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     // the ad has no extensions or fetchAdExtensions returned empty).
     const extensions = extensionsMap?.get(ad.id);
 
+    // Commit 4b — purchase merger lookup (ADR-011 sibling at ad level).
+    // adPurchaseTotals null → cache miss / merger failure / no purchase
+    // actions configured → hasConversionData=false (UI shows "—").
+    // Entry absent (ad had no GAQL rows in the segmented query) →
+    // hasConversionData=false (same UX). Entry present → hasConversionData
+    // =true even if purchases=0 (preserves "configured + zero" distinction).
+    const purchaseEntry = adPurchaseTotals?.get(ad.id);
+    const hasConversionData =
+      adPurchaseTotals != null && purchaseEntry !== undefined;
+    const purchases: number | null = hasConversionData
+      ? purchaseEntry!.purchases
+      : null;
+    const revenue: number | null = hasConversionData
+      ? purchaseEntry!.revenue
+      : null;
+    const roas: number | null =
+      hasConversionData && ad.spend > 0
+        ? purchaseEntry!.revenue / ad.spend
+        : null;
+
     // Common fields shared across all Google variants.
-    //
-    // Purchase-attribution fields (purchases/revenue/roas/hasConversionData):
-    // Google's raw `metrics.conversions` counts ALL conversion-action types,
-    // not just purchases — so surfacing it as `purchases` would be
-    // semantically wrong (ADR-011 distinction: purchases vs all-conversions).
-    // No ad-level purchase merger exists yet (campaign-level merger lives in
-    // fetchPurchaseCampaignTotals but isn't wired to per-ad rows). Until an
-    // ad-level merger lands, ad rows degrade to null + hasConversionData=false
-    // per ADR-011's "configured vs zero" gating. UI shows "—" for the trio.
     const common = {
       id: ad.id,
       name: `${ad.campaign_name} — ${ad.ad_group_name}`,
@@ -874,10 +1003,10 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       adsetId: ad.ad_group_id,
       adsetName: ad.ad_group_name,
       spend: ad.spend,
-      revenue: null,
-      roas: null,
-      purchases: null,
-      hasConversionData: false,
+      revenue,
+      roas,
+      purchases,
+      hasConversionData,
       impressions: ad.impressions,
       clicks: ad.clicks,
       ctr: ad.ctr * 100,
