@@ -17,6 +17,8 @@ Recon findings (full detail in [pmax-recon-stage-2-3-2026-05-24.md](../recon/pma
 - **Asset groups are fully metricized** — `metrics.cost_micros / clicks / impressions / conversions / conversions_value` per asset_group confirmed working (Q4)
 - **`asset_group_asset.performance_label` is rejected at runtime** despite documented at Google Ads v18+ — third instance of "SDK field index ≠ runtime queryability" trap (M5 = `image_ad.image_asset`, M6 = `sitelink_asset.description1/2/final_urls`). Must validate every new SELECT field via isolated query during implementation.
 - **`asset_group.ad_strength` returns an INTEGER enum** (Stage 3: `ad_strength=5`), not a string. Requires `AD_STRENGTH_MAP` constant per existing `CUSTOMER_STATUS_MAP` precedent (Memory trap #22).
+- **`product_item_id` prefix divergence between resources** (Q8 / Phase 4 recon): `shopping_performance_view` returns SKUs prefixed with `p` (e.g. `p1001595639`) while `asset_group_listing_group_filter.path` returns them unprefixed (`1001595639`). Any post-fetch cross-reference between PMAX_SHOPPING_PRODUCT and PMAX_PRODUCT_GROUP rows must strip the prefix. Documented for future implementations.
+- **JOIN unavailability between PMax retail resources** (Q8d, query_error 48): `shopping_performance_view` cannot JOIN to `asset_group` or `asset_group_listing_group_filter` at the GAQL level. Confirmed as documented Google behavior, not an SDK trap. Cross-resource data unification happens post-fetch in TypeScript when needed.
 
 **Governing principle** (Memory #27, verbatim):
 
@@ -105,7 +107,16 @@ Per Memory #5 (creative-level analysis = highest-value feature), asset_group is 
 - `META_AD`: `{ subType, creativeId?, imageUrl?, thumbnailUrl?, videoId?, title?, body?, callToAction?, productSetId?, catalogProducts?, carouselImages?, carouselImageHashes?, previewLink? }`
 - `PMAX_ASSET_GROUP`: `{ adStrength, primaryStatus, assets: Array<{fieldType, assetType, primaryStatus?, text?, imageUrl?, youtubeVideoId?}> }`
 - **NEW `PMAX_PRODUCT_GROUP`**: `{ assetGroupId, assetGroupName, productGroupDimensionPath: string[], productCount?, /* retail-specific metrics still in common */ }` — shape finalized during commit 5 with isolation-test of each field
-- **NEW `PMAX_SHOPPING_PRODUCT`**: `{ productId: string; productTitle?: string; productImageUrl?: string; productBrand?: string; productPrice?: { amount: number; currency: string }; assetGroupId?: string; assetGroupName?: string; listingGroupFilterId?: string }` — individual Merchant Center product row from `shopping_performance_view`. Shape finalized during Commit 7 with GAQL field-isolation testing. The `listingGroupFilterId` join-key, when present, cross-references the `PMAX_PRODUCT_GROUP` variant for hierarchical UI grouping.
+- **PMAX_SHOPPING_PRODUCT**: `{ productId: string; productTitle?: string; productBrand?: string; productCategoryLevel1?: string; productTypeL1?: string; productCondition?: "NEW" | "USED" | "REFURBISHED" | "UNKNOWN" | "UNSPECIFIED" }` — individual Merchant Center product row from `shopping_performance_view`.
+
+  Three fields from the original spec (in `1d129dd`) were dropped after Q8 field-isolation testing exposed them as unpopulatable from this resource:
+  - `productImageUrl`, `productPrice`: not exposed by `shopping_performance_view` segments. Available only on the separate `shopping_product` resource (deferred to a future commit when concrete UI use case emerges).
+  - `assetGroupId`, `assetGroupName`, `listingGroupFilterId`: JOIN from `shopping_performance_view` to `asset_group_listing_group_filter` is rejected at runtime (query_error 48, fifth SDK-vs-runtime trap instance). Cross-reference between PMAX_SHOPPING_PRODUCT and PMAX_PRODUCT_GROUP rows can be done post-fetch in the adapter, but only matches leaf-level `product_item_id` listing_groups — would produce inconsistent behavior for brand/category-level groups. Deferred until a concrete UI use case justifies surfacing the cross-reference (e.g., "show all products in selected product group").
+
+  New fields added vs original spec:
+  - `productCategoryLevel1`: raw resource_name (e.g., `productCategoryConstants/LEVEL1~469`). Translation to human-readable category requires a separate `product_category_constant` lookup query — surfaced as raw string for v1, translation deferred.
+  - `productTypeL1`: merchant-feed-dependent string (often empty in imaa's catalog).
+  - `productCondition`: integer enum from `ProductConditionEnum`, mapped to string via new `PRODUCT_CONDITION_MAP` helper (proto integer order verified pre-implementation via web search).
 - `UNKNOWN_GOOGLE`: `{ googleAdType, finalUrl? }`
 - Future Phase 7+: TikTok / Snap / Salla / Zid each add their own variant
 
@@ -194,6 +205,8 @@ Fallback per-asset visual when `performance_label` rejects: `primary_status` ind
 
 **Alternative 5 — Single `PMAX_PRODUCT_GROUP` variant covering both product_groups and shopping_products** (REJECTED). Reasoning: product_groups (user-defined filter buckets aggregating multiple SKUs) and individual shopping_products (Merchant Center SKUs with title/image/price metadata) are semantically distinct data shapes. Single-variant approach requires every UI consumer to check "is this a group or a product?" branching logic. Separate variants give clean discriminated-union narrowing in TypeScript and clean sectioning in the UI ("Product Groups" / "Individual Products" distinct surfaces). Per Memory #29, Saudi/Gulf ecommerce users need BOTH views: product_groups to validate targeting setup, individual products to identify SKU-level optimization opportunities (missing images, pricing issues, etc).
 
+**Alternative 6 — Stub image/price/cross-reference fields as optional and always-undefined in PMAX_SHOPPING_PRODUCT v1** (REJECTED). Reasoning: schema would advertise data that backend cannot populate. UI consumers attempting to render images would see persistent undefined values, causing confusion ("why aren't product images showing?"). Per CORE PRINCIPLE, this is the "lazy-data-availability debt" anti-pattern — appears safer than deferring fields, but creates silent inconsistencies that compound. Dropped fields will be re-added in dedicated commits when their populating data sources (`shopping_product` resource for image/price, post-fetch join for cross-reference) are implemented, maintaining schema-data parity.
+
 ## Trade-offs accepted
 
 - **Atomic commit count expands from ~6 to ~12** — each commit smaller, but the sequence is longer. Acceptable because each commit is independently testable; bisecting a regression stays clean.
@@ -212,7 +225,7 @@ Fallback per-asset visual when `performance_label` rejects: `primary_status` ind
 - Commit 4: Google adapter — `fetchAssetGroupAssets` query (`FROM asset_group_asset`); per-field isolation testing
 - Commit 5: Google adapter — `fetchPurchaseAssetGroupTotals` (ADR-011 sibling at asset_group level)
 - Commit 6: Google adapter — `fetchProductGroups` query (`FROM asset_group_product_group_view`, retail) — also finalizes the provisional `PMAX_PRODUCT_GROUP` `type_data` shape via field-isolation testing
-- Commit 7: Add `PMAX_SHOPPING_PRODUCT` variant to `UnifiedAd` discriminated union; Google adapter — `fetchShoppingProducts` query (`FROM shopping_performance_view`, retail per-product metrics with Merchant Center metadata join). Shape finalized via field-isolation testing (Q8 iterations in `scripts/_pmax-recon.mjs`).
+- Commit 7: Add `PMAX_SHOPPING_PRODUCT` variant to `UnifiedAd` discriminated union with 6-field shape (`productId` required, 5 optional). Google adapter — `fetchShoppingProducts` query (`FROM shopping_performance_view`, retail per-product metrics). Adds `PRODUCT_CONDITION_MAP` integer→string helper verified against `ProductConditionEnum` proto. Image/price/cross-reference fields explicitly deferred per Alternative 6 rationale.
 - Commit 8a: Google adapter — `fetchPurchaseProductGroupTotals` (ADR-011 sibling at product_group level, sixth merger of the family). Restores filtered purchase data on `PMAX_PRODUCT_GROUP` rows.
 - Commit 8b: Google adapter — `fetchPurchaseShoppingProductTotals` (ADR-011 sibling at shopping_product level, seventh merger). Restores filtered purchase data on `PMAX_SHOPPING_PRODUCT` rows.
 - Commit 9: UI extraction — `MetaCreativeCard.tsx` + `GoogleCreativeCard.tsx` from inline; shared helpers module created
@@ -246,4 +259,6 @@ The final atomic-commit count may merge or split during execution (e.g., commits
 - `d1a8581` — fix(google): restore filtered purchase data on Search/Display ads (Commit 4b, ADR-013)
 - `0cf2ae1` — feat(google): asset_group purchase merger + align all purchase mergers to strict semantic (Commit 5, ADR-013)
 - `6af2626` — feat(google): fetchProductGroups query — retail PMax product-level rows (Commit 6, ADR-013)
+- `1d129dd` — docs(adr): ADR-013 update — add PMAX_SHOPPING_PRODUCT variant + post-Commit-6 housekeeping
+- *(next)* — docs(adr): ADR-013 update — PMAX_SHOPPING_PRODUCT shape revisions post-Q8 field-isolation
 - *(further SHAs added as commits land)*
