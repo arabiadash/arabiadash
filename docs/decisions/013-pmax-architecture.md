@@ -196,23 +196,24 @@ Fallback per-asset visual when `performance_label` rejects: `primary_status` ind
 
 **Done:**
 - Commit 1: `docs(adr): ADR-013 PMax architecture` — initial doc (SHA `6ead05f`, narrower-scope draft, superseded by this rewrite)
-- Commit 2 *(uncommitted in working tree, locally verified)*: Cache schema v3 → v4 + UnifiedAd discriminated union types + Meta + Google + ReportsClient adapted. Will be committed after this ADR is approved + retail-relevant updates layered in (`PMAX_PRODUCT_GROUP` variant added to types).
+- Commit 2 ✓ Committed as `b002516`: Cache schema v3 → v4 + UnifiedAd discriminated union types (7 variants: `RSA`, `RDA`, `IMAGE_AD`, `META_AD`, `PMAX_ASSET_GROUP`, `PMAX_PRODUCT_GROUP`, `UNKNOWN_GOOGLE`) + Meta + Google + ReportsClient adapted. `PMAX_PRODUCT_GROUP` variant absorbed per Option B (see note below).
 
 **Pending:**
-- Commit 3: `PMAX_PRODUCT_GROUP` variant added to UnifiedAd discriminated union in `types.ts`
-- Commit 4: Google adapter — `fetchAssetGroups` query (`FROM asset_group`)
-- Commit 5: Google adapter — `fetchAssetGroupAssets` query (`FROM asset_group_asset`); per-field isolation testing
-- Commit 6: Google adapter — `fetchPurchaseAssetGroupTotals` (ADR-011 sibling at asset_group level)
-- Commit 7: Google adapter — `fetchProductGroups` query (`FROM asset_group_product_group_view`, retail)
-- Commit 8: Google adapter — `fetchShoppingPerformance` query (`FROM shopping_performance_view`, retail per-product)
-- Commit 9: Google adapter — `fetchPurchaseProductGroupTotals` (ADR-011 sibling at product_group level)
-- Commit 10: UI extraction — `MetaCreativeCard.tsx` + `GoogleCreativeCard.tsx` from inline; shared helpers module created
-- Commit 11: UI new — `PMaxAssetGroupCard.tsx`
-- Commit 12: UI new — `PMaxProductGroupCard.tsx`
-- Commit 13: ReportsClient integration — dispatcher switch on `ad.ad_type` + sub-tab navigation for asset_group/product_group views
-- Commit 14: e2e verification + close-out — verify on imaa retail account (Stage 3 baseline), CLAUDE.md update, M-PMax closed in milestone list, gh issue with `tech-debt` label for any deferred items (e.g., `performance_label` if still rejected)
+- Commit 3: Google adapter — `fetchAssetGroups` query (`FROM asset_group`)
+- Commit 4: Google adapter — `fetchAssetGroupAssets` query (`FROM asset_group_asset`); per-field isolation testing
+- Commit 5: Google adapter — `fetchPurchaseAssetGroupTotals` (ADR-011 sibling at asset_group level)
+- Commit 6: Google adapter — `fetchProductGroups` query (`FROM asset_group_product_group_view`, retail) — also finalizes the provisional `PMAX_PRODUCT_GROUP` `type_data` shape via field-isolation testing
+- Commit 7: Google adapter — `fetchShoppingPerformance` query (`FROM shopping_performance_view`, retail per-product)
+- Commit 8: Google adapter — `fetchPurchaseProductGroupTotals` (ADR-011 sibling at product_group level)
+- Commit 9: UI extraction — `MetaCreativeCard.tsx` + `GoogleCreativeCard.tsx` from inline; shared helpers module created
+- Commit 10: UI new — `PMaxAssetGroupCard.tsx`
+- Commit 11: UI new — `PMaxProductGroupCard.tsx`
+- Commit 12: ReportsClient integration — dispatcher switch on `ad.ad_type` + sub-tab navigation for asset_group/product_group views
+- Commit 13: e2e verification + close-out — verify on imaa retail account (Stage 3 baseline), CLAUDE.md update, M-PMax closed in milestone list, gh issue with `tech-debt` label for any deferred items (e.g., `performance_label` if still rejected)
 
-The final atomic-commit count may merge or split during execution (e.g., commit 4 and 5 may bundle if asset_group_asset is sufficiently coupled to asset_group). The structure above is the planning target, not a hard contract.
+The final atomic-commit count may merge or split during execution (e.g., commits 3 and 4 may bundle if asset_group_asset is sufficiently coupled to asset_group). The structure above is the planning target, not a hard contract.
+
+**Commit 3 strategy revised post-acceptance:** Option B (bundle `PMAX_PRODUCT_GROUP` variant with Commit 2 atomic foundation) approved in chat. The variant is provisional pending field-isolation testing during commit 6. Reflected in the renumbering above (was 14 commits → now 13).
 
 ## Implementation reference
 
