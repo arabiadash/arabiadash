@@ -49,7 +49,7 @@ The discriminated union + cache v4 foundation work was executed before this ADR 
 - `asset_group` queries — metrics (spend/clicks/impressions/conversions/conversions_value), `ad_strength`, `asset_coverage`, `primary_status`
 - `asset_group_asset` queries — assets bundle, `performance_label` (with SDK-rejection fallback), content URLs
 - `asset_group_product_group_view` queries — retail per-product-group performance
-- `shopping_performance_view` queries — retail per-product metrics
+- `shopping_performance_view` queries — retail per-product metrics. Returns one row per individual Merchant Center product (SKU), distinct from `asset_group_product_group_view` rows which return one row per defined product-group filter in the listing tree. Both row types coexist as siblings in the `UnifiedAd` discriminated union (`PMAX_PRODUCT_GROUP` and `PMAX_SHOPPING_PRODUCT` variants).
 - Two-query purchase filter at BOTH asset_group AND product_group level (ADR-011 sibling pattern, two new fetchers)
 - Component extraction — `MetaCreativeCard`, `GoogleCreativeCard`, `PMaxAssetGroupCard`, `PMaxProductGroupCard` (refactor existing inline + add new)
 - UI for `ad_strength` colored badges + `performance_label` colored badges + retail ROAS-colored product card borders
@@ -70,16 +70,22 @@ These are PMax-internal features but address advanced optimization questions, no
 
 The earlier draft of this ADR scoped narrowly on the assumption that scope discipline (smaller, faster) was the better default. That assumption is wrong under the governing principle when the deferred work compounds into future-session rework. Retail's incremental cost (2-3 additional GAQL queries + 1 new product-group variant + 1 new card component) is much smaller than the cost of returning to this area later.
 
-### 2. Row granularity: row-per-asset-group AND row-per-product-group
+### 2. Row granularity: row-per-asset-group AND row-per-product-group AND row-per-shopping-product
 
-Backend exposes two new methods: `getAssetGroups(range)` and `getProductGroups(range)`. Each row is one `UnifiedAd` discriminated-union entry — asset_group → `ad_type: "PMAX_ASSET_GROUP"`, product_group → `ad_type: "PMAX_PRODUCT_GROUP"`.
+Backend exposes three new methods: `getAssetGroups(range)`, `getProductGroups(range)`, AND `getShoppingProducts(range)`. Each row is one `UnifiedAd` discriminated-union entry:
+- asset_group → `ad_type: "PMAX_ASSET_GROUP"`
+- product_group filter → `ad_type: "PMAX_PRODUCT_GROUP"`
+- individual Merchant Center product → `ad_type: "PMAX_SHOPPING_PRODUCT"`
 
-Frontend groups visually by campaign → asset_group → product_group hierarchy. Per Memory #5 (creative-level analysis = highest-value feature), asset_group is the "creative unit" in PMax (matches Google Ads UI's own structuring) and product_group is the analogous unit for retail/Shopping product hierarchy.
+Frontend visual grouping hierarchy: campaign → asset_group → product_group → individual product. The three row types are sibling top-level rows in the data layer; UI handles visual nesting.
+
+Per Memory #5 (creative-level analysis = highest-value feature), asset_group is the "creative unit" in PMax (matches Google Ads UI's own structuring), product_group is the user-defined filter bucket for retail/Shopping listing trees, and shopping_product is the leaf-level Merchant Center SKU where image/price/title metadata lives.
 
 **Options considered:**
 - (A) Row-per-asset-group only, fold product_groups into asset_group's `type_data` — rejected. Product groups have their own metrics + lifecycle; nesting flattens analytics.
 - (B) Row-per-campaign + nested asset_groups + nested product_groups — rejected. Breaks symmetry with M5/M6 row-per-creative-unit pattern; deeper nesting in cache payload.
-- (C) **Row-per-asset-group AND row-per-product-group as siblings** (LOCKED) — both are top-level UnifiedAd rows; UI handles visual grouping; analytics queries (future) can aggregate at any level.
+- (C) Row-per-asset-group AND row-per-product-group as siblings (superseded by D when scope expanded to include individual shopping_product rows).
+- (D) **Row-per-asset-group AND row-per-product-group AND row-per-shopping-product as THREE sibling variants** (LOCKED) — data-layer honesty: product_groups (user-defined filter buckets) and shopping_products (individual SKUs) are semantically different things. Conflating them into one variant requires UI-level distinction logic everywhere; separate variants give clean TypeScript narrowing and clean UI sectioning.
 
 ### 3. Cache schema: JSONB `type_data` hybrid, v3 → v4 atomic bump
 
@@ -99,6 +105,7 @@ Frontend groups visually by campaign → asset_group → product_group hierarchy
 - `META_AD`: `{ subType, creativeId?, imageUrl?, thumbnailUrl?, videoId?, title?, body?, callToAction?, productSetId?, catalogProducts?, carouselImages?, carouselImageHashes?, previewLink? }`
 - `PMAX_ASSET_GROUP`: `{ adStrength, primaryStatus, assets: Array<{fieldType, assetType, primaryStatus?, text?, imageUrl?, youtubeVideoId?}> }`
 - **NEW `PMAX_PRODUCT_GROUP`**: `{ assetGroupId, assetGroupName, productGroupDimensionPath: string[], productCount?, /* retail-specific metrics still in common */ }` — shape finalized during commit 5 with isolation-test of each field
+- **NEW `PMAX_SHOPPING_PRODUCT`**: `{ productId: string; productTitle?: string; productImageUrl?: string; productBrand?: string; productPrice?: { amount: number; currency: string }; assetGroupId?: string; assetGroupName?: string; listingGroupFilterId?: string }` — individual Merchant Center product row from `shopping_performance_view`. Shape finalized during Commit 7 with GAQL field-isolation testing. The `listingGroupFilterId` join-key, when present, cross-references the `PMAX_PRODUCT_GROUP` variant for hierarchical UI grouping.
 - `UNKNOWN_GOOGLE`: `{ googleAdType, finalUrl? }`
 - Future Phase 7+: TikTok / Snap / Salla / Zid each add their own variant
 
@@ -185,6 +192,8 @@ Fallback per-asset visual when `performance_label` rejects: `primary_status` ind
 
 **Alternative 4 — Nullable columns per ad type** (REJECTED). Reasoning: wide table with optional fields for every variant. Worked for M5/M6 ("optional sprawl") but breaks down qualitatively as PMax adds 6+ new fields per variant and Phase 7+ adds more. Column sprawl creates migration debt on every new ad type. JSONB `type_data` absorbs the variability without schema changes.
 
+**Alternative 5 — Single `PMAX_PRODUCT_GROUP` variant covering both product_groups and shopping_products** (REJECTED). Reasoning: product_groups (user-defined filter buckets aggregating multiple SKUs) and individual shopping_products (Merchant Center SKUs with title/image/price metadata) are semantically distinct data shapes. Single-variant approach requires every UI consumer to check "is this a group or a product?" branching logic. Separate variants give clean discriminated-union narrowing in TypeScript and clean sectioning in the UI ("Product Groups" / "Individual Products" distinct surfaces). Per Memory #29, Saudi/Gulf ecommerce users need BOTH views: product_groups to validate targeting setup, individual products to identify SKU-level optimization opportunities (missing images, pricing issues, etc).
+
 ## Trade-offs accepted
 
 - **Atomic commit count expands from ~6 to ~12** — each commit smaller, but the sequence is longer. Acceptable because each commit is independently testable; bisecting a regression stays clean.
@@ -203,13 +212,15 @@ Fallback per-asset visual when `performance_label` rejects: `primary_status` ind
 - Commit 4: Google adapter — `fetchAssetGroupAssets` query (`FROM asset_group_asset`); per-field isolation testing
 - Commit 5: Google adapter — `fetchPurchaseAssetGroupTotals` (ADR-011 sibling at asset_group level)
 - Commit 6: Google adapter — `fetchProductGroups` query (`FROM asset_group_product_group_view`, retail) — also finalizes the provisional `PMAX_PRODUCT_GROUP` `type_data` shape via field-isolation testing
-- Commit 7: Google adapter — `fetchShoppingPerformance` query (`FROM shopping_performance_view`, retail per-product)
-- Commit 8: Google adapter — `fetchPurchaseProductGroupTotals` (ADR-011 sibling at product_group level)
+- Commit 7: Add `PMAX_SHOPPING_PRODUCT` variant to `UnifiedAd` discriminated union; Google adapter — `fetchShoppingProducts` query (`FROM shopping_performance_view`, retail per-product metrics with Merchant Center metadata join). Shape finalized via field-isolation testing (Q8 iterations in `scripts/_pmax-recon.mjs`).
+- Commit 8a: Google adapter — `fetchPurchaseProductGroupTotals` (ADR-011 sibling at product_group level, sixth merger of the family). Restores filtered purchase data on `PMAX_PRODUCT_GROUP` rows.
+- Commit 8b: Google adapter — `fetchPurchaseShoppingProductTotals` (ADR-011 sibling at shopping_product level, seventh merger). Restores filtered purchase data on `PMAX_SHOPPING_PRODUCT` rows.
 - Commit 9: UI extraction — `MetaCreativeCard.tsx` + `GoogleCreativeCard.tsx` from inline; shared helpers module created
 - Commit 10: UI new — `PMaxAssetGroupCard.tsx`
 - Commit 11: UI new — `PMaxProductGroupCard.tsx`
-- Commit 12: ReportsClient integration — dispatcher switch on `ad.ad_type` + sub-tab navigation for asset_group/product_group views
-- Commit 13: e2e verification + close-out — verify on imaa retail account (Stage 3 baseline), CLAUDE.md update, M-PMax closed in milestone list, gh issue with `tech-debt` label for any deferred items (e.g., `performance_label` if still rejected)
+- Commit 12: UI new — `PMaxShoppingProductCard.tsx`
+- Commit 13: ReportsClient integration — dispatcher switch on `ad.ad_type` + sub-tab navigation for asset_group / product_group / shopping_product views
+- Commit 14: e2e verification + close-out — verify on imaa retail account (Stage 3 baseline), CLAUDE.md update, M-PMax closed in milestone list, gh issue with `tech-debt` label for any deferred items (e.g., `performance_label` if still rejected)
 
 The final atomic-commit count may merge or split during execution (e.g., commits 3 and 4 may bundle if asset_group_asset is sufficiently coupled to asset_group). The structure above is the planning target, not a hard contract.
 
@@ -219,12 +230,20 @@ The final atomic-commit count may merge or split during execution (e.g., commits
 
 - Recon: [docs/recon/pmax-recon-stage-2-3-2026-05-24.md](../recon/pmax-recon-stage-2-3-2026-05-24.md) — Stage 1 external API docs (in chat session memory), Stage 2 internal codebase analysis, Stage 3 imaa GAQL findings
 - Diagnostic script: [scripts/_pmax-recon.mjs](../../scripts/_pmax-recon.mjs) — read-only GAQL probe, re-runnable
-- Types refactor (working tree, uncommitted): `src/lib/ads/types.ts` (UnifiedAd discriminated union), `src/lib/ads/cache.ts` (v3 → v4)
-- Adapters refactored to discriminated shape (working tree, uncommitted): `src/lib/ads/providers/google.ts`, `src/lib/ads/providers/meta.ts`, `src/lib/meta/api.ts`
-- ReportsClient adapted (working tree, uncommitted): `src/app/dashboard/reports/ReportsClient.tsx` (narrowing-based access throughout `CreativeCard` + `AdDetailModal`)
+- Types refactor: `src/lib/ads/types.ts` (UnifiedAd discriminated union) — landed in `b002516`; `PMAX_SHOPPING_PRODUCT` addition pending in Commit 7. `src/lib/ads/cache.ts` (v3 → v4) — landed in `b002516`.
+- Adapters refactored to discriminated shape: `src/lib/ads/providers/google.ts` — landed in `b002516`, extended in Commits 3-6 (latest `6af2626`). `src/lib/ads/providers/meta.ts` + `src/lib/meta/api.ts` — landed in `b002516`, retrofitted in Commit 4 (`ccf2dd3`).
+- ReportsClient adapted: `src/app/dashboard/reports/ReportsClient.tsx` (narrowing-based access throughout `CreativeCard` + `AdDetailModal`) — landed in `b002516`, retrofitted in Commit 4 (`ccf2dd3`).
 - Memory feedback: [feedback_adr_precedes_implementation.md](../../../.claude/projects/c--Users-LENOVO-Desktop-adlytics/memory/feedback_adr_precedes_implementation.md) — codifies the ADR-precedes-implementation lesson learned during this milestone
 
 ## Commits
 
 - `6ead05f` — docs(adr): ADR-013 PMax architecture (initial narrower-scope draft, superseded by this rewrite)
+- `6bff385` — docs(adr): ADR-013 accepted — full PMax architecture (scope expansion)
+- `b002516` — feat(types): discriminated union foundation + cache v4
+- `b8f896b` — docs(adr): ADR-013 Implementation Plan revised post-Commit-2 atomic
+- `f61e98f` — feat(google): fetchAssetGroups query (Commit 3, ADR-013)
+- `ccf2dd3` — feat(google): asset_group_asset query + hasConversionData retrofit (Commit 4, ADR-013)
+- `d1a8581` — fix(google): restore filtered purchase data on Search/Display ads (Commit 4b, ADR-013)
+- `0cf2ae1` — feat(google): asset_group purchase merger + align all purchase mergers to strict semantic (Commit 5, ADR-013)
+- `6af2626` — feat(google): fetchProductGroups query — retail PMax product-level rows (Commit 6, ADR-013)
 - *(further SHAs added as commits land)*
