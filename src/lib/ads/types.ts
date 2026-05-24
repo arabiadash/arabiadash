@@ -249,13 +249,47 @@ export interface UnifiedAdCommon {
 
   // Performance metrics — uniform shape across all ad types
   spend: number;
-  revenue: number;
-  roas: number;
-  purchases: number;
   impressions: number;
   clicks: number;
   ctr: number;
   cpc: number;
+
+  /**
+   * Counts of real e-commerce purchases attributable to the ad.
+   * NULL when the platform cannot yet determine purchase attribution
+   * (e.g. Google ad whose row has no campaign-level purchase merger
+   * yet, or PMax asset_group before Commit 5 wires its merger).
+   * See ADR-011 + ADR-013 Decision 3 + `hasConversionData` below.
+   */
+  purchases: number | null;
+  /**
+   * Total purchase revenue attributable to the ad. NULL under the
+   * same conditions as `purchases`.
+   */
+  revenue: number | null;
+  /**
+   * Return on ad spend. NULL when revenue is NULL OR when spend is 0
+   * (to avoid divide-by-zero). Computed as revenue / spend.
+   */
+  roas: number | null;
+  /**
+   * Whether the platform has populated purchase-attribution data for
+   * this ad. FALSE means purchases/revenue/roas will be NULL — the
+   * platform recognized the ad but cannot yet resolve which conversion
+   * actions count as purchases (Google needs `purchaseActionIds`
+   * cache; PMax asset_group needs Commit 5 merger). TRUE means the
+   * values are authoritative (may still be 0 for legitimate zero
+   * activity).
+   *
+   * Meta always sets TRUE — `omni_purchase` action_type is platform-
+   * native, no cache map dependency. Google's ad-level rows currently
+   * set FALSE (ad-level purchase merger not yet wired); PMax asset_
+   * group rows set FALSE pre-Commit-5 and TRUE post-Commit-5.
+   *
+   * Mirrors the same flag on UnifiedInsight (per ADR-011) so UI
+   * components can share the "configured vs zero" gating logic.
+   */
+  hasConversionData: boolean;
 
   /**
    * Asset Extensions (Google-only currently). Per ADR-012.

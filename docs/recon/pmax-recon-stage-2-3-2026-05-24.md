@@ -342,3 +342,72 @@ export type UnifiedAd =
 2. **ADR-013 drafted** (Status: Proposed) — see [013-pmax-architecture.md](../decisions/013-pmax-architecture.md)
 3. **You review** ADR-013 + greenlight or push back
 4. **Once ADR-013 accepted:** open branch `phase-4.8-m-pmax` and execute the 8-commit atomic sequence from ADR-013 implementation plan
+
+---
+
+## Phase 2 field-isolation results (M-PMax Commit 4, 2026-05-24)
+
+Per ADR-013 field-isolation discipline, the `asset_group_asset` SELECT surface for `fetchAssetGroupAssets` was widened via additive Q6 iterations against imaa. Run via `node scripts/_pmax-recon.mjs`.
+
+### Q6a — base 6 fields
+
+**Status:** ✓ PASSED (50 rows returned)
+
+```
+SELECT
+  asset_group.id, asset_group.name,
+  asset_group_asset.field_type,
+  asset.id, asset.type,
+  asset.text_asset.text
+FROM asset_group_asset
+WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+LIMIT 50
+```
+
+**Confirmed working:** all six fields. Sample row (HEADLINE text asset):
+```json
+{
+  "asset": { "id": 111574805265, "type": 5, "text_asset": { "text": "متجر ايما للعطور" } },
+  "asset_group": { "id": 6500713373, "name": "Asset Group 1" },
+  "asset_group_asset": { "field_type": 2, "resource_name": "customers/.../assetGroupAssets/6500713373~111574805265~HEADLINE" }
+}
+```
+
+**Trap noticed (pre-existing API behavior, not a new constraint):** `field_type` integer enum has shifted between Google Ads API versions. imaa returned `field_type=19` for a row whose `resource_name` suffix is `SQUARE_MARKETING_IMAGE`, while older protos numbered 19 as `LONG_HEADLINE`. The `resource_name` suffix is the version-stable label and is now the primary source for `fieldType` in `readAssetFieldType()`; the integer is the fallback.
+
+### Q6b — base + `asset.image_asset.full_size.url`
+
+**Status:** ✓ PASSED (50 rows returned, 3 with populated `image_asset.full_size.url`)
+
+Sample image row (MARKETING_IMAGE):
+```json
+{
+  "asset": {
+    "id": 142427938232,
+    "type": 4,
+    "image_asset": { "full_size": { "url": "https://tpc.googlesyndication.com/simgad/11995517737630841982" } }
+  },
+  "asset_group_asset": { "field_type": 5, "resource_name": "...~MARKETING_IMAGE" }
+}
+```
+
+### Q6c — base + image + `asset.youtube_video_asset.youtube_video_id`
+
+**Status:** ✓ PASSED (50 rows; no YouTube video assets in imaa's PMax retail account so no populated values, but the SELECT clause itself parsed and executed cleanly)
+
+This is the most important success: it confirms the field name is correct and the SDK accepts it at runtime, even without sample data in this account. Future accounts with video assets will surface the ID without further field-isolation work.
+
+### Q6 summary
+
+| Iteration | Field added | Status |
+|---|---|---|
+| Q6a | base 6 fields | ✓ PASSED (50 rows) |
+| Q6b | `asset.image_asset.full_size.url` | ✓ PASSED (50 rows) |
+| Q6c | `asset.youtube_video_asset.youtube_video_id` | ✓ PASSED (50 rows) |
+| Q6d | `asset_group_asset.performance_label` | SKIPPED (confirmed rejected in Stage 3 Q3 — re-testing would just re-confirm the trap) |
+
+**Total field surface for `fetchAssetGroupAssets`:** 8 confirmed-working fields. The implementation in `src/lib/ads/providers/google.ts` uses exactly this set — no field added that wasn't isolation-tested.
+
+### Field not in Q6 (flagged for follow-up)
+
+- `asset_group_asset.primary_status` — needed for the optional `assets[i].primaryStatus` slot in `PMAX_ASSET_GROUP.type_data.assets`. Not added to Q6 to keep the iteration scope tight; can be added in a follow-up with the same field-isolation discipline. The shape's optional `?` means omitting is safe.

@@ -58,6 +58,51 @@ const PRIMARY_STATUS_MAP = {
 type PrimaryStatusLabel =
   (typeof PRIMARY_STATUS_MAP)[keyof typeof PRIMARY_STATUS_MAP];
 
+// AssetTypeEnum subset — the three values M-PMax actually disambiguates
+// (text vs image vs YouTube video drive the type_data render branch).
+// Other values (CALLOUT, SITELINK, PROMOTION, etc.) collapse to "OTHER"
+// since they're surfaced separately via the ADR-012 extensions pipeline,
+// not as asset_group assets.
+const ASSET_TYPE_MAP: Record<number, string> = {
+  0: "UNSPECIFIED",
+  1: "UNKNOWN",
+  2: "YOUTUBE_VIDEO",
+  3: "MEDIA_BUNDLE",
+  4: "IMAGE",
+  5: "TEXT",
+};
+
+function readAssetType(raw: unknown): string {
+  if (typeof raw === "number") {
+    return ASSET_TYPE_MAP[raw] ?? `OTHER_${raw}`;
+  }
+  if (typeof raw === "string" && raw.length > 0) return raw;
+  return "UNKNOWN";
+}
+
+// Field type is best derived from the resource_name suffix, which IS the
+// authoritative label ("...~HEADLINE", "...~MARKETING_IMAGE", etc.) — the
+// integer enum has shifted across Google Ads API versions (Q6 against imaa
+// returned field_type=19 with resource_name suffix SQUARE_MARKETING_IMAGE,
+// while older protos numbered 19 as LONG_HEADLINE). Resource_name suffix is
+// version-stable; the integer is the fallback.
+function readAssetFieldType(
+  resourceName: unknown,
+  fieldTypeInt: unknown
+): string {
+  if (typeof resourceName === "string" && resourceName.length > 0) {
+    const tail = resourceName.split("~").pop();
+    if (tail && tail.length > 0) return tail;
+  }
+  if (typeof fieldTypeInt === "number") {
+    return `FIELD_TYPE_${fieldTypeInt}`;
+  }
+  if (typeof fieldTypeInt === "string" && fieldTypeInt.length > 0) {
+    return fieldTypeInt;
+  }
+  return "UNKNOWN";
+}
+
 function readAdStrength(raw: unknown): AdStrengthLabel {
   if (typeof raw === "number") {
     return AD_STRENGTH_MAP[raw as keyof typeof AD_STRENGTH_MAP] ?? "UNKNOWN";
@@ -324,13 +369,33 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       this.normalizeAd(ad, urlMap, extensionsMap)
     );
 
-    // Pass 6 (M-PMax / ADR-013): asset_group rows. PMax campaigns return
-    // ZERO rows from passes 1-5 (no ad_group_ad), so this pass is the
-    // sole surface for Performance Max creative units. assets[] starts
-    // empty — populated by fetchAssetGroupAssets in Commit 4.
-    const assetGroupRows = await this.fetchAssetGroupRows(dateFrom, dateTo);
+    // Pass 6 (M-PMax / ADR-013): asset_group rows + per-asset enrichment.
+    // PMax campaigns return ZERO rows from passes 1-5 (no ad_group_ad), so
+    // this pass is the sole creative-unit surface for them. The two queries
+    // run in parallel — they reach Google independently and the assets
+    // query is FROM asset_group_asset (different resource than asset_group),
+    // so neither blocks the other.
+    const [assetGroupRows, assetsByGroupId] = await Promise.all([
+      this.fetchAssetGroupRows(dateFrom, dateTo),
+      this.fetchAssetGroupAssets(),
+    ]);
 
-    return [...normalizedAds, ...assetGroupRows];
+    // Merge: populate each asset_group row's type_data.assets from the map.
+    // Pure-functional rebuild (no in-place mutation on the discriminated
+    // union — same pattern as MetaAdapter.getAds per ADR-013 long-term-fit).
+    const enrichedAssetGroups: UnifiedAd[] = assetGroupRows.map((row) => {
+      if (row.ad_type !== "PMAX_ASSET_GROUP") return row;
+      const assets = assetsByGroupId.get(row.id) ?? [];
+      return {
+        ...row,
+        type_data: {
+          ...row.type_data,
+          assets,
+        },
+      };
+    });
+
+    return [...normalizedAds, ...enrichedAssetGroups];
   }
 
   // ───────────────────────────────────────────────────────────────
@@ -790,6 +855,15 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     const extensions = extensionsMap?.get(ad.id);
 
     // Common fields shared across all Google variants.
+    //
+    // Purchase-attribution fields (purchases/revenue/roas/hasConversionData):
+    // Google's raw `metrics.conversions` counts ALL conversion-action types,
+    // not just purchases — so surfacing it as `purchases` would be
+    // semantically wrong (ADR-011 distinction: purchases vs all-conversions).
+    // No ad-level purchase merger exists yet (campaign-level merger lives in
+    // fetchPurchaseCampaignTotals but isn't wired to per-ad rows). Until an
+    // ad-level merger lands, ad rows degrade to null + hasConversionData=false
+    // per ADR-011's "configured vs zero" gating. UI shows "—" for the trio.
     const common = {
       id: ad.id,
       name: `${ad.campaign_name} — ${ad.ad_group_name}`,
@@ -800,9 +874,10 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       adsetId: ad.ad_group_id,
       adsetName: ad.ad_group_name,
       spend: ad.spend,
-      revenue: ad.revenue,
-      roas: ad.roas,
-      purchases: ad.conversions,
+      revenue: null,
+      roas: null,
+      purchases: null,
+      hasConversionData: false,
       impressions: ad.impressions,
       clicks: ad.clicks,
       ctr: ad.ctr * 100,
@@ -972,9 +1047,14 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
           campaignId: String(row.campaign?.id ?? ""),
           campaignName: String(row.campaign?.name ?? ""),
           spend,
-          revenue: 0,
-          roas: 0,
-          purchases: 0,
+          // Purchase trio degrades to null pre-Commit-5 — the asset_group
+          // level purchase merger (fetchPurchaseAssetGroupTotals, ADR-013
+          // Commit 5) will replace these with real values + flip
+          // hasConversionData=true when populated.
+          revenue: null,
+          roas: null,
+          purchases: null,
+          hasConversionData: false,
           impressions,
           clicks,
           ctr,
@@ -1003,4 +1083,133 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       return [];
     }
   }
+
+  /**
+   * Performance Max per-asset enrichment (ADR-013, Commit 4).
+   *
+   * One GAQL pass against `FROM asset_group_asset` with 8 confirmed-working
+   * fields (Q6a/b/c iterations in scripts/_pmax-recon.mjs — all three
+   * additive iterations passed against imaa: base 6 fields, +image URL,
+   * +YouTube video id). The fields surface text content, image URLs, and
+   * YouTube video IDs alongside the structural identifiers (field_type,
+   * asset_type).
+   *
+   * Resource_name suffix is the authoritative source for field_type label
+   * (version-stable across Google Ads API revisions; the integer enum
+   * shifted between protos). Asset type uses the integer enum subset that
+   * M-PMax actually disambiguates (text vs image vs YouTube video).
+   *
+   * Returns a Map keyed by asset_group.id (stringified) — empty when no
+   * PMax campaigns exist or the query fails. Caller merges into
+   * PMAX_ASSET_GROUP rows' type_data.assets via Promise.all in Pass 6.
+   *
+   * Fields explicitly NOT in the SELECT (per ADR-013 field-isolation
+   * discipline):
+   *  - `asset_group_asset.performance_label` — confirmed rejected in
+   *    Stage 3 Q3 (third instance of SDK-vs-runtime trap). Deferred to
+   *    v2 per the ADR.
+   *  - `asset_group_asset.primary_status` — not in Q6 iterations; can be
+   *    added in a follow-up with field-isolation verification. The
+   *    `assets[i].primaryStatus?` slot stays empty for now.
+   */
+  private async fetchAssetGroupAssets(): Promise<
+    Map<string, AssetGroupAssetEntry[]>
+  > {
+    try {
+      const api = new GoogleAdsApi({
+        client_id: process.env.GOOGLE_ADS_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_ADS_CLIENT_SECRET!,
+        developer_token: process.env.GOOGLE_ADS_DEVELOPER_TOKEN!,
+      });
+
+      const customer = api.Customer({
+        customer_id: this.customerId,
+        refresh_token: this.refreshToken,
+        ...(this.loginCustomerId
+          ? { login_customer_id: this.loginCustomerId }
+          : {}),
+      });
+
+      const query = `
+        SELECT
+          asset_group.id,
+          asset_group.name,
+          asset_group_asset.field_type,
+          asset.id,
+          asset.type,
+          asset.text_asset.text,
+          asset.image_asset.full_size.url,
+          asset.youtube_video_asset.youtube_video_id
+        FROM asset_group_asset
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+      `;
+
+      const rows = await customer.query(query);
+
+      const byAssetGroup = new Map<string, AssetGroupAssetEntry[]>();
+      for (const row of rows) {
+        const agId = String(row.asset_group?.id ?? "");
+        if (!agId) continue;
+
+        const fieldType = readAssetFieldType(
+          row.asset_group_asset?.resource_name,
+          row.asset_group_asset?.field_type
+        );
+        const assetType = readAssetType(row.asset?.type);
+
+        const text =
+          typeof row.asset?.text_asset?.text === "string"
+            ? row.asset.text_asset.text
+            : undefined;
+        const imageUrl =
+          typeof row.asset?.image_asset?.full_size?.url === "string"
+            ? row.asset.image_asset.full_size.url
+            : undefined;
+        const youtubeVideoId =
+          typeof row.asset?.youtube_video_asset?.youtube_video_id === "string"
+            ? row.asset.youtube_video_asset.youtube_video_id
+            : undefined;
+
+        const entry: AssetGroupAssetEntry = {
+          fieldType,
+          assetType,
+          ...(text !== undefined ? { text } : {}),
+          ...(imageUrl !== undefined ? { imageUrl } : {}),
+          ...(youtubeVideoId !== undefined ? { youtubeVideoId } : {}),
+        };
+
+        const existing = byAssetGroup.get(agId) ?? [];
+        existing.push(entry);
+        byAssetGroup.set(agId, existing);
+      }
+
+      return byAssetGroup;
+    } catch (err) {
+      const message =
+        err instanceof errors.GoogleAdsFailure
+          ? err.errors?.map((e) => e.message).join("; ") ??
+            "GoogleAdsFailure (no detail)"
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      console.warn(
+        `[GoogleAdsAdapter] fetchAssetGroupAssets failed for ${this.customerId}: ${message}. Returning empty Map (asset_group rows will render with no per-asset detail).`
+      );
+      return new Map();
+    }
+  }
 }
+
+/**
+ * Shape of one entry in PMAX_ASSET_GROUP `type_data.assets[]`. Mirrors the
+ * inline definition in `types.ts` so `fetchAssetGroupAssets` can declare its
+ * return type cleanly.
+ */
+type AssetGroupAssetEntry = {
+  fieldType: string;
+  assetType: string;
+  primaryStatus?: string;
+  text?: string;
+  imageUrl?: string;
+  youtubeVideoId?: string;
+};

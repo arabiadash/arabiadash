@@ -745,6 +745,10 @@ export function metaAdToUnified(ad: MetaAd): UnifiedAd {
     clicks,
     ctr,
     cpc,
+    // Meta surfaces purchase counts natively via the omni_purchase
+    // action_type — no cache map dependency. Always authoritative,
+    // matches the UnifiedInsight Meta convention (ADR-011).
+    hasConversionData: true,
     provider: "meta",
     type_data: {
       subType,

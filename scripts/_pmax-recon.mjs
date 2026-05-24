@@ -338,6 +338,96 @@ async function main() {
   }
 
   // ---------------------------------------------------------------
+  // Q6 — Phase 2 field-isolation iterations (M-PMax Commit 4)
+  //
+  // Per ADR-013 field-isolation discipline: each new SELECT field is
+  // tested in an additive sequence. If iteration N fails, stop adding
+  // and report the boundary. Q3 already proved field_type / asset.type
+  // / text_asset.text / image_asset.full_size.url work and that
+  // performance_label rejects — Q6 widens scope to asset.id and
+  // youtube_video_asset.youtube_video_id which the implementation
+  // (fetchAssetGroupAssets) needs.
+  // ---------------------------------------------------------------
+  results.q6a_base = await runQuery(
+    customer,
+    "Q6a — asset_group_asset BASE (6 fields)",
+    `
+      SELECT
+        asset_group.id,
+        asset_group.name,
+        asset_group_asset.field_type,
+        asset.id,
+        asset.type,
+        asset.text_asset.text
+      FROM asset_group_asset
+      WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+      LIMIT 50
+    `
+  );
+  if (results.q6a_base.ok) {
+    console.log("\nFirst 3 rows:");
+    console.log(JSON.stringify(results.q6a_base.rows.slice(0, 3), null, 2));
+  }
+
+  if (results.q6a_base.ok) {
+    results.q6b_image = await runQuery(
+      customer,
+      "Q6b — base + asset.image_asset.full_size.url",
+      `
+        SELECT
+          asset_group.id,
+          asset_group.name,
+          asset_group_asset.field_type,
+          asset.id,
+          asset.type,
+          asset.text_asset.text,
+          asset.image_asset.full_size.url
+        FROM asset_group_asset
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        LIMIT 50
+      `
+    );
+    if (results.q6b_image.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(JSON.stringify(results.q6b_image.rows.slice(0, 3), null, 2));
+    }
+  } else {
+    console.log("\n[Q6b skipped — Q6a failed]");
+    results.q6b_image = { ok: false, error: "skipped (Q6a failed)" };
+  }
+
+  if (results.q6b_image.ok) {
+    results.q6c_video = await runQuery(
+      customer,
+      "Q6c — base + image + asset.youtube_video_asset.youtube_video_id",
+      `
+        SELECT
+          asset_group.id,
+          asset_group.name,
+          asset_group_asset.field_type,
+          asset.id,
+          asset.type,
+          asset.text_asset.text,
+          asset.image_asset.full_size.url,
+          asset.youtube_video_asset.youtube_video_id
+        FROM asset_group_asset
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        LIMIT 50
+      `
+    );
+    if (results.q6c_video.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(JSON.stringify(results.q6c_video.rows.slice(0, 3), null, 2));
+    }
+  } else {
+    console.log("\n[Q6c skipped — Q6b failed]");
+    results.q6c_video = { ok: false, error: "skipped (Q6b failed)" };
+  }
+
+  // Q6d intentionally SKIPPED — performance_label confirmed rejected
+  // in Stage 3 Q3. Re-testing here would just re-confirm the trap.
+
+  // ---------------------------------------------------------------
   // Summary
   // ---------------------------------------------------------------
   console.log(`\n${"=".repeat(70)}`);
@@ -367,6 +457,15 @@ async function main() {
             ? "YES (retail PMax detected)"
             : "NO (standard PMax)"
           : `FAILED: ${results.q5_retail.error}`,
+        q6a_base: results.q6a_base.ok
+          ? `${results.q6a_base.rows.length} rows`
+          : `FAILED: ${results.q6a_base.error}`,
+        q6b_image: results.q6b_image.ok
+          ? `${results.q6b_image.rows.length} rows`
+          : `FAILED: ${results.q6b_image.error}`,
+        q6c_video: results.q6c_video.ok
+          ? `${results.q6c_video.rows.length} rows`
+          : `FAILED: ${results.q6c_video.error}`,
       },
       null,
       2

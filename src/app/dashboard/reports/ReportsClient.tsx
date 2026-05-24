@@ -619,13 +619,31 @@ function CreativeCard({
         <div className="grid grid-cols-2 gap-2 text-xs">
           <div>
             <p className="text-gray-500 text-[10px]">ROAS</p>
-            <p className={`font-bold ${getROASColor(ad.roas)}`}>
-              {ad.roas.toFixed(2)}x
-            </p>
+            {ad.hasConversionData && ad.roas !== null ? (
+              <p className={`font-bold ${getROASColor(ad.roas)}`}>
+                {ad.roas.toFixed(2)}x
+              </p>
+            ) : (
+              <p
+                className="font-bold text-gray-400"
+                title="لم يتم إعداد تتبع الشراء في الحساب"
+              >
+                —
+              </p>
+            )}
           </div>
           <div className="text-left">
             <p className="text-gray-500 text-[10px]">المبيعات</p>
-            <p className="font-bold text-gray-900">{ad.purchases}</p>
+            {ad.hasConversionData && ad.purchases !== null ? (
+              <p className="font-bold text-gray-900">{ad.purchases}</p>
+            ) : (
+              <p
+                className="font-bold text-gray-400"
+                title="لم يتم إعداد تتبع الشراء في الحساب"
+              >
+                —
+              </p>
+            )}
           </div>
           <div className="col-span-2">
             <p className="text-gray-500 text-[10px]">الإنفاق</p>
@@ -1137,11 +1155,20 @@ function AdDetailModal({
             <div className="grid grid-cols-3 gap-3">
               <div className="bg-gray-50 rounded-lg p-3">
                 <p className="text-xs text-gray-500">ROAS</p>
-                <p
-                  className={`text-lg font-bold ${getROASColor(ad.roas)}`}
-                >
-                  {ad.roas.toFixed(2)}x
-                </p>
+                {ad.hasConversionData && ad.roas !== null ? (
+                  <p
+                    className={`text-lg font-bold ${getROASColor(ad.roas)}`}
+                  >
+                    {ad.roas.toFixed(2)}x
+                  </p>
+                ) : (
+                  <p
+                    className="text-lg font-bold text-gray-400"
+                    title="لم يتم إعداد تتبع الشراء في الحساب"
+                  >
+                    —
+                  </p>
+                )}
               </div>
               <div className="bg-gray-50 rounded-lg p-3">
                 <p className="text-xs text-gray-500">الإنفاق</p>
@@ -1151,19 +1178,37 @@ function AdDetailModal({
               </div>
               <div className="bg-gray-50 rounded-lg p-3">
                 <p className="text-xs text-gray-500">الإيرادات</p>
-                <p className="text-lg font-bold text-green-600">
-                  {formatAndConvert(
-                    ad.revenue,
-                    (ad.currency as Currency) || accountCurrency,
-                    displayCurrency
-                  )}
-                </p>
+                {ad.hasConversionData && ad.revenue !== null ? (
+                  <p className="text-lg font-bold text-green-600">
+                    {formatAndConvert(
+                      ad.revenue,
+                      (ad.currency as Currency) || accountCurrency,
+                      displayCurrency
+                    )}
+                  </p>
+                ) : (
+                  <p
+                    className="text-lg font-bold text-gray-400"
+                    title="لم يتم إعداد تتبع الشراء في الحساب"
+                  >
+                    —
+                  </p>
+                )}
               </div>
               <div className="bg-gray-50 rounded-lg p-3">
                 <p className="text-xs text-gray-500">المبيعات</p>
-                <p className="text-lg font-bold text-gray-900">
-                  {ad.purchases}
-                </p>
+                {ad.hasConversionData && ad.purchases !== null ? (
+                  <p className="text-lg font-bold text-gray-900">
+                    {ad.purchases}
+                  </p>
+                ) : (
+                  <p
+                    className="text-lg font-bold text-gray-400"
+                    title="لم يتم إعداد تتبع الشراء في الحساب"
+                  >
+                    —
+                  </p>
+                )}
               </div>
               <div className="bg-gray-50 rounded-lg p-3">
                 <p className="text-xs text-gray-500">CTR</p>
