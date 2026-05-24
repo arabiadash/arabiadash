@@ -475,11 +475,12 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     // different segment constraints), so none blocks the others.
     // fetchProductGroups + fetchShoppingProducts return [] for non-retail
     // PMax accounts (no Merchant Center linkage → zero rows naturally).
-    // 6-way Promise.all after Commit 8a — adds the product_group purchase
-    // merger (ADR-011 sibling, sixth of the family). fetchProductGroups
-    // stays parameter-stable; the merger Map is applied to its result in a
-    // post-fetch enriched-merge step below (the merger Map is itself a
-    // pending Promise here — can't be passed in until it's resolved). Same
+    // 7-way Promise.all after Commit 8b — adds the shopping_product
+    // purchase merger (ADR-011 sibling, seventh and final of the family).
+    // Both fetchProductGroups and fetchShoppingProducts stay parameter-
+    // stable; their respective merger Maps are applied in post-fetch
+    // enriched-merge steps below (the merger Maps are themselves pending
+    // Promises here — can't be passed in until they're resolved). Same
     // pattern as the asset_group enriched-merge.
     const [
       assetGroupRows,
@@ -488,6 +489,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       productGroupRows,
       shoppingProductRows,
       productGroupPurchaseTotals,
+      shoppingProductPurchaseTotals,
     ] = await Promise.all([
       this.fetchAssetGroupRows(dateFrom, dateTo),
       this.fetchAssetGroupAssets(),
@@ -495,6 +497,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       this.fetchProductGroups(dateFrom, dateTo),
       this.fetchShoppingProducts(dateFrom, dateTo),
       this.fetchPurchaseProductGroupTotals(dateFrom, dateTo),
+      this.fetchPurchaseShoppingProductTotals(dateFrom, dateTo),
     ]);
 
     // Layer purchase trio + hasConversionData onto each product_group row.
@@ -527,6 +530,39 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
         hasConversionData,
       };
     });
+
+    // Same enriched-merge pattern for shopping_product rows (Commit 8b).
+    // Map key is `segments.product_item_id` with the "p" prefix preserved
+    // — matches PMAX_SHOPPING_PRODUCT.id constructed by fetchShoppingProducts
+    // in Commit 7. Contract documented on fetchPurchaseShoppingProductTotals.
+    const enrichedShoppingProducts: UnifiedAd[] = shoppingProductRows.map(
+      (row) => {
+        if (row.ad_type !== "PMAX_SHOPPING_PRODUCT") return row;
+
+        const purchaseEntry = shoppingProductPurchaseTotals?.get(row.id);
+        const hasConversionData =
+          shoppingProductPurchaseTotals != null &&
+          purchaseEntry !== undefined;
+        const purchases: number | null = hasConversionData
+          ? purchaseEntry!.purchases
+          : null;
+        const revenue: number | null = hasConversionData
+          ? purchaseEntry!.revenue
+          : null;
+        const roas: number | null =
+          hasConversionData && row.spend > 0
+            ? purchaseEntry!.revenue / row.spend
+            : null;
+
+        return {
+          ...row,
+          purchases,
+          revenue,
+          roas,
+          hasConversionData,
+        };
+      }
+    );
 
     // Merge: layer in `type_data.assets` + purchase-attribution trio onto
     // each asset_group row. Pure-functional rebuild (no in-place mutation
@@ -570,7 +606,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       ...normalizedAds,
       ...enrichedAssetGroups,
       ...enrichedProductGroups,
-      ...shoppingProductRows,
+      ...enrichedShoppingProducts,
     ];
   }
 
@@ -962,9 +998,10 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
 
   /**
    * Segmented purchase merger at PMAX PRODUCT_GROUP LEVEL (Commit 8a,
-   * ADR-013). Sixth sibling of the ADR-011 merger family (campaign,
-   * time-series, ad, asset_group, and now product_group; shopping_product
-   * follows in Commit 8b). Same two-query GAQL pattern — cost+clicks live
+   * ADR-013). Sixth sibling of the seven-merger ADR-011 family (campaign,
+   * time-series, ad, asset_group, product_group, shopping_product — the
+   * shopping_product sibling lives in Commit 8b just below). Same two-
+   * query GAQL pattern — cost+clicks live
    * in `fetchProductGroups` (Commit 6), this query carries only
    * conversions segmented by `segments.conversion_action` and filtered to
    * the customer's purchase action IDs.
@@ -1067,6 +1104,124 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
           : String(err);
       console.warn(
         `[GoogleAdsAdapter] fetchPurchaseProductGroupTotals failed for ${this.customerId}: ${message}. Degrading PMax product_group purchases to null.`
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Segmented purchase merger at PMAX SHOPPING_PRODUCT LEVEL (Commit 8b,
+   * ADR-013). Seventh and final sibling of the ADR-011 merger family
+   * (campaign, time-series, ad, asset_group, product_group, and now
+   * shopping_product). Same two-query GAQL pattern — cost+clicks live in
+   * `fetchShoppingProducts` (Commit 7), this query carries only
+   * conversions segmented by `segments.conversion_action` and filtered to
+   * the customer's purchase action IDs.
+   *
+   * Returns null on cache miss, no purchase actions configured, or API
+   * failure. Returned Map: `segments.product_item_id` (string, "p"-prefix
+   * preserved) -> { purchases, revenue }. "First sighting" Map semantic
+   * preserved — entry present with {0,0} means "tracking configured, zero
+   * purchases attributed to this SKU" (renders `0`); entry absent / null
+   * Map means "not configured / no data" (renders `—`).
+   *
+   * Map key MUST match the `id` field on PMAX_SHOPPING_PRODUCT rows
+   * constructed by `fetchShoppingProducts` (Commit 7) — both use the raw
+   * `segments.product_item_id` string with the "p" prefix preserved.
+   * Stripping the prefix in one side without the other would break the
+   * lookup. Any future change to either side must update both together to
+   * keep the contract consistent. (Note: the prefix divergence between
+   * `shopping_performance_view` and `asset_group_listing_group_filter.path`
+   * documented in the recon doc only matters for cross-resource
+   * cross-reference, which is deferred per ADR-013 Alternative 6.)
+   */
+  private async fetchPurchaseShoppingProductTotals(
+    dateFrom: string,
+    dateTo: string
+  ): Promise<Map<string, { purchases: number; revenue: number }> | null> {
+    if (this.purchaseActionIds === null) return null;
+    if (this.purchaseActionIds.size === 0) return null;
+
+    try {
+      const api = new GoogleAdsApi({
+        client_id: process.env.GOOGLE_ADS_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_ADS_CLIENT_SECRET!,
+        developer_token: process.env.GOOGLE_ADS_DEVELOPER_TOKEN!,
+      });
+
+      const customer = api.Customer({
+        customer_id: this.customerId,
+        refresh_token: this.refreshToken,
+        ...(this.loginCustomerId
+          ? { login_customer_id: this.loginCustomerId }
+          : {}),
+      });
+
+      // `campaign.advertising_channel_type` MUST appear in SELECT when used
+      // in WHERE on this resource (per-resource GAQL semantic — third
+      // instance of this requirement, also seen in fetchShoppingProducts
+      // from Commit 7 and fetchPurchaseProductGroupTotals from Commit 8a).
+      // Stripping the field will fail at runtime with query_error 16
+      // (MISSING_REQUIRED_FIELD_IN_SELECT_CLAUSE).
+      const query = `
+        SELECT
+          segments.product_item_id,
+          segments.conversion_action,
+          metrics.conversions,
+          metrics.conversions_value,
+          campaign.advertising_channel_type
+        FROM shopping_performance_view
+        WHERE segments.date BETWEEN '${dateFrom}' AND '${dateTo}'
+          AND campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+      `;
+
+      const rows = await customer.query(query);
+
+      const byProductItem = new Map<
+        string,
+        { purchases: number; revenue: number }
+      >();
+
+      for (const row of rows) {
+        const productItemId =
+          typeof row.segments?.product_item_id === "string"
+            ? row.segments.product_item_id
+            : "";
+        if (!productItemId) continue;
+
+        // First-sighting init: every shopping_product with any GAQL row
+        // ends up with hasConversionData=true even when none of its rows
+        // match a purchase action (legitimate 0 purchase count).
+        const existing = byProductItem.get(productItemId) ?? {
+          purchases: 0,
+          revenue: 0,
+        };
+
+        const resourcePath = String(row.segments?.conversion_action ?? "");
+        const actionId = resourcePath.split("/").pop() ?? "";
+
+        if (this.purchaseActionIds.has(actionId)) {
+          const conversions = Number(row.metrics?.conversions) || 0;
+          const conversionsValue =
+            Number(row.metrics?.conversions_value) || 0;
+          existing.purchases += conversions;
+          existing.revenue += conversionsValue;
+        }
+
+        byProductItem.set(productItemId, existing);
+      }
+
+      return byProductItem;
+    } catch (err) {
+      const message =
+        err instanceof errors.GoogleAdsFailure
+          ? err.errors?.map((e) => e.message).join("; ") ??
+            "GoogleAdsFailure (no detail)"
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      console.warn(
+        `[GoogleAdsAdapter] fetchPurchaseShoppingProductTotals failed for ${this.customerId}: ${message}. Degrading PMax shopping_product purchases to null.`
       );
       return null;
     }
@@ -1898,10 +2053,16 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
    * just purchases. Surfacing it as `purchases` would repeat the
    * Commit 4b ad-level bug (raw conversions falsely displayed as
    * purchases in arabiadash.com production for months — see
-   * feedback_existing_code_audit_during_retrofit.md). Commit 8b's
-   * `fetchPurchaseShoppingProductTotals` merges properly-filtered
-   * purchase data via the ADR-011 pattern. Do NOT remove this guard
-   * without Commit 8b wired through.
+   * feedback_existing_code_audit_during_retrofit.md).
+   *
+   * As of Commit 8b, `fetchPurchaseShoppingProductTotals` is wired and
+   * the `enrichedShoppingProducts` merge step in getAds() overwrites the
+   * null defaults with properly-filtered purchase data (ADR-011 pattern
+   * — purchase action IDs from google_conversion_actions). The defaults
+   * here remain the failsafe: if the merger Map is null (cache miss / no
+   * purchase actions / API failure) or this row's product_item_id isn't
+   * in the Map, the row falls through with hasConversionData=false and
+   * renders "—". Do NOT remove this guard.
    *
    * Cross-reference to PMAX_PRODUCT_GROUP rows: `shopping_performance_view`
    * cannot JOIN to `asset_group_listing_group_filter` (query_error 48,
@@ -2016,8 +2177,10 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
           campaignName: String(row.campaign?.name ?? ""),
           spend,
           // Purchase trio + hasConversionData start as "no data" defaults —
-          // Commit 8b will overwrite via fetchPurchaseShoppingProductTotals.
-          // See docblock above for bug-prevention rationale.
+          // the enrichedShoppingProducts merge step in getAds() overwrites
+          // them per-row using fetchPurchaseShoppingProductTotals (Commit 8b).
+          // Defaults remain the failsafe when the merger Map is null or
+          // this row's product_item_id has no entry. See docblock above.
           revenue: null,
           roas: null,
           purchases: null,
