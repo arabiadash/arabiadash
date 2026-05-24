@@ -1334,8 +1334,24 @@ function CreativesGrid({
   const [selectedAd, setSelectedAd] = useState<UnifiedAd | null>(null);
   const [visibleCount, setVisibleCount] = useState(CREATIVES_PAGE_SIZE);
 
+  // UI-only filter: hide PMAX_PRODUCT_GROUP + PMAX_SHOPPING_PRODUCT rows
+  // from the creatives grid. These represent Google Ads bidding categories
+  // (listing-group filters) and Merchant Center SKUs — not creative-level
+  // entities. PMAX_ASSET_GROUP remains visible as the campaign-level
+  // creative unit for PMax. Backend mergers stay intact for a future
+  // "PMax Product Deep Dive" surface.
+  const visibleAds = useMemo(
+    () =>
+      ads.filter(
+        (ad) =>
+          ad.ad_type !== "PMAX_PRODUCT_GROUP" &&
+          ad.ad_type !== "PMAX_SHOPPING_PRODUCT"
+      ),
+    [ads]
+  );
+
   const filteredAds = useMemo(() => {
-    let result = [...ads];
+    let result = [...visibleAds];
     if (statusFilter !== "all") {
       result = result.filter((ad) => ad.status === statusFilter);
     }
@@ -1345,7 +1361,7 @@ function CreativesGrid({
       return bVal - aVal;
     });
     return result;
-  }, [ads, statusFilter, sortBy]);
+  }, [visibleAds, statusFilter, sortBy]);
 
   // Reset pagination when the filtered list identity changes (status filter,
   // sort change, or upstream ads refresh). Without this, switching from a
@@ -1382,8 +1398,8 @@ function CreativesGrid({
           {filterOptions.map((opt) => {
             const count =
               opt.value === "all"
-                ? ads.length
-                : ads.filter((a) => a.status === opt.value).length;
+                ? visibleAds.length
+                : visibleAds.filter((a) => a.status === opt.value).length;
             return (
               <button
                 key={opt.value}
@@ -1419,7 +1435,7 @@ function CreativesGrid({
       {filteredAds.length === 0 ? (
         <div className="text-center py-12 text-gray-500">
           <p className="text-sm">
-            {ads.length === 0
+            {visibleAds.length === 0
               ? "لا توجد إعلانات في هذه الفترة"
               : "لا توجد إعلانات مطابقة"}
           </p>
