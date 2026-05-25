@@ -29,8 +29,14 @@ import type { Json } from "@/lib/supabase/database.types";
  *       ad_group, ad_group_ad statuses). Cached rows from v5 contain
  *       ad-level-only status; bump invalidates so badges accurately
  *       reflect whether the ad is currently serving.
+ * - v7: M-PMax retail variants removed — PMAX_PRODUCT_GROUP +
+ *       PMAX_SHOPPING_PRODUCT no longer fetched or normalized.
+ *       Cached UnifiedAd[] rows from v6 containing these variants
+ *       would fail discriminated-union narrowing in the renderAdCard
+ *       switch; bump invalidates so all clients refetch the
+ *       narrower union.
  */
-const CACHE_SCHEMA_VERSION = "v6";
+const CACHE_SCHEMA_VERSION = "v7";
 
 const CACHE_TTL_MINUTES = 15;
 

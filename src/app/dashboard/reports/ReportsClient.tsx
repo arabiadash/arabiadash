@@ -34,8 +34,6 @@ import KpiCard, { type KpiCardProps } from "@/components/reports/KpiCard";
 // via renderAdCard below; M5/M6 variants continue using the inline
 // CreativeCard so existing render behavior stays byte-for-byte identical.
 import { PMaxAssetGroupCard } from "@/components/creatives/PMaxAssetGroupCard";
-import { PMaxProductGroupCard } from "@/components/creatives/PMaxProductGroupCard";
-import { PMaxShoppingProductCard } from "@/components/creatives/PMaxShoppingProductCard";
 import type { Workspace, WorkspaceConnection } from "@/lib/workspaces";
 import {
   useInsights,
@@ -1865,12 +1863,6 @@ const CREATIVES_PAGE_SIZE = 20;
  * PMaxAssetGroupModalContent early branch (tabbed UI for images / videos
  * / headlines / descriptions / extras). The compact card hands off to
  * the modal for any non-summary surface.
- *
- * Remaining v1 limitations (deferred to follow-up work):
- *  - PMAX_PRODUCT_GROUP and PMAX_SHOPPING_PRODUCT still render read-only;
- *    those variants are currently filtered out of the creatives grid via
- *    the visibleAds memo in CreativesGrid (ADR-013 + 22b9b0c filter), so
- *    onClick wiring there isn't user-visible yet.
  */
 function renderAdCard(
   ad: UnifiedAd,
@@ -1890,10 +1882,6 @@ function renderAdCard(
           onClick={sharedProps.onClick}
         />
       );
-    case "PMAX_PRODUCT_GROUP":
-      return <PMaxProductGroupCard ad={ad} />;
-    case "PMAX_SHOPPING_PRODUCT":
-      return <PMaxShoppingProductCard ad={ad} />;
     case "RSA":
     case "RDA":
     case "IMAGE_AD":
@@ -1926,26 +1914,8 @@ function CreativesGrid({
   const [selectedAd, setSelectedAd] = useState<UnifiedAd | null>(null);
   const [visibleCount, setVisibleCount] = useState(CREATIVES_PAGE_SIZE);
 
-  // ADR-013: PMAX_PRODUCT_GROUP and PMAX_SHOPPING_PRODUCT are bidding
-  // categories and Merchant Center SKUs, not creative-level entities.
-  // Filter applies to Google data only — Meta API does not produce
-  // PMAX variants. See visibleGoogleAdsCount in ReportsClient (parent
-  // scope) for the duplicate site; extract to shared util on third use.
-  // PMAX_ASSET_GROUP stays visible as the campaign-level creative unit
-  // for PMax. Backend mergers stay intact for a future "PMax Product
-  // Deep Dive" surface.
-  const visibleAds = useMemo(
-    () =>
-      ads.filter(
-        (ad) =>
-          ad.ad_type !== "PMAX_PRODUCT_GROUP" &&
-          ad.ad_type !== "PMAX_SHOPPING_PRODUCT"
-      ),
-    [ads]
-  );
-
   const filteredAds = useMemo(() => {
-    let result = [...visibleAds];
+    let result = [...ads];
     if (statusFilter !== "all") {
       result = result.filter((ad) => ad.status === statusFilter);
     }
@@ -1955,7 +1925,7 @@ function CreativesGrid({
       return bVal - aVal;
     });
     return result;
-  }, [visibleAds, statusFilter, sortBy]);
+  }, [ads, statusFilter, sortBy]);
 
   // Reset pagination when the filtered list identity changes (status filter,
   // sort change, or upstream ads refresh). Without this, switching from a
@@ -1992,8 +1962,8 @@ function CreativesGrid({
           {filterOptions.map((opt) => {
             const count =
               opt.value === "all"
-                ? visibleAds.length
-                : visibleAds.filter((a) => a.status === opt.value).length;
+                ? ads.length
+                : ads.filter((a) => a.status === opt.value).length;
             return (
               <button
                 key={opt.value}
@@ -2029,7 +1999,7 @@ function CreativesGrid({
       {filteredAds.length === 0 ? (
         <div className="text-center py-12 text-gray-500">
           <p className="text-sm">
-            {visibleAds.length === 0
+            {ads.length === 0
               ? "لا توجد إعلانات في هذه الفترة"
               : "لا توجد إعلانات مطابقة"}
           </p>
@@ -2382,20 +2352,7 @@ export default function ReportsClient({
     ...dateRangeValueToOptions(dateRange),
   });
 
-  // ADR-013: PMAX_PRODUCT_GROUP and PMAX_SHOPPING_PRODUCT are bidding
-  // categories and Merchant Center SKUs, not creative-level entities.
-  // Filter applies to Google data only — Meta API does not produce
-  // PMAX variants. See visibleAds in CreativesGrid (ReportsClient
-  // ~L1343) for the duplicate site; extract to shared util on third use.
-  const visibleGoogleAdsCount = useMemo(
-    () =>
-      googleAds.filter(
-        (ad) =>
-          ad.ad_type !== "PMAX_PRODUCT_GROUP" &&
-          ad.ad_type !== "PMAX_SHOPPING_PRODUCT"
-      ).length,
-    [googleAds]
-  );
+  const visibleGoogleAdsCount = googleAds.length;
 
   // Phase 4.8 M4 Commit 2 — filter, status filter, sort pipeline
   const processedGoogleCampaigns = useMemo(() => {

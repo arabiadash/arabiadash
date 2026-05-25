@@ -6,6 +6,43 @@
 **Supersedes**: prior draft of ADR-013 (asset-level only, retail deferred) — rejected on no-deferrals principle
 **Related**: ADR-005 (Google integration + multi-currency), ADR-008 (no silent defaults), ADR-011 (two-query GAQL purchase filter — reused at asset_group AND product_group level), ADR-012 (Google asset extensions — per-type query pattern + hardened error logging carry over), Memory #27 (CORE PRINCIPLE — build for long-term best-fit), Memory #29 (design for thousands of future Saudi/Gulf ecommerce; typical persona = PMax + Shopping + RDA), Memory #18 (PMax priority), Memory #5 (creative-level analysis = highest-value reporting feature)
 
+## Update — 2026-05-25: PMax Retail Variants Removed
+
+**Status:** Superseded for PMAX_PRODUCT_GROUP + PMAX_SHOPPING_PRODUCT
+**Commit:** see `git log --grep="remove PMax product_group + shopping_product variants from backend"` (self-referential — SHA omitted to avoid amend churn)
+
+The PMAX_PRODUCT_GROUP and PMAX_SHOPPING_PRODUCT variants documented
+in Decision 1 / Decision 2 / Decision 3 / Alternatives 5+6 /
+Implementation Plan (Commits 6, 7, 8a, 8b, 11) have been removed
+from the backend entirely.
+
+**Rationale:** Products inside a Performance Max campaign don't
+conceptually belong in a "Creatives" surface. The Creatives section
+is for marketing assets (images, videos, headlines, descriptions) —
+product-level performance is a separate analytics concern that
+would be implemented as a dedicated "Shopping Performance" or
+"Product Analytics" feature with its own data layer, not as
+creative cards.
+
+The hide-from-UI workaround (commit 22b9b0c) was preserving
+~1,150 LOC of unused data ingest + caching for a "maybe later"
+feature that would have its own architecture anyway. Removed per
+YAGNI + conceptual cleanliness.
+
+**What survives:**
+- PMAX_ASSET_GROUP (Decision 4+) — the actual PMax creative surface,
+  fully functional with compact card + 5-tab modal
+- All Search / Display / Shopping campaign-level metrics —
+  unchanged
+- product_group_view / shopping_performance_view GAQL queries are
+  gone from this codebase; reimplementable from the historical
+  recon docs if Product Analytics is ever built as a feature.
+
+The historical Decision sections below are preserved for context
+trail.
+
+---
+
 ## Context
 
 Performance Max campaigns differ structurally from every prior Google milestone (M4 campaigns, M5 text ads, M6 asset extensions). PMax has no `ad_group_ad`, no `ad_group_ad_asset_view` — the existing 5-pass `getAds()` flow returns ZERO rows for PMax campaigns. PMax uses `asset_group` as the row-level entity and `asset_group_asset` for assets within each group, plus retail-specific resources (`asset_group_product_group_view`, `shopping_performance_view`) for product-feed-driven accounts.

@@ -193,12 +193,6 @@ export interface UnifiedAdExtensions {
  *  - META_AD: All Meta ad types (image/video/carousel/catalog disambiguated
  *    via `type_data.subType`)
  *  - PMAX_ASSET_GROUP: Google Performance Max asset_group (M-PMax)
- *  - PMAX_PRODUCT_GROUP: Google Performance Max retail product_group row
- *    (M-PMax retail surface — sibling row to PMAX_ASSET_GROUP for accounts
- *    with Shopping/retail product feeds)
- *  - PMAX_SHOPPING_PRODUCT: individual Merchant Center product row (SKU
- *    level) from shopping_performance_view. Sibling to PMAX_PRODUCT_GROUP
- *    — product_groups are filter buckets, shopping_products are leaf SKUs.
  *  - UNKNOWN_GOOGLE: Google ad types not yet specifically modeled (Shopping,
  *    App, Call, Smart Campaign, Demand Gen, etc.) — render falls through to
  *    placeholder; type kept for diagnostic visibility
@@ -209,8 +203,6 @@ export type AdType =
   | "IMAGE_AD"
   | "META_AD"
   | "PMAX_ASSET_GROUP"
-  | "PMAX_PRODUCT_GROUP"
-  | "PMAX_SHOPPING_PRODUCT"
   | "UNKNOWN_GOOGLE";
 
 /**
@@ -455,115 +447,6 @@ export interface UnifiedAdPmaxAssetGroup extends UnifiedAdCommon {
 }
 
 /**
- * PMAX_PRODUCT_GROUP — Google Performance Max retail product_group row.
- * Phase 4.8 M-PMax. Sibling row to PMAX_ASSET_GROUP for retail/Shopping
- * Performance Max accounts (per ADR-013 Decision 2 — row-per-asset-group
- * AND row-per-product-group as top-level UnifiedAd entries).
- *
- * Shape FINALIZED in Commit 6 via Q7 field-isolation testing against
- * `asset_group_product_group_view` — see docs/recon/pmax-recon-stage-2-3-
- * 2026-05-24.md Phase 3 Retail section. Common metrics live in the
- * UnifiedAdCommon block; variant-specific identifiers + the structured
- * dimension path live here.
- */
-export interface UnifiedAdPmaxProductGroup extends UnifiedAdCommon {
-  ad_type: "PMAX_PRODUCT_GROUP";
-  type_data: {
-    /** Parent asset_group reference — product_groups live under asset_groups. */
-    assetGroupId: string;
-    assetGroupName: string;
-    /**
-     * Listing-group-filter resource ID (numeric, stringified) — stable
-     * cross-reference key with `shopping_performance_view` (Commit 7) and
-     * with the per-product-group purchase merger (Commit 8). The
-     * `asset_group_product_group_view.resource_name` has this ID as its
-     * `~`-separated suffix, but exposing it as a first-class field keeps
-     * downstream joins explicit.
-     */
-    listingGroupFilterId: string;
-    /**
-     * Structured dimension path from `asset_group_listing_group_filter.path`.
-     * Each entry is one dimension level in the listing-group tree. Tri-state:
-     *  - Empty array = root catch-all ("All products" / everything-else bucket)
-     *  - Entry with `value` undefined = subdivision parent (no specific bucket,
-     *    just "split by this dimension" — e.g. `{dimension: "product_item_id"}`)
-     *  - Entry with `value` defined = specific leaf bucket
-     *    (e.g. `{dimension: "product_item_id", value: "1001595639"}`)
-     * Multi-level paths are arrays of multiple entries (each level subdivides
-     * further). UI renders as breadcrumbs in the PMaxProductGroupCard.
-     */
-    productGroupDimensionPath: Array<{ dimension: string; value?: string }>;
-    /**
-     * Derived flag — true iff `productGroupDimensionPath.length === 0`
-     * (root catch-all row). Surfaced for cheap UI branching so the card
-     * doesn't have to re-derive emptiness at render time.
-     */
-    isRootGroup: boolean;
-  };
-}
-
-/**
- * PMAX_SHOPPING_PRODUCT — individual Merchant Center product row (SKU-level)
- * from `shopping_performance_view`. Phase 4.8 M-PMax Commit 7. Sibling row
- * to PMAX_PRODUCT_GROUP: product_groups are user-defined filter buckets in
- * the listing tree, shopping_products are the leaf SKUs themselves.
- *
- * Shape finalized in Commit 7 via Q8 field-isolation testing — see
- * docs/recon/pmax-recon-stage-2-3-2026-05-24.md Phase 4 Shopping section.
- * Three fields from the original ADR-013 spec were dropped after Q8 proved
- * them unpopulatable from this resource:
- *  - productImageUrl, productPrice — not exposed by shopping_performance_view
- *    segments; available only via separate `shopping_product` resource
- *    (deferred to a future commit).
- *  - assetGroupId / assetGroupName / listingGroupFilterId — JOIN from
- *    shopping_performance_view to asset_group_listing_group_filter rejected
- *    at runtime (query_error 48). Cross-reference deferred until a concrete
- *    UI use case justifies post-fetch joining.
- *
- * See ADR-013 Alternative 6 (rejected lazy-data-availability anti-pattern)
- * for the rationale on dropping rather than stubbing.
- */
-export interface UnifiedAdPmaxShoppingProduct extends UnifiedAdCommon {
-  ad_type: "PMAX_SHOPPING_PRODUCT";
-  type_data: {
-    /**
-     * Merchant Center product offer ID. Mixed-format per Q8 recon: this
-     * resource returns SKUs with a `"p"` prefix (e.g. `"p1001595639"`)
-     * while `asset_group_listing_group_filter.path` returns them unprefixed
-     * (`"1001595639"`). Surfaced verbatim — any future cross-reference
-     * logic strips the prefix.
-     */
-    productId: string;
-    productTitle?: string;
-    /** Merchant Center brand attribute. Feed-dependent; often empty. */
-    productBrand?: string;
-    /**
-     * Raw resource_name format from `segments.product_category_level1`
-     * (e.g. `"productCategoryConstants/LEVEL1~469"`). Translation to a
-     * human-readable category name requires a separate
-     * `product_category_constant` lookup query — deferred to a future
-     * commit; v1 surfaces the raw value.
-     */
-    productCategoryLevel1?: string;
-    /** Merchant Center product_type level 1. Feed-dependent; often empty. */
-    productTypeL1?: string;
-    /**
-     * Product condition mapped from Google's `ProductConditionEnum` integer
-     * (verified against proto: 0=UNSPECIFIED, 1=UNKNOWN, 3=NEW, 4=REFURBISHED,
-     * 5=USED — non-contiguous, no value 2). Unknown integers fall through to
-     * `OTHER_${n}` per `readProductCondition` defensive fallback.
-     */
-    productCondition?:
-      | "UNSPECIFIED"
-      | "UNKNOWN"
-      | "NEW"
-      | "REFURBISHED"
-      | "USED"
-      | `OTHER_${number}`;
-  };
-}
-
-/**
  * UNKNOWN_GOOGLE — fallback for Google ad types not yet specifically modeled
  * (Shopping, App, Call, Smart Campaign, Demand Gen, Video, etc.). Renders as
  * "بدون صورة" placeholder; type kept for diagnostic visibility (the raw
@@ -591,8 +474,6 @@ export type UnifiedAd =
   | UnifiedAdImageAd
   | UnifiedAdMeta
   | UnifiedAdPmaxAssetGroup
-  | UnifiedAdPmaxProductGroup
-  | UnifiedAdPmaxShoppingProduct
   | UnifiedAdUnknownGoogle;
 
 // =================================================================
