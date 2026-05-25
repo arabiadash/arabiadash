@@ -172,6 +172,24 @@ export interface UnifiedAdKeyword {
   /** Average CPC in account currency (cost_micros / 1M / clicks aggregated by Google). */
   cpc: number;
 
+  // Conversion attribution (M7.5 / ADR-016) — populated via the
+  // ADR-011-family fetchPurchaseKeywordTotals two-query merge.
+  //
+  // null = hasConversionData is false (cache miss / no purchase actions
+  //   configured / API failure) — UI renders "—" with tooltip
+  // number = real value (may be 0 — legitimate "tracking configured,
+  //   zero purchases attributed to this keyword") — UI renders "0 ر.س" / "0"
+  purchases?: number | null;
+  revenue?: number | null;
+  /** revenue / spend when both defined and spend > 0. Null otherwise. */
+  roas?: number | null;
+  /**
+   * Mirrors UnifiedAdCommon.hasConversionData semantic. False when the
+   * purchaseActionIds cache is missing / empty / API failed, so the
+   * "0 vs —" distinction in the UI matches the M-PMax convention.
+   */
+  hasConversionData?: boolean;
+
   // Quality info — undefined when Google lacks enough data to compute.
   // UI must render "—" not "0" for these.
   qualityScore?: number; // 1-10 integer

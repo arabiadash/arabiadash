@@ -107,6 +107,14 @@ export interface FetchKeywordsOptions {
    * "all"     = status != 'REMOVED' (includes PAUSED).
    */
   statusFilter: KeywordStatusFilter;
+  /**
+   * Purchase conversion-action IDs filter for the M7.5 ADR-011-family
+   * merger. null = cache miss / no actions configured → keyword rows
+   * surface hasConversionData=false + purchases/revenue=null. Set =
+   * filter the segmented Q2 conversions to only these action IDs (the
+   * 7th ADR-011 merger sibling, mirrors fetchPurchaseAssetGroupTotals).
+   */
+  purchaseActionIds?: Set<string> | null;
 }
 
 /**
@@ -128,6 +136,7 @@ export async function fetchKeywords(
     dateTo,
     adGroupIds,
     statusFilter,
+    purchaseActionIds,
   } = options;
 
   if (adGroupIds.size === 0) return new Map();
@@ -191,7 +200,20 @@ export async function fetchKeywords(
         AND segments.date BETWEEN '${dateFrom}' AND '${dateTo}'
     `;
 
-    const rows = await customer.query(query);
+    // Parallel: Q1 (identity + cost/clicks/impressions/CTR/CPC) AND Q2
+    // (ADR-011-family purchase totals filtered by purchaseActionIds).
+    // Both reach Google independently — wall time = max(Q1, Q2) instead of sum.
+    const [rows, purchaseTotals] = await Promise.all([
+      customer.query(query),
+      fetchPurchaseKeywordTotals({
+        customer,
+        adGroupIds,
+        dateFrom,
+        dateTo,
+        statusFilter,
+        purchaseActionIds: purchaseActionIds ?? null,
+      }),
+    ]);
 
     const byAdGroup = new Map<string, UnifiedAdKeyword[]>();
 
@@ -235,17 +257,54 @@ export async function fetchKeywords(
       const clicks = Number(row.metrics?.clicks ?? 0);
       const ctrRaw = Number(row.metrics?.ctr ?? 0);
       const avgCpcMicros = Number(row.metrics?.average_cpc ?? 0);
+      const spend = costMicros / 1_000_000;
+
+      // ADR-016 §Decision 7 — purchase attribution semantic mirrors
+      // M-PMax fetchPurchaseAssetGroupTotals. null Map = no
+      // purchaseActionIds → hasConversionData=false → purchases/revenue
+      // surface as null → UI renders "—" with tooltip. Map entry present
+      // (even with {0,0}) = "tracking configured, real-zero purchases" →
+      // renders "0 ر.س" / "0". Map present but key absent = same as
+      // null Map for that specific keyword.
+      //
+      // CRITICAL — composite key (ad_group_id|criterion_id): ad_group_criterion
+      // .criterion_id is NOT unique account-wide; the same numeric ID is
+      // reused across ad_groups when keyword text matches (e.g., "عطور"
+      // → criterion_id=85274071 in 3 different ad_groups on imaa). Keying
+      // the Map by criterion_id alone collides → each colliding keyword
+      // receives summed purchases from ALL ad_groups (~11.6% over-count
+      // surfaced pre-merge on perfumes-KSA). See
+      // feedback_merger_composite_keys.md for the lesson.
+      const purchaseEntry = purchaseTotals?.get(
+        `${adGroupId}|${criterionId}`
+      );
+      const hasConversionData =
+        purchaseTotals != null && purchaseEntry !== undefined;
+      const purchases: number | null = hasConversionData
+        ? purchaseEntry!.purchases
+        : null;
+      const revenue: number | null = hasConversionData
+        ? purchaseEntry!.revenue
+        : null;
+      const roas: number | null =
+        hasConversionData && spend > 0
+          ? purchaseEntry!.revenue / spend
+          : null;
 
       const keyword: UnifiedAdKeyword = {
         id: String(criterionId),
         text,
         matchType,
         status,
-        spend: costMicros / 1_000_000,
+        spend,
         impressions,
         clicks,
         ctr: ctrRaw * 100, // Google returns 0.123 for 12.3% — normalize to UI percent
         cpc: avgCpcMicros / 1_000_000,
+        purchases,
+        revenue,
+        roas,
+        hasConversionData,
         qualityScore,
         creativeQualityScore: readQualityLabel(qualityInfo?.creative_quality_score),
         postClickQualityScore: readQualityLabel(
@@ -268,5 +327,164 @@ export async function fetchKeywords(
     const msg = formatGoogleError(error);
     console.error("[google-ads/keywords] fetchKeywords failed:", msg);
     return new Map();
+  }
+}
+
+// =================================================================
+// ADR-016 / M7.5 — 7th sibling of the ADR-011 merger family.
+// Mirrors fetchPurchaseAssetGroupTotals (google.ts) at keyword level.
+// =================================================================
+
+/**
+ * Loose customer-handle type — google-ads-api's Customer is dynamic.
+ * Same pragmatic exception as in extensions.ts (no clean SDK type).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type CustomerHandle = any;
+
+interface FetchPurchaseKeywordTotalsOptions {
+  customer: CustomerHandle;
+  adGroupIds: Set<string>;
+  dateFrom: string;
+  dateTo: string;
+  statusFilter: KeywordStatusFilter;
+  /**
+   * Set of conversion_action IDs categorized as PURCHASE/STORE_SALE.
+   *  - null = cache miss / actions never synced → returns null
+   *  - empty Set = configured but no PURCHASE-category actions → returns null
+   *  - non-empty Set = real filter applied; returns Map
+   * Matches the strict semantic from fetchPurchaseAssetGroupTotals
+   * (Commit 5, ADR-013) which Commit 4b retroactively aligned all
+   * mergers to.
+   */
+  purchaseActionIds: Set<string> | null;
+}
+
+/**
+ * Segmented purchase merger at KEYWORD LEVEL — 7th sibling of the
+ * ADR-011 merger family (campaign / time-series / ad / asset_group /
+ * product_group [removed M-PMax-retail] / shopping_product [same] /
+ * KEYWORD). Same two-query GAQL pattern: cost+clicks live in
+ * fetchKeywords (Q1 above), this query carries only conversions
+ * segmented by segments.conversion_action and filtered to the
+ * customer's purchase action IDs.
+ *
+ * Returns null when:
+ * - purchaseActionIds is null (cache miss / actions never synced)
+ * - purchaseActionIds.size === 0 (configured but no PURCHASE actions)
+ * - Google API call fails (caught here, logged, returns null)
+ *
+ * Returned Map: ad_group_criterion.criterion_id (string) -> {purchases, revenue}.
+ * "First sighting" Map semantic preserved: every keyword that appears
+ * in the GAQL response gets an entry (initialized at {0,0}) even when
+ * none of its rows match a purchase action — this preserves the
+ * "tracking configured + zero" vs "not configured / no data"
+ * distinction in the UI (renders "0 ر.س" vs "—" per ADR-016 §Decision 7).
+ *
+ * Caller (fetchKeywords above) uses the Map presence + entry presence
+ * to compute hasConversionData semantically. M-PMax convention carried.
+ */
+async function fetchPurchaseKeywordTotals(
+  options: FetchPurchaseKeywordTotalsOptions
+): Promise<Map<string, { purchases: number; revenue: number }> | null> {
+  const {
+    customer,
+    adGroupIds,
+    dateFrom,
+    dateTo,
+    statusFilter,
+    purchaseActionIds,
+  } = options;
+
+  if (purchaseActionIds === null) return null;
+  if (purchaseActionIds.size === 0) return null;
+  if (adGroupIds.size === 0) return null;
+
+  try {
+    // Match the Q1 status filter exactly so the two result sets are
+    // joinable on criterion_id without ghost rows.
+    const statusClause =
+      statusFilter === "all"
+        ? "ad_group_criterion.status != 'REMOVED'"
+        : "ad_group_criterion.status = 'ENABLED'";
+
+    const adGroupList = Array.from(adGroupIds).join(", ");
+
+    const query = `
+      SELECT
+        ad_group.id,
+        ad_group_criterion.criterion_id,
+        segments.conversion_action,
+        metrics.conversions,
+        metrics.conversions_value
+      FROM keyword_view
+      WHERE ${statusClause}
+        AND ad_group_criterion.type = 'KEYWORD'
+        AND ad_group_criterion.negative = FALSE
+        AND campaign.advertising_channel_type = 'SEARCH'
+        AND ad_group.id IN (${adGroupList})
+        AND segments.date BETWEEN '${dateFrom}' AND '${dateTo}'
+    `;
+
+    const rows = await customer.query(query);
+
+    const byCriterion = new Map<
+      string,
+      { purchases: number; revenue: number }
+    >();
+
+    for (const row of rows) {
+      const criterionIdRaw = row.ad_group_criterion?.criterion_id;
+      const adGroupIdRaw = row.ad_group?.id;
+      if (
+        criterionIdRaw === undefined ||
+        criterionIdRaw === null ||
+        adGroupIdRaw === undefined ||
+        adGroupIdRaw === null
+      ) {
+        continue;
+      }
+      // Composite Map key (ad_group_id|criterion_id) — criterion_id is
+      // NOT unique account-wide; keying by criterion_id alone would
+      // collide across ad_groups and over-attribute purchases to
+      // colliding keywords. Verified empirically on imaa 2026-05-27
+      // (11 of 192 criterion_ids span multiple ad_groups). See caller
+      // (fetchKeywords merge step above) for the matching lookup +
+      // feedback_merger_composite_keys.md for the pre-push probe
+      // discipline lesson.
+      const compositeKey = `${adGroupIdRaw}|${criterionIdRaw}`;
+
+      // First-sighting init: every keyword with any segmented GAQL row
+      // gets an entry (initialized {0,0}) even if NONE of its rows
+      // match a purchase action. This produces hasConversionData=true
+      // in the caller — preserving the "configured + zero purchases"
+      // vs "no data" distinction (M-PMax precedent).
+      const existing = byCriterion.get(compositeKey) ?? {
+        purchases: 0,
+        revenue: 0,
+      };
+
+      const resourcePath = String(row.segments?.conversion_action ?? "");
+      const actionId = resourcePath.split("/").pop() ?? "";
+
+      if (purchaseActionIds.has(actionId)) {
+        const conversions = Number(row.metrics?.conversions) || 0;
+        const conversionsValue = Number(row.metrics?.conversions_value) || 0;
+        existing.purchases += conversions;
+        existing.revenue += conversionsValue;
+      }
+
+      byCriterion.set(compositeKey, existing);
+    }
+
+    return byCriterion;
+  } catch (error) {
+    const msg = formatGoogleError(error);
+    console.error(
+      "[google-ads/keywords] fetchPurchaseKeywordTotals failed:",
+      msg,
+      "— degrading keyword purchases/revenue to null"
+    );
+    return null;
   }
 }
