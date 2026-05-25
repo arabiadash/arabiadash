@@ -381,6 +381,9 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       }),
       // Phase 4.8 M7 — Keywords per ADR-015. Strict ENABLED default per
       // §Decision 5. UI re-fetches with statusFilter='all' if user toggles.
+      // M7.5 / ADR-016: purchaseActionIds plumbed through for the 7th
+      // ADR-011 merger sibling (fetchPurchaseKeywordTotals). null/empty
+      // surface as hasConversionData=false at the keyword level.
       fetchKeywords({
         customerId: this.customerId,
         refreshToken: this.refreshToken,
@@ -389,6 +392,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
         dateTo,
         adGroupIds: adGroupIdsInScope,
         statusFilter: "enabled",
+        purchaseActionIds: this.purchaseActionIds,
       }),
     ]);
 

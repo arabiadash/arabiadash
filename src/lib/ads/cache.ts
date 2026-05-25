@@ -49,8 +49,17 @@ import type { Json } from "@/lib/supabase/database.types";
  *       + Memory #28 cache-bump verification protocol (4th attempt;
  *       v7→v8 caught the M5/M8 GAQL field-name bug pre-push, this
  *       attempt continues the protocol's track record).
+ * - v10: M7.5 Keywords Conversion Metrics — UnifiedAdKeyword now
+ *       includes purchases?, revenue?, roas?, hasConversionData? per
+ *       ADR-016 §Decision 1. Populated via 7th ADR-011 merger sibling
+ *       (fetchPurchaseKeywordTotals — mirrors fetchPurchaseAssetGroupTotals).
+ *       Cached v9 rows lack these fields; bump invalidates so all
+ *       clients fetch fresh data including per-keyword conversion
+ *       attribution. Per ADR-016 + Memory #28 verification protocol
+ *       (5th attempt — protocol caught M5/M8 GAQL bugs on v7→v8,
+ *       passed clean on v8→v9).
  */
-const CACHE_SCHEMA_VERSION = "v9";
+const CACHE_SCHEMA_VERSION = "v10";
 
 const CACHE_TTL_MINUTES = 15;
 

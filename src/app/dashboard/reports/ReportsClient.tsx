@@ -859,7 +859,13 @@ function AdDetailModal({
   // and full list. Status filter is enforced server-side (strict ENABLED
   // per ADR-015 §Decision 5; UI re-fetch toggle deferred to M7.1).
   const [keywordSortKey, setKeywordSortKey] = useState<
-    "spend" | "impressions" | "clicks" | "ctr" | "qualityScore"
+    | "spend"
+    | "impressions"
+    | "clicks"
+    | "ctr"
+    | "qualityScore"
+    | "revenue"
+    | "purchases"
   >("spend");
   const [keywordMatchFilter, setKeywordMatchFilter] = useState<
     "all" | "EXACT" | "PHRASE" | "BROAD"
@@ -874,10 +880,17 @@ function AdDetailModal({
       result = result.filter((k) => k.matchType === keywordMatchFilter);
     }
     const sorted = [...result].sort((a, b) => {
+      // Undefined / null values sink to the bottom for desc sorts —
+      // matches M7's qualityScore precedent. Applies to revenue +
+      // purchases too (null when hasConversionData=false).
       if (keywordSortKey === "qualityScore") {
-        // Undefined quality scores sink to the bottom on sort desc
         const av = a.qualityScore ?? -Infinity;
         const bv = b.qualityScore ?? -Infinity;
+        return bv - av;
+      }
+      if (keywordSortKey === "revenue" || keywordSortKey === "purchases") {
+        const av = a[keywordSortKey] ?? -Infinity;
+        const bv = b[keywordSortKey] ?? -Infinity;
         return bv - av;
       }
       return (b[keywordSortKey] ?? 0) - (a[keywordSortKey] ?? 0);
@@ -894,6 +907,32 @@ function AdDetailModal({
     for (const k of keywordsRaw) counts[k.matchType] += 1;
     return counts;
   }, [keywordsRaw]);
+
+  // M7.5 / ADR-016 §Decision 2 — KPI strip totals computed from the
+  // CURRENTLY-VISIBLE (filtered + sorted, but pre-pagination) set.
+  // Reactive to filter changes: switching to EXACT-only updates totals
+  // to reflect only EXACT keywords. ADR-016 §Open Items §2 flagged
+  // this choice for post-deploy UX evaluation (vs computing from all
+  // keywords regardless of filter).
+  //
+  // Empty-state semantic (ADR-016 §Decision 7): if NO visible keyword
+  // has hasConversionData=true, both totals render "—" with tooltip.
+  // Otherwise sum across the visible keywords skipping null entries.
+  const keywordKpiTotals = useMemo(() => {
+    let anyHasConversionData = false;
+    let revenueSum = 0;
+    let purchasesSum = 0;
+    for (const k of filteredKeywords) {
+      if (k.hasConversionData) {
+        anyHasConversionData = true;
+        if (k.revenue != null) revenueSum += k.revenue;
+        if (k.purchases != null) purchasesSum += k.purchases;
+      }
+    }
+    return anyHasConversionData
+      ? { revenue: revenueSum, purchases: purchasesSum, hasData: true as const }
+      : { revenue: null, purchases: null, hasData: false as const };
+  }, [filteredKeywords]);
 
   const totalKeywordCount = keywordsRaw.length;
 
@@ -951,7 +990,7 @@ function AdDetailModal({
       onClick={onClose}
     >
       <div
-        className="bg-white rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+        className="bg-white rounded-xl max-w-4xl w-full max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between p-4 border-b border-gray-100 sticky top-0 bg-white">
@@ -1296,6 +1335,53 @@ function AdDetailModal({
                 })}
               </div>
 
+              {/* M7.5 / ADR-016 §Decision 2 — KPI strip above table.
+                  Totals computed from currently-visible (filtered) set,
+                  reactive to filter changes. Empty-state ("—") per
+                  §Decision 7 when no visible keyword has conversion data. */}
+              <div className="mb-3 grid grid-cols-2 gap-2">
+                <div className="bg-white rounded-lg p-2.5 border border-gray-200">
+                  <p className="text-[10px] text-gray-500 mb-0.5">
+                    إجمالي المبيعات
+                  </p>
+                  {keywordKpiTotals.hasData ? (
+                    <p className="text-sm font-bold text-gray-800 tabular-nums">
+                      {formatAndConvert(
+                        keywordKpiTotals.revenue,
+                        (ad.currency as Currency) || accountCurrency,
+                        displayCurrency
+                      )}
+                    </p>
+                  ) : (
+                    <p
+                      className="text-sm font-bold text-gray-400"
+                      title="لا توجد بيانات تحويل لهذا الحساب"
+                    >
+                      —
+                    </p>
+                  )}
+                </div>
+                <div className="bg-white rounded-lg p-2.5 border border-gray-200">
+                  <p className="text-[10px] text-gray-500 mb-0.5">
+                    إجمالي عمليات الشراء
+                  </p>
+                  {keywordKpiTotals.hasData ? (
+                    <p className="text-sm font-bold text-gray-800 tabular-nums">
+                      {Math.round(keywordKpiTotals.purchases).toLocaleString(
+                        "en-US"
+                      )}
+                    </p>
+                  ) : (
+                    <p
+                      className="text-sm font-bold text-gray-400"
+                      title="لا توجد بيانات تحويل لهذا الحساب"
+                    >
+                      —
+                    </p>
+                  )}
+                </div>
+              </div>
+
               {/* Filter + sort controls */}
               <div className="mb-3 flex flex-wrap gap-2 text-xs">
                 <select
@@ -1309,6 +1395,8 @@ function AdDetailModal({
                   aria-label="ترتيب الكلمات"
                 >
                   <option value="spend">الترتيب: التكلفة</option>
+                  <option value="revenue">الترتيب: مبيعات</option>
+                  <option value="purchases">الترتيب: عمليات الشراء</option>
                   <option value="impressions">الترتيب: الانطباعات</option>
                   <option value="clicks">الترتيب: النقرات</option>
                   <option value="ctr">الترتيب: CTR</option>
@@ -1346,6 +1434,12 @@ function AdDetailModal({
                         التكلفة
                       </th>
                       <th className="text-left px-2 py-2 font-medium">
+                        مبيعات
+                      </th>
+                      <th className="text-left px-2 py-2 font-medium">
+                        عمليات الشراء
+                      </th>
+                      <th className="text-left px-2 py-2 font-medium">
                         النقرات
                       </th>
                       <th className="text-left px-2 py-2 font-medium">
@@ -1375,6 +1469,20 @@ function AdDetailModal({
                             (ad.currency as Currency) || accountCurrency,
                             displayCurrency
                           )}
+                        </td>
+                        <td className="px-2 py-2 text-left tabular-nums text-gray-700">
+                          {k.hasConversionData && k.revenue != null
+                            ? formatAndConvert(
+                                k.revenue,
+                                (ad.currency as Currency) || accountCurrency,
+                                displayCurrency
+                              )
+                            : "—"}
+                        </td>
+                        <td className="px-2 py-2 text-left tabular-nums text-gray-700">
+                          {k.hasConversionData && k.purchases != null
+                            ? Math.round(k.purchases).toLocaleString("en-US")
+                            : "—"}
                         </td>
                         <td className="px-2 py-2 text-left tabular-nums text-gray-700">
                           {Math.round(k.clicks).toLocaleString("en-US")}
