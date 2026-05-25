@@ -235,7 +235,65 @@ Feature commits MUST use branches.
 ## 10. Current state (update after major milestones)
 
 - **Latest commit on origin/main**: see `git log origin/main --oneline -1`
-- **Completed**: Phase 1-3 (backend), 4.1 through 4.5, 4.7 M1 + M2 (Google), 4.8 M1 (per-platform tabs), account selection pivot (PR #21, #22)
-- **In progress**: Phase 4.8 M2 (expanded metrics + tech-debt #15 fix)
-- **Next**: 4.8 M3 (conditional Revenue/ROAS), 4.8 M4 (Dashboard mirror), 4.9 (universal FX live rates)
+- **Completed**: Phase 1-3 (backend), 4.1 through 4.5, 4.7 M1 + M2 (Google), 4.8 M1 (per-platform tabs), account selection pivot (PR #21, #22), Phase 4.8 M2-M6 (metrics expansion, conditional Revenue/ROAS, Dashboard mirror, FX rates, M5 text ads, M6 asset extensions), **Phase 4.8 M-PMax (PR #31, merged May 26, 2026)**
+- **Next**: Phase 4.8 M7 (Keywords for Search ads — `ad_group_criterion` query) OR pre-launch hardening sprint (Issues #1-4, #6) — user choice
 - **Future**: Phase 5 (alerts), 6 (AI), 7 (TikTok), 8 (Snap), 9 (Salla/Zid), 10 (billing), 11 (public launch)
+
+### M-PMax milestone shipped — May 26, 2026 (PR #31)
+
+Architecture (final state after retail-variant removal):
+
+- **PMAX_ASSET_GROUP only** — retail variants (`PMAX_PRODUCT_GROUP` + `PMAX_SHOPPING_PRODUCT`) removed in `bb6eea2` per ADR-013 supersession addendum. Products inside PMax don't belong in a Creatives surface; product-level analytics is a separate concern for a hypothetical future Shopping Performance feature.
+- `PMaxAssetGroupCard` — compact card design, click opens `AdDetailModal` with 5 tabs (الصور / الفيديوهات / العناوين / الأوصاف / معلومات إضافية)
+- Assets grouped inside modal by `fieldType` (MARKETING_IMAGE / SQUARE / PORTRAIT / TALL_PORTRAIT / LOGO + YouTube videos)
+- `asset_group_asset.status` WHERE filter excludes REMOVED links (commit `a3836e7`)
+- `getAds()` simplified from 7-way to 3-way `Promise.all` (asset_groups + assets + asset_group purchase merger)
+
+Effective ad status (commit `e621e9b`):
+
+- `UnifiedAd.status` now reflects effective serving status (min-restrictive rollup of `campaign.status` + `ad_group.status` + `ad_group_ad.status`)
+- `mapAdGroupStatus` mirrors `mapCampaignStatus` (9th instance of the documented integer-drift pattern: 2/3/4 = ENABLED/PAUSED/REMOVED enum convention — see `feedback_resource_name_over_integer_enums.md`)
+- Ads from PAUSED parent campaigns correctly show موقوف instead of false-positive نشط
+
+### Cache schema version history (`src/lib/ads/cache.ts` → `CACHE_SCHEMA_VERSION`)
+
+| Version | Trigger | Commit |
+|---------|---------|--------|
+| v1 | Initial (implicit) | — |
+| v2 | M5 — UnifiedAd gained headlines/descriptions/currency/imageUrl/carouselImages | — |
+| v3 | M6 ADR-012 — UnifiedAd gained `extensions` (sitelinks/callouts/snippets) | — |
+| v4 | M-PMax — UnifiedAd restructured as discriminated union (`ad_type` discriminator + `type_data`) | `b002516` |
+| v5 | `asset_group_asset.status` filter invalidation | `6adeb51` |
+| v6 | Effective ad status semantics (min-restrictive rollup) | `e621e9b` |
+| v7 | PMax retail variants removed | `bb6eea2` |
+
+### Active test accounts
+
+- **imaa perfumes** — Google SAR (re-OAuthed 2026-05-25 after `invalid_grant`), Meta (re-authed 2026-05-26)
+- Production: arabiadash.com (`alkhateib94@gmail.com`)
+
+### Lessons captured this milestone
+
+- **OAuth redirect URIs in external consoles must be typed manually, never pasted** — invisible-char from paste-corruption was the root cause of Issue #33 Meta OAuth "URL Blocked" (resolved 2026-05-26). Visual matching via copy-compare is unreliable.
+- **Cache bumps + silent OAuth failures interact destructively** — the v5→v6 bump in `9caac84` unmasked broken imaa OAuth that had been silently failing, surfaced as fake "0 campaigns regression." Root-cause diagnostic preserved in `docs/recon/pmax-recon-stage-5-2026-05-26.md`.
+- **YAGNI applied successfully mid-milestone** — `PMAX_PRODUCT_GROUP` + `PMAX_SHOPPING_PRODUCT` variants were built, then removed before merge once the user realized they don't conceptually belong in Creatives. Saved future double-work per Memory #27.
+
+### ADR list
+
+- **ADR-005** — Google integration + multi-currency
+- **ADR-008** — No silent defaults
+- **ADR-011** — Two-query GAQL purchase filter (now seven sibling mergers across campaign/time-series/ad/asset_group levels; product_group + shopping_product mergers removed with the variants)
+- **ADR-012** — Google asset extensions architecture
+- **ADR-013** — PMax architecture. **Decisions 1-3 superseded by 2026-05-25 addendum** removing retail variants. `PMAX_ASSET_GROUP` (Decision 4+) remains canonical.
+
+### Open issues (5 open, all production-hardening targets for Phase 11 launch)
+
+| # | Title | Status |
+|---|-------|--------|
+| #1 | Connection UI: delete/reconnect button missing | open |
+| #2 | Silent OAuth failure error distinction | open |
+| #3 | Google OAuth verification (Testing → Production mode) | open |
+| #4 | Trial workspace Infinity exemption broken | open |
+| #6 | Reports Meta-only block (mitigated when Meta connected) | open |
+| #5 | Effective ad status re-ship | **resolved** `e621e9b` |
+| #33 | Meta OAuth setup ("URL Blocked") | **resolved** 2026-05-26 (invisible-char in redirect_uri) |

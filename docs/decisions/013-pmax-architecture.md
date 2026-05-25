@@ -9,7 +9,7 @@
 ## Update — 2026-05-25: PMax Retail Variants Removed
 
 **Status:** Superseded for PMAX_PRODUCT_GROUP + PMAX_SHOPPING_PRODUCT
-**Commit:** see `git log --grep="remove PMax product_group + shopping_product variants from backend"` (self-referential — SHA omitted to avoid amend churn)
+**Commit:** `bb6eea2`
 
 The PMAX_PRODUCT_GROUP and PMAX_SHOPPING_PRODUCT variants documented
 in Decision 1 / Decision 2 / Decision 3 / Alternatives 5+6 /
@@ -290,16 +290,52 @@ The final atomic-commit count may merge or split during execution (e.g., commits
 
 ## Commits
 
-- `6ead05f` — docs(adr): ADR-013 PMax architecture (initial narrower-scope draft, superseded by this rewrite)
+Full M-PMax milestone trail, in chronological order (use `git log bb6eea2` for live verification):
+
+**ADR + foundation**
+- `6ead05f` — docs(adr): ADR-013 PMax architecture (initial narrower-scope draft, superseded)
 - `6bff385` — docs(adr): ADR-013 accepted — full PMax architecture (scope expansion)
 - `b002516` — feat(types): discriminated union foundation + cache v4
 - `b8f896b` — docs(adr): ADR-013 Implementation Plan revised post-Commit-2 atomic
+
+**Backend GAQL queries**
 - `f61e98f` — feat(google): fetchAssetGroups query (Commit 3, ADR-013)
 - `ccf2dd3` — feat(google): asset_group_asset query + hasConversionData retrofit (Commit 4, ADR-013)
 - `d1a8581` — fix(google): restore filtered purchase data on Search/Display ads (Commit 4b, ADR-013)
 - `0cf2ae1` — feat(google): asset_group purchase merger + align all purchase mergers to strict semantic (Commit 5, ADR-013)
-- `6af2626` — feat(google): fetchProductGroups query — retail PMax product-level rows (Commit 6, ADR-013)
+- `6af2626` — feat(google): fetchProductGroups query — retail PMax product-level rows (Commit 6, ADR-013) — *later removed in `bb6eea2`*
 - `1d129dd` — docs(adr): ADR-013 update — add PMAX_SHOPPING_PRODUCT variant + post-Commit-6 housekeeping
-- *(next)* — docs(adr): ADR-013 update — PMAX_SHOPPING_PRODUCT shape revisions post-Q8 field-isolation
-- *(next)* — docs(adr): ADR-013 update — defer Commit 9 (M5/M6 UI extraction) post-M-PMax
-- *(further SHAs added as commits land)*
+- `bd92bbf` — docs(adr): ADR-013 update — PMAX_SHOPPING_PRODUCT shape revisions post-Q8 field-isolation
+- `8dd5970` — feat(google): PMAX_SHOPPING_PRODUCT variant + fetchShoppingProducts query (Commit 7, ADR-013) — *later removed in `bb6eea2`*
+- `cb6165e` — feat(google): fetchPurchaseProductGroupTotals — sixth ADR-011 merger sibling (Commit 8a, ADR-013) — *later removed in `bb6eea2`*
+- `0032208` — feat(google): fetchPurchaseShoppingProductTotals — seventh ADR-011 merger sibling (Commit 8b, ADR-013) — *later removed in `bb6eea2`*
+- `1aeb332` — docs(adr): ADR-013 update — defer Commit 9 (M5/M6 UI extraction) post-M-PMax
+
+**UI components + dispatcher**
+- `20c9e72` — feat(ui): PMaxAssetGroupCard component (Commit 10, ADR-013)
+- `6c89c75` — feat(ui): PMaxProductGroupCard + PMaxShoppingProductCard components (Commit 11, ADR-013) — *both deleted in `bb6eea2`*
+- `6377aae` — feat(ui): ReportsClient PMax dispatcher integration (Commit 12, ADR-013) — FIRST VISUAL CHECKPOINT
+
+**UI fixes + retail-hide workaround (superseded by removal)**
+- `22b9b0c` — fix(ui): hide PMax product/shopping variants from creatives grid — *superseded by `bb6eea2` (variants removed entirely)*
+- `3243642` — fix(ui): align Google creatives tab badge with filtered grid — *partially superseded by `bb6eea2`*
+
+**Asset_group polish + cache invalidation**
+- `a3836e7` — fix(google): hide REMOVED asset_group_asset links from PMax cards
+- `b496e2b` — chore(scripts): add targeted cache invalidation harness
+- `6adeb51` — fix(cache): bump v4 → v5 to invalidate stale PMAX_ASSET_GROUP payloads
+- `08eef62` — feat(ui): compact PMax card + tabbed modal for asset details
+- `fc6c2b2` — feat(ui): refine PMax card identity — campaign name primary, PMax badge added
+
+**Effective ad status saga (correctness fix + ship-revert-reship cycle)**
+- `bc26b17` — chore(recon): Q9 probes for campaign + ad_group status verification
+- `9caac84` — fix(google): effective ad status from campaign/ad_group/ad rollup — *reverted in `3f7c6b8` after fake-regression diagnosis; cause was v5→v6 cache bump unmasking broken imaa OAuth, NOT this fix*
+- `3f7c6b8` — revert: 9caac84 effective ad status fix — caused 0 campaigns regression
+- `ea1ea6d` — docs(recon): Q9 probe findings — campaign + ad_group status verified
+- `e621e9b` — reapply: effective ad status fix (originally 9caac84) — *bumps cache to v6*
+
+**Final scope correction (YAGNI applied mid-milestone)**
+- `bb6eea2` — refactor(google): remove PMax product_group + shopping_product variants from backend — *~1,150 LOC removed; cache v6→v7; supersession addendum added at top of this ADR*
+
+**Close-out**
+- *(this commit)* — docs(m-pmax): final close-out — CLAUDE.md state + ADR-013 SHA backfill
