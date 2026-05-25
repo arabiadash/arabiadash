@@ -798,6 +798,12 @@ interface AdDetailModalProps {
   accountCurrency: Currency;
   displayCurrency: Currency;
   onClose: () => void;
+  /**
+   * M7 / ADR-015 — count of ads sharing the same ad_group as `ad`.
+   * Used in the keywords section badge to surface the keyword-sharing
+   * context. Defaults to 0 when not provided (Meta/PMax callers).
+   */
+  adGroupAdCount?: number;
 }
 
 function AdDetailModal({
@@ -805,6 +811,7 @@ function AdDetailModal({
   accountCurrency,
   displayCurrency,
   onClose,
+  adGroupAdCount = 0,
 }: AdDetailModalProps) {
   // PMAX_ASSET_GROUP gets its own dedicated modal — wholly different
   // shape (tabbed asset surfaces, wider shell, in-modal YouTube embeds,
@@ -846,6 +853,49 @@ function AdDetailModal({
     (img) =>
       img.fieldType === "AD_IMAGE" || img.fieldType.includes("MARKETING_IMAGE")
   );
+
+  // M7 / ADR-015 — keywords section state. Sort + match-type filter
+  // apply client-side (no re-fetch); pagination toggles between top 50
+  // and full list. Status filter is enforced server-side (strict ENABLED
+  // per ADR-015 §Decision 5; UI re-fetch toggle deferred to M7.1).
+  const [keywordSortKey, setKeywordSortKey] = useState<
+    "spend" | "impressions" | "clicks" | "ctr" | "qualityScore"
+  >("spend");
+  const [keywordMatchFilter, setKeywordMatchFilter] = useState<
+    "all" | "EXACT" | "PHRASE" | "BROAD"
+  >("all");
+  const [keywordShowAll, setKeywordShowAll] = useState(false);
+  const KEYWORD_PAGE_SIZE = 50;
+
+  const keywordsRaw = ad.keywords ?? [];
+  const filteredKeywords = useMemo(() => {
+    let result = keywordsRaw;
+    if (keywordMatchFilter !== "all") {
+      result = result.filter((k) => k.matchType === keywordMatchFilter);
+    }
+    const sorted = [...result].sort((a, b) => {
+      if (keywordSortKey === "qualityScore") {
+        // Undefined quality scores sink to the bottom on sort desc
+        const av = a.qualityScore ?? -Infinity;
+        const bv = b.qualityScore ?? -Infinity;
+        return bv - av;
+      }
+      return (b[keywordSortKey] ?? 0) - (a[keywordSortKey] ?? 0);
+    });
+    return sorted;
+  }, [keywordsRaw, keywordMatchFilter, keywordSortKey]);
+
+  const visibleKeywords = keywordShowAll
+    ? filteredKeywords
+    : filteredKeywords.slice(0, KEYWORD_PAGE_SIZE);
+
+  const matchTypeBreakdown = useMemo(() => {
+    const counts = { EXACT: 0, PHRASE: 0, BROAD: 0 };
+    for (const k of keywordsRaw) counts[k.matchType] += 1;
+    return counts;
+  }, [keywordsRaw]);
+
+  const totalKeywordCount = keywordsRaw.length;
 
   const imageUrl: string | undefined = (() => {
     if (isMeta) return metaData?.imageUrl ?? metaData?.thumbnailUrl;
@@ -1191,6 +1241,180 @@ function AdDetailModal({
                 </div>
               </div>
             )}
+
+          {/* Phase 4.8 M7 — Keywords on Search ads per ADR-015. Renders
+              only when the ad's parent ad_group has keywords (Google
+              Search ads only — Meta + PMax leave ad.keywords undefined). */}
+          {totalKeywordCount > 0 && (
+            <div className="bg-gray-50 -mx-4 sm:-mx-6 px-4 sm:px-6 py-4 border-y border-gray-200">
+              {/* Header + sharing-context badge per ADR-015 §Decision 7.
+                  Format: "الكلمات المفتاحية لمجموعة '[campaign / ad_group]'
+                  — مشتركة بين N إعلان في نفس المجموعة" */}
+              <div className="mb-3">
+                <p className="text-sm font-semibold text-gray-800 mb-1">
+                  الكلمات المفتاحية ({totalKeywordCount})
+                </p>
+                <p className="text-[11px] text-gray-500 leading-relaxed">
+                  لمجموعة &lsquo;
+                  {ad.campaignName && ad.adsetName
+                    ? `${ad.campaignName} / ${ad.adsetName}`
+                    : ad.adsetName ?? ad.campaignName ?? "—"}
+                  &rsquo; — مشتركة بين {adGroupAdCount} إعلان في نفس المجموعة
+                </p>
+              </div>
+
+              {/* Match-type breakdown (3 bars) — visual at-a-glance */}
+              <div className="mb-3 flex items-center gap-1.5 text-[10px]">
+                {(["EXACT", "PHRASE", "BROAD"] as const).map((mt) => {
+                  const n = matchTypeBreakdown[mt];
+                  const pct =
+                    totalKeywordCount > 0 ? (n / totalKeywordCount) * 100 : 0;
+                  const color =
+                    mt === "EXACT"
+                      ? "bg-indigo-500"
+                      : mt === "PHRASE"
+                        ? "bg-blue-400"
+                        : "bg-sky-300";
+                  return (
+                    <div
+                      key={mt}
+                      className="flex-1 min-w-0"
+                      title={`${mt}: ${n} (${pct.toFixed(0)}%)`}
+                    >
+                      <div className="flex justify-between text-gray-500 mb-0.5">
+                        <span>{mt}</span>
+                        <span className="font-medium">{n}</span>
+                      </div>
+                      <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full ${color} transition-all`}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Filter + sort controls */}
+              <div className="mb-3 flex flex-wrap gap-2 text-xs">
+                <select
+                  value={keywordSortKey}
+                  onChange={(e) =>
+                    setKeywordSortKey(
+                      e.target.value as typeof keywordSortKey
+                    )
+                  }
+                  className="px-2 py-1 border border-gray-300 rounded bg-white text-gray-700"
+                  aria-label="ترتيب الكلمات"
+                >
+                  <option value="spend">الترتيب: التكلفة</option>
+                  <option value="impressions">الترتيب: الانطباعات</option>
+                  <option value="clicks">الترتيب: النقرات</option>
+                  <option value="ctr">الترتيب: CTR</option>
+                  <option value="qualityScore">الترتيب: جودة</option>
+                </select>
+                <select
+                  value={keywordMatchFilter}
+                  onChange={(e) =>
+                    setKeywordMatchFilter(
+                      e.target.value as typeof keywordMatchFilter
+                    )
+                  }
+                  className="px-2 py-1 border border-gray-300 rounded bg-white text-gray-700"
+                  aria-label="نوع المطابقة"
+                >
+                  <option value="all">المطابقة: الكل</option>
+                  <option value="EXACT">المطابقة: EXACT</option>
+                  <option value="PHRASE">المطابقة: PHRASE</option>
+                  <option value="BROAD">المطابقة: BROAD</option>
+                </select>
+              </div>
+
+              {/* Table */}
+              <div className="max-h-[60vh] overflow-y-auto bg-white rounded-lg border border-gray-200">
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-100 text-gray-600 sticky top-0">
+                    <tr>
+                      <th className="text-right px-3 py-2 font-medium">
+                        الكلمة
+                      </th>
+                      <th className="text-right px-2 py-2 font-medium">
+                        المطابقة
+                      </th>
+                      <th className="text-left px-2 py-2 font-medium">
+                        التكلفة
+                      </th>
+                      <th className="text-left px-2 py-2 font-medium">
+                        النقرات
+                      </th>
+                      <th className="text-left px-2 py-2 font-medium">
+                        الانطباعات
+                      </th>
+                      <th className="text-left px-2 py-2 font-medium">CTR</th>
+                      <th className="text-left px-2 py-2 font-medium">جودة</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleKeywords.map((k) => (
+                      <tr
+                        key={k.id}
+                        className="border-t border-gray-100 hover:bg-gray-50"
+                      >
+                        <td className="px-3 py-2 text-gray-800 max-w-[200px] truncate" title={k.text}>
+                          {k.text}
+                        </td>
+                        <td className="px-2 py-2 text-gray-600">
+                          <span className="inline-block px-1.5 py-0.5 rounded bg-gray-100 text-[10px]">
+                            {k.matchType}
+                          </span>
+                        </td>
+                        <td className="px-2 py-2 text-left tabular-nums text-gray-700">
+                          {formatAndConvert(
+                            k.spend,
+                            (ad.currency as Currency) || accountCurrency,
+                            displayCurrency
+                          )}
+                        </td>
+                        <td className="px-2 py-2 text-left tabular-nums text-gray-700">
+                          {Math.round(k.clicks).toLocaleString("en-US")}
+                        </td>
+                        <td className="px-2 py-2 text-left tabular-nums text-gray-700">
+                          {Math.round(k.impressions).toLocaleString("en-US")}
+                        </td>
+                        <td className="px-2 py-2 text-left tabular-nums text-gray-700">
+                          {k.ctr > 0 ? `${k.ctr.toFixed(1)}%` : "—"}
+                        </td>
+                        <td
+                          className="px-2 py-2 text-left tabular-nums text-gray-700"
+                          title={
+                            k.qualityScore === undefined
+                              ? "غير كافي البيانات لحساب جودة الكلمة"
+                              : undefined
+                          }
+                        >
+                          {k.qualityScore ?? "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Pagination toggle — only when filtered set exceeds page size */}
+              {filteredKeywords.length > KEYWORD_PAGE_SIZE && (
+                <button
+                  type="button"
+                  onClick={() => setKeywordShowAll((v) => !v)}
+                  className="mt-2 text-xs text-indigo-600 hover:text-indigo-700 hover:underline"
+                >
+                  {keywordShowAll
+                    ? `عرض الأعلى 50 فقط`
+                    : `عرض الكل (${filteredKeywords.length})`}
+                </button>
+              )}
+            </div>
+          )}
 
           {hasCatalogProducts && catalogProducts && (
             <div>
@@ -2098,6 +2322,15 @@ function CreativesGrid({
           accountCurrency={accountCurrency}
           displayCurrency={displayCurrency}
           onClose={() => setSelectedAd(null)}
+          // M7 / ADR-015 §Decision 7 — count of ads sharing the same
+          // ad_group as the selected ad. Used in the keywords section
+          // header to show "shared with N ads" context. Computed at the
+          // call site (CreativesGrid has the full ads list).
+          adGroupAdCount={
+            selectedAd.adsetId
+              ? ads.filter((a) => a.adsetId === selectedAd.adsetId).length
+              : 0
+          }
         />
       )}
     </>

@@ -41,8 +41,16 @@ import type { Json } from "@/lib/supabase/database.types";
  *       bump invalidates so all clients fetch fresh data including
  *       images. Per ADR-014 + Memory #28 cache-bump verification
  *       protocol — Google + Meta fresh-fetch confirmed pre-push.
+ * - v9: M7 Keywords on Search ads — UnifiedAdCommon now includes
+ *       keywords?: Array<UnifiedAdKeyword>. Per-ad_group keyword
+ *       arrays attach to every ad in the group (shared reference).
+ *       Cached v8 rows lack this field; bump invalidates so all
+ *       clients fetch fresh data including keywords. Per ADR-015
+ *       + Memory #28 cache-bump verification protocol (4th attempt;
+ *       v7→v8 caught the M5/M8 GAQL field-name bug pre-push, this
+ *       attempt continues the protocol's track record).
  */
-const CACHE_SCHEMA_VERSION = "v8";
+const CACHE_SCHEMA_VERSION = "v9";
 
 const CACHE_TTL_MINUTES = 15;
 
