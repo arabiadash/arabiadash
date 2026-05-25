@@ -2,8 +2,9 @@ import { createClient } from "@/lib/supabase/server";
 import type { Json } from "@/lib/supabase/database.types";
 
 /**
- * Bump this when UnifiedAd or UnifiedInsight schema changes incompatibly.
- * Forces all callers to miss the cache and refetch with the new shape.
+ * Bump this when UnifiedAd or UnifiedInsight schema OR payload-content
+ * contract changes incompatibly. Forces all callers to miss the cache
+ * and refetch with the new shape/payload.
  *
  * History:
  * - v1: initial (implicit)
@@ -12,8 +13,30 @@ import type { Json } from "@/lib/supabase/database.types";
  *       currency. Old cache entries lack these fields.
  * - v3: Phase 4.8 M6 — UnifiedAd gained extensions (sitelinks, callouts,
  *       structured snippets). Pre-v3 entries lack this field. See ADR-012.
+ * - v4: Phase 4.8 M-PMax — UnifiedAd restructured as discriminated union
+ *       with ad_type discriminator + type_data variant shape. Old flat
+ *       entries crash on ad_type narrowing. See ADR-013.
+ * - v5: Stage 5 hotfix (a3836e7) — asset_group_asset.status filter added
+ *       to fetchAssetGroupAssets. Cached PMAX_ASSET_GROUP rows from
+ *       before the filter include REMOVED historical link entries in
+ *       type_data.assets (imaa: 207 assets cached, 160 of which were
+ *       REMOVED). The discriminated-union shape didn't change, but the
+ *       payload semantics did — bump to invalidate all caches universally
+ *       and force a clean refetch with the active-only filter.
+ * - v6: Stage 5 follow-up (fix effective ad status) — UnifiedAd.status
+ *       semantics changed from ad-level only (ad_group_ad.status) to
+ *       effective serving status (min-restrictive rollup of campaign,
+ *       ad_group, ad_group_ad statuses). Cached rows from v5 contain
+ *       ad-level-only status; bump invalidates so badges accurately
+ *       reflect whether the ad is currently serving.
+ * - v7: M-PMax retail variants removed — PMAX_PRODUCT_GROUP +
+ *       PMAX_SHOPPING_PRODUCT no longer fetched or normalized.
+ *       Cached UnifiedAd[] rows from v6 containing these variants
+ *       would fail discriminated-union narrowing in the renderAdCard
+ *       switch; bump invalidates so all clients refetch the
+ *       narrower union.
  */
-const CACHE_SCHEMA_VERSION = "v3";
+const CACHE_SCHEMA_VERSION = "v7";
 
 const CACHE_TTL_MINUTES = 15;
 

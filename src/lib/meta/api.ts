@@ -677,12 +677,16 @@ export function metaAdToUnified(ad: MetaAd): UnifiedAd {
     ad.creative?.object_story_spec?.video_data?.video_id ||
     ad.creative?.asset_feed_spec?.videos?.[0]?.video_id;
 
-  let creativeType: UnifiedAd["creativeType"] = "unknown";
+  // Sub-type within META_AD (replaces the old top-level `creativeType` —
+  // now scoped inside META_AD's type_data per ADR-013 / Memory #27 single-
+  // discriminator principle).
+  let subType: "image" | "video" | "carousel" | "catalog" | "unknown" =
+    "unknown";
   let pendingImageHashes: string[] | undefined;
   if (ad.creative?.product_set_id) {
-    creativeType = "catalog";
+    subType = "catalog";
   } else if (carouselImages.length > 1) {
-    creativeType = "carousel";
+    subType = "carousel";
   } else if ((ad.creative?.asset_feed_spec?.images?.length ?? 0) >= 2) {
     // Fallback: extractCarouselImages didn't return ≥2 (e.g. items missing
     // some field), but asset_feed_spec.images itself has ≥2 entries.
@@ -702,15 +706,15 @@ export function metaAdToUnified(ad: MetaAd): UnifiedAd {
       // Real Flexible Ad. Hashes will be resolved to URLs in a batch call
       // after the per-ad mapping completes (see MetaAdapter.getAds).
       pendingImageHashes = uniqueHashes;
-      creativeType = "carousel";
+      subType = "carousel";
     } else {
       // Single image duplicated by Meta — treat as a regular image ad.
-      creativeType = "image";
+      subType = "image";
     }
   } else if (extractedVideoId) {
-    creativeType = "video";
+    subType = "video";
   } else if (ad.creative?.image_url) {
-    creativeType = "image";
+    subType = "image";
   }
 
   // Normalize status: ACTIVE / DELETED kept as-is; everything else
@@ -727,23 +731,12 @@ export function metaAdToUnified(ad: MetaAd): UnifiedAd {
   }
 
   return {
+    ad_type: "META_AD",
     id: ad.id,
     name: ad.name,
     status,
     campaignId: ad.campaign_id,
     adsetId: ad.adset_id,
-    creativeId: ad.creative?.id,
-    imageUrl: ad.creative?.image_url,
-    thumbnailUrl: ad.creative?.thumbnail_url,
-    videoId: extractedVideoId,
-    previewLink: ad.preview_shareable_link,
-    creativeType,
-    title: ad.creative?.title,
-    body: ad.creative?.body,
-    callToAction: ad.creative?.call_to_action_type,
-    productSetId: ad.creative?.product_set_id,
-    carouselImages: carouselImages.length > 0 ? carouselImages : undefined,
-    carouselImageHashes: pendingImageHashes,
     spend,
     revenue,
     roas: spend > 0 ? revenue / spend : 0,
@@ -752,6 +745,24 @@ export function metaAdToUnified(ad: MetaAd): UnifiedAd {
     clicks,
     ctr,
     cpc,
+    // Meta surfaces purchase counts natively via the omni_purchase
+    // action_type — no cache map dependency. Always authoritative,
+    // matches the UnifiedInsight Meta convention (ADR-011).
+    hasConversionData: true,
     provider: "meta",
+    type_data: {
+      subType,
+      creativeId: ad.creative?.id,
+      imageUrl: ad.creative?.image_url,
+      thumbnailUrl: ad.creative?.thumbnail_url,
+      videoId: extractedVideoId,
+      title: ad.creative?.title,
+      body: ad.creative?.body,
+      callToAction: ad.creative?.call_to_action_type,
+      productSetId: ad.creative?.product_set_id,
+      carouselImages: carouselImages.length > 0 ? carouselImages : undefined,
+      carouselImageHashes: pendingImageHashes,
+      previewLink: ad.preview_shareable_link,
+    },
   };
 }

@@ -1,0 +1,1049 @@
+/**
+ * PMax recon script — Phase 4.8 M7 Stage 3
+ * Date: 2026-05-24
+ *
+ * Diagnostic script. Read-only GAQL only. Not production code — the leading
+ * underscore in the filename marks it as a one-off recon artifact.
+ *
+ * Runs 5 SELECT queries against the imaa Google Ads account to inform the
+ * PMax architecture decision. See docs/recon/pmax-recon-2026-05-24.md
+ * (Stage 1) and docs/recon/pmax-recon-stage-2-3-2026-05-24.md (this run's
+ * output) for context.
+ *
+ * Usage:
+ *   node scripts/_pmax-recon.mjs
+ *
+ * Credential sourcing (in order of preference):
+ *   1. CUSTOMER_ID + REFRESH_TOKEN env vars (manual override) +
+ *      optional MANAGER_CUSTOMER_ID
+ *   2. Supabase service_role lookup of the first active google connection
+ *      (may fail if GRANT SELECT not present on connections table)
+ *
+ * Always loads from .env.local: GOOGLE_ADS_CLIENT_ID,
+ * GOOGLE_ADS_CLIENT_SECRET, GOOGLE_ADS_DEVELOPER_TOKEN,
+ * NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
+ */
+
+import { GoogleAdsApi } from "google-ads-api";
+import { createClient } from "@supabase/supabase-js";
+import { readFileSync } from "node:fs";
+
+// =================================================================
+// env loader (no dotenv dep — keep package.json untouched)
+// =================================================================
+function loadEnv() {
+  const env = {};
+  try {
+    const text = readFileSync(".env.local", "utf8");
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+      const idx = trimmed.indexOf("=");
+      const key = trimmed.slice(0, idx).trim();
+      const value = trimmed
+        .slice(idx + 1)
+        .trim()
+        .replace(/^["']|["']$/g, "");
+      env[key] = value;
+    }
+  } catch (err) {
+    console.error("Failed to read .env.local:", err.message);
+    process.exit(1);
+  }
+  return env;
+}
+
+const env = loadEnv();
+
+const clientId = env.GOOGLE_ADS_CLIENT_ID;
+const clientSecret = env.GOOGLE_ADS_CLIENT_SECRET;
+const developerToken = env.GOOGLE_ADS_DEVELOPER_TOKEN;
+
+if (!clientId || !clientSecret || !developerToken) {
+  console.error("Missing one of: GOOGLE_ADS_CLIENT_ID, GOOGLE_ADS_CLIENT_SECRET, GOOGLE_ADS_DEVELOPER_TOKEN");
+  process.exit(1);
+}
+
+// =================================================================
+// Credential resolution: env vars first, supabase fallback
+// =================================================================
+async function resolveCredentials() {
+  if (process.env.CUSTOMER_ID && process.env.REFRESH_TOKEN) {
+    console.log("→ Using credentials from CUSTOMER_ID + REFRESH_TOKEN env vars");
+    return {
+      customerId: process.env.CUSTOMER_ID,
+      refreshToken: process.env.REFRESH_TOKEN,
+      loginCustomerId: process.env.MANAGER_CUSTOMER_ID || undefined,
+      source: "env",
+    };
+  }
+
+  console.log("→ Looking up first active google connection via supabase service_role");
+  const supabaseUrl = env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceRole = env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !serviceRole) {
+    console.error("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY (and no CUSTOMER_ID/REFRESH_TOKEN env override)");
+    process.exit(1);
+  }
+
+  const sb = createClient(supabaseUrl, serviceRole);
+  const { data, error } = await sb
+    .from("connections")
+    .select("account_id, access_token, metadata")
+    .eq("platform", "google")
+    .eq("status", "active")
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    console.error("Supabase lookup failed:", error.message);
+    console.error("Fallback: set CUSTOMER_ID, REFRESH_TOKEN, MANAGER_CUSTOMER_ID env vars and re-run.");
+    process.exit(1);
+  }
+  if (!data) {
+    console.error("No active google connection found in supabase");
+    process.exit(1);
+  }
+
+  const metadata = data.metadata || {};
+  return {
+    customerId: data.account_id,
+    refreshToken: data.access_token,
+    loginCustomerId:
+      typeof metadata.manager_customer_id === "string"
+        ? metadata.manager_customer_id
+        : undefined,
+    source: "supabase",
+  };
+}
+
+// =================================================================
+// runQuery — wraps customer.query() with error capture per kickoff
+//   - print query name + status
+//   - on error: print message + continue (kickoff: don't halt)
+// =================================================================
+async function runQuery(customer, label, query) {
+  console.log(`\n${"=".repeat(70)}`);
+  console.log(`Query: ${label}`);
+  console.log("=".repeat(70));
+  console.log("GAQL:");
+  console.log(query.trim());
+  console.log();
+
+  try {
+    const rows = await customer.query(query);
+    console.log(`✓ Returned ${rows.length} rows`);
+    return { ok: true, rows };
+  } catch (err) {
+    const message = err?.errors
+      ? err.errors
+          .map(
+            (e) =>
+              `${e.message ?? "(no message)"} [${JSON.stringify(e.error_code)}]`
+          )
+          .join("; ")
+      : err?.message || String(err);
+    console.log(`✗ FAILED: ${message}`);
+    return { ok: false, error: message };
+  }
+}
+
+// =================================================================
+// Aggregation helper for Query 3 (manual GROUP BY)
+// =================================================================
+function aggregateAssetBreakdown(rows) {
+  const byFieldType = new Map();
+  const byPerformanceLabel = new Map();
+  const byAssetType = new Map();
+
+  for (const row of rows) {
+    const ft = row.asset_group_asset?.field_type ?? "(unknown)";
+    const pl = row.asset_group_asset?.performance_label ?? "(unknown)";
+    const at = row.asset?.type ?? "(unknown)";
+
+    byFieldType.set(ft, (byFieldType.get(ft) ?? 0) + 1);
+    byPerformanceLabel.set(pl, (byPerformanceLabel.get(pl) ?? 0) + 1);
+    byAssetType.set(at, (byAssetType.get(at) ?? 0) + 1);
+  }
+
+  const toObj = (m) => Object.fromEntries([...m.entries()].sort((a, b) => b[1] - a[1]));
+  return {
+    countByFieldType: toObj(byFieldType),
+    countByPerformanceLabel: toObj(byPerformanceLabel),
+    countByAssetType: toObj(byAssetType),
+  };
+}
+
+// =================================================================
+// MAIN
+// =================================================================
+async function main() {
+  const creds = await resolveCredentials();
+  console.log(`\nCredential source: ${creds.source}`);
+  console.log(`customer_id:       ${creds.customerId}`);
+  console.log(`login_customer_id: ${creds.loginCustomerId ?? "(none — standalone)"}`);
+
+  const api = new GoogleAdsApi({
+    client_id: clientId,
+    client_secret: clientSecret,
+    developer_token: developerToken,
+  });
+
+  const customer = api.Customer({
+    customer_id: creds.customerId,
+    refresh_token: creds.refreshToken,
+    ...(creds.loginCustomerId ? { login_customer_id: creds.loginCustomerId } : {}),
+  });
+
+  const results = {};
+
+  // ---------------------------------------------------------------
+  // Q1: PMax campaigns
+  // ---------------------------------------------------------------
+  results.q1_pmax_campaigns = await runQuery(
+    customer,
+    "Q1 — PMax campaigns",
+    `
+      SELECT
+        campaign.id,
+        campaign.name,
+        campaign.status,
+        campaign.advertising_channel_type
+      FROM campaign
+      WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+    `
+  );
+  if (results.q1_pmax_campaigns.ok) {
+    console.log("\nRows:");
+    console.log(JSON.stringify(results.q1_pmax_campaigns.rows, null, 2));
+  }
+
+  // ---------------------------------------------------------------
+  // Q2: asset_group + ad_strength + primary_status
+  // ---------------------------------------------------------------
+  results.q2_asset_groups = await runQuery(
+    customer,
+    "Q2 — Asset groups + ad_strength",
+    `
+      SELECT
+        campaign.id,
+        campaign.name,
+        asset_group.id,
+        asset_group.name,
+        asset_group.ad_strength,
+        asset_group.primary_status
+      FROM asset_group
+      WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+    `
+  );
+  if (results.q2_asset_groups.ok) {
+    console.log("\nRows:");
+    console.log(JSON.stringify(results.q2_asset_groups.rows, null, 2));
+    const adStrengthCounts = new Map();
+    const statusCounts = new Map();
+    for (const row of results.q2_asset_groups.rows) {
+      const ad_strength = row.asset_group?.ad_strength ?? "(unknown)";
+      const status = row.asset_group?.primary_status ?? "(unknown)";
+      adStrengthCounts.set(ad_strength, (adStrengthCounts.get(ad_strength) ?? 0) + 1);
+      statusCounts.set(status, (statusCounts.get(status) ?? 0) + 1);
+    }
+    console.log("\nAd-strength distribution:");
+    console.log(JSON.stringify(Object.fromEntries(adStrengthCounts), null, 2));
+    console.log("\nPrimary-status distribution:");
+    console.log(JSON.stringify(Object.fromEntries(statusCounts), null, 2));
+  }
+
+  // ---------------------------------------------------------------
+  // Q3: asset breakdown (LIMIT 50) + manual GROUP BY
+  // Field name corrected per Stage 1 docs: `asset.image_asset.full_size.url`
+  // (the nested `.full_size.url` form, NOT `.full_size_image_url` which is
+  // the M5 pattern that works for ad-level image_asset but not the
+  // PMax asset_group_asset join).
+  //
+  // If this still rejects: try removing fields one at a time to isolate —
+  // (a) drop `asset.image_asset.full_size.url`, keep performance_label
+  // (b) drop performance_label, keep image URL
+  // GAQL bundles all rejected fields into one error message; isolation
+  // identifies the actual culprit.
+  // ---------------------------------------------------------------
+  results.q3_asset_breakdown = await runQuery(
+    customer,
+    "Q3 — Asset breakdown (LIMIT 50)",
+    `
+      SELECT
+        asset_group_asset.field_type,
+        asset.type,
+        asset_group_asset.performance_label,
+        asset.text_asset.text,
+        asset.image_asset.full_size.url
+      FROM asset_group_asset
+      WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+      LIMIT 50
+    `
+  );
+  if (results.q3_asset_breakdown.ok) {
+    console.log("\nFirst 10 rows:");
+    console.log(JSON.stringify(results.q3_asset_breakdown.rows.slice(0, 10), null, 2));
+    const agg = aggregateAssetBreakdown(results.q3_asset_breakdown.rows);
+    console.log("\nManual GROUP BY aggregation:");
+    console.log(JSON.stringify(agg, null, 2));
+    results.q3_aggregation = agg;
+  }
+
+  // ---------------------------------------------------------------
+  // Q4: asset_group metrics, 30-day
+  // ---------------------------------------------------------------
+  results.q4_metrics = await runQuery(
+    customer,
+    "Q4 — Asset group metrics, last 30 days",
+    `
+      SELECT
+        asset_group.id,
+        asset_group.name,
+        metrics.impressions,
+        metrics.clicks,
+        metrics.cost_micros,
+        metrics.conversions,
+        metrics.conversions_value
+      FROM asset_group
+      WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        AND segments.date DURING LAST_30_DAYS
+    `
+  );
+  if (results.q4_metrics.ok) {
+    console.log("\nRows:");
+    console.log(JSON.stringify(results.q4_metrics.rows, null, 2));
+  }
+
+  // ---------------------------------------------------------------
+  // Q5: retail PMax detection (shopping_setting)
+  // Per kickoff: if this fails, continue + report — known fragile field
+  // ---------------------------------------------------------------
+  results.q5_retail = await runQuery(
+    customer,
+    "Q5 — Retail PMax check (shopping_setting)",
+    `
+      SELECT
+        campaign.id,
+        campaign.name,
+        campaign.shopping_setting.merchant_id,
+        campaign.shopping_setting.feed_label
+      FROM campaign
+      WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+    `
+  );
+  if (results.q5_retail.ok) {
+    console.log("\nRows:");
+    console.log(JSON.stringify(results.q5_retail.rows, null, 2));
+  }
+
+  // ---------------------------------------------------------------
+  // Q6 — Phase 2 field-isolation iterations (M-PMax Commit 4)
+  //
+  // Per ADR-013 field-isolation discipline: each new SELECT field is
+  // tested in an additive sequence. If iteration N fails, stop adding
+  // and report the boundary. Q3 already proved field_type / asset.type
+  // / text_asset.text / image_asset.full_size.url work and that
+  // performance_label rejects — Q6 widens scope to asset.id and
+  // youtube_video_asset.youtube_video_id which the implementation
+  // (fetchAssetGroupAssets) needs.
+  // ---------------------------------------------------------------
+  results.q6a_base = await runQuery(
+    customer,
+    "Q6a — asset_group_asset BASE (6 fields)",
+    `
+      SELECT
+        asset_group.id,
+        asset_group.name,
+        asset_group_asset.field_type,
+        asset.id,
+        asset.type,
+        asset.text_asset.text
+      FROM asset_group_asset
+      WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+      LIMIT 50
+    `
+  );
+  if (results.q6a_base.ok) {
+    console.log("\nFirst 3 rows:");
+    console.log(JSON.stringify(results.q6a_base.rows.slice(0, 3), null, 2));
+  }
+
+  if (results.q6a_base.ok) {
+    results.q6b_image = await runQuery(
+      customer,
+      "Q6b — base + asset.image_asset.full_size.url",
+      `
+        SELECT
+          asset_group.id,
+          asset_group.name,
+          asset_group_asset.field_type,
+          asset.id,
+          asset.type,
+          asset.text_asset.text,
+          asset.image_asset.full_size.url
+        FROM asset_group_asset
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        LIMIT 50
+      `
+    );
+    if (results.q6b_image.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(JSON.stringify(results.q6b_image.rows.slice(0, 3), null, 2));
+    }
+  } else {
+    console.log("\n[Q6b skipped — Q6a failed]");
+    results.q6b_image = { ok: false, error: "skipped (Q6a failed)" };
+  }
+
+  if (results.q6b_image.ok) {
+    results.q6c_video = await runQuery(
+      customer,
+      "Q6c — base + image + asset.youtube_video_asset.youtube_video_id",
+      `
+        SELECT
+          asset_group.id,
+          asset_group.name,
+          asset_group_asset.field_type,
+          asset.id,
+          asset.type,
+          asset.text_asset.text,
+          asset.image_asset.full_size.url,
+          asset.youtube_video_asset.youtube_video_id
+        FROM asset_group_asset
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        LIMIT 50
+      `
+    );
+    if (results.q6c_video.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(JSON.stringify(results.q6c_video.rows.slice(0, 3), null, 2));
+    }
+  } else {
+    console.log("\n[Q6c skipped — Q6b failed]");
+    results.q6c_video = { ok: false, error: "skipped (Q6b failed)" };
+  }
+
+  // Q6d intentionally SKIPPED — performance_label confirmed rejected
+  // in Stage 3 Q3. Re-testing here would just re-confirm the trap.
+
+  // ---------------------------------------------------------------
+  // Q6f — Stage 5 probe (post-M-PMax-merge): asset_group_asset.status
+  //
+  // imaa's PMAX_ASSET_GROUP card is rendering ~163 assets including
+  // historical assets the user removed months ago. fetchAssetGroupAssets
+  // in google.ts has no status filter on its WHERE clause — returns
+  // every link Google has ever recorded, REMOVED included. This probe
+  // verifies (a) asset_group_asset.status is SELECTable in SDK v23
+  // (not another SDK-vs-runtime trap) and (b) measures the population
+  // distribution + payload reduction from adding the analogous filter
+  // that fetchAds already uses for ad_group_ad.status.
+  // ---------------------------------------------------------------
+  results.q6f_status_unfiltered = await runQuery(
+    customer,
+    "Q6f-1 — asset_group_asset.status (SELECTability probe, NO status filter)",
+    `
+      SELECT
+        asset_group.id,
+        asset_group_asset.field_type,
+        asset_group_asset.status,
+        asset.id,
+        asset.type
+      FROM asset_group_asset
+      WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+    `
+  );
+  if (results.q6f_status_unfiltered.ok) {
+    const rows = results.q6f_status_unfiltered.rows;
+    console.log(`\nFirst 5 rows:`);
+    console.log(JSON.stringify(rows.slice(0, 5), null, 2));
+
+    // Distribution of asset_group_asset.status across all rows.
+    const distribution = new Map();
+    for (const row of rows) {
+      const raw = row.asset_group_asset?.status;
+      const key = raw === undefined || raw === null ? "(unset)" : String(raw);
+      distribution.set(key, (distribution.get(key) ?? 0) + 1);
+    }
+    const sorted = [...distribution.entries()].sort((a, b) => b[1] - a[1]);
+    console.log(`\nDistinct asset_group_asset.status values (with counts):`);
+    for (const [value, count] of sorted) {
+      console.log(`  ${value}: ${count} rows`);
+    }
+    results.q6f_status_distribution = Object.fromEntries(sorted);
+    console.log(`\nTotal rows returned (unfiltered): ${rows.length}`);
+  }
+
+  if (results.q6f_status_unfiltered.ok) {
+    results.q6f_status_filtered = await runQuery(
+      customer,
+      "Q6f-2 — same SELECT, WHERE adds status != 'REMOVED' (proposed prod filter)",
+      `
+        SELECT
+          asset_group.id,
+          asset_group_asset.field_type,
+          asset_group_asset.status,
+          asset.id,
+          asset.type
+        FROM asset_group_asset
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+          AND asset_group_asset.status != 'REMOVED'
+      `
+    );
+    if (results.q6f_status_filtered.ok) {
+      const filtered = results.q6f_status_filtered.rows.length;
+      const unfiltered = results.q6f_status_unfiltered.rows.length;
+      const reduction =
+        unfiltered > 0
+          ? `${(((unfiltered - filtered) / unfiltered) * 100).toFixed(1)}%`
+          : "n/a";
+      console.log(
+        `\nTotal rows returned (filtered): ${filtered}` +
+          `\nReduction vs unfiltered: ${unfiltered} → ${filtered} (${reduction})`
+      );
+    }
+  } else {
+    console.log(`\n[Q6f-2 skipped — Q6f-1 failed; no status field to filter on]`);
+    results.q6f_status_filtered = {
+      ok: false,
+      error: "skipped (Q6f-1 failed)",
+    };
+  }
+
+  // ---------------------------------------------------------------
+  // Q8 — Phase 4 SHOPPING field-isolation (M-PMax Commit 7)
+  //
+  // shopping_performance_view is the per-product (SKU-level) retail
+  // PMax surface. Google's docs (developers.google.com/google-ads/api/
+  // performance-max/retail-reporting) say no JOIN is available from this
+  // view to asset_group / asset_group_listing_group_filter — Q8d probes
+  // that explicitly. Q8e probes the product metadata segments we'd want
+  // for the PMAX_SHOPPING_PRODUCT variant (title / brand / category /
+  // type / condition). Image URL + price are NOT exposed by this view
+  // per docs — would require shopping_product resource or Merchant
+  // Center API, out of scope for Commit 7.
+  // ---------------------------------------------------------------
+  const last30Start = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return d.toISOString().slice(0, 10);
+  })();
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const shoppingWhere = `campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND segments.date BETWEEN '${last30Start}' AND '${todayISO}'`;
+
+  results.q8a_spv_base = await runQuery(
+    customer,
+    "Q8a — shopping_performance_view BASE (product_item_id + metrics)",
+    `
+      SELECT
+        campaign.advertising_channel_type,
+        segments.product_item_id,
+        metrics.impressions,
+        metrics.clicks,
+        metrics.cost_micros
+      FROM shopping_performance_view
+      WHERE ${shoppingWhere}
+      LIMIT 20
+    `
+  );
+  if (results.q8a_spv_base.ok) {
+    console.log("\nFirst 3 rows:");
+    console.log(JSON.stringify(results.q8a_spv_base.rows.slice(0, 3), null, 2));
+  }
+
+  if (results.q8a_spv_base.ok) {
+    results.q8b_spv_conversions = await runQuery(
+      customer,
+      "Q8b — + conversions + conversions_value",
+      `
+        SELECT
+          campaign.advertising_channel_type,
+          segments.product_item_id,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM shopping_performance_view
+        WHERE ${shoppingWhere}
+        LIMIT 20
+      `
+    );
+    if (results.q8b_spv_conversions.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q8b_spv_conversions.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q8b_spv_conversions = { ok: false, error: "skipped (Q8a failed)" };
+  }
+
+  if (results.q8b_spv_conversions.ok) {
+    results.q8c_spv_campaign = await runQuery(
+      customer,
+      "Q8c — + campaign.id + campaign.name (low-risk context)",
+      `
+        SELECT
+          campaign.id,
+          campaign.name,
+          campaign.advertising_channel_type,
+          segments.product_item_id,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM shopping_performance_view
+        WHERE ${shoppingWhere}
+        LIMIT 20
+      `
+    );
+    if (results.q8c_spv_campaign.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q8c_spv_campaign.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q8c_spv_campaign = { ok: false, error: "skipped (Q8b failed)" };
+  }
+
+  if (results.q8c_spv_campaign.ok) {
+    results.q8d_spv_join_probe = await runQuery(
+      customer,
+      "Q8d — + asset_group + asset_group_listing_group_filter JOIN probe (docs say unsupported)",
+      `
+        SELECT
+          campaign.id,
+          campaign.advertising_channel_type,
+          asset_group.id,
+          asset_group.name,
+          asset_group_listing_group_filter.id,
+          segments.product_item_id,
+          metrics.impressions,
+          metrics.clicks
+        FROM shopping_performance_view
+        WHERE ${shoppingWhere}
+        LIMIT 20
+      `
+    );
+    if (results.q8d_spv_join_probe.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q8d_spv_join_probe.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q8d_spv_join_probe = {
+      ok: false,
+      error: "skipped (Q8c failed)",
+    };
+  }
+
+  if (results.q8c_spv_campaign.ok) {
+    results.q8e_spv_metadata = await runQuery(
+      customer,
+      "Q8e — + product metadata (title + brand + category_level1 + type_l1 + condition)",
+      `
+        SELECT
+          campaign.id,
+          campaign.advertising_channel_type,
+          segments.product_item_id,
+          segments.product_title,
+          segments.product_brand,
+          segments.product_category_level1,
+          segments.product_type_l1,
+          segments.product_condition,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros
+        FROM shopping_performance_view
+        WHERE ${shoppingWhere}
+        LIMIT 20
+      `
+    );
+    if (results.q8e_spv_metadata.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q8e_spv_metadata.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q8e_spv_metadata = { ok: false, error: "skipped (Q8c failed)" };
+  }
+
+  // ---------------------------------------------------------------
+  // Q9 — Stage 5 follow-up: effective ad serving status rollup
+  //
+  // PURPOSE
+  //   Verify (a) campaign.status + ad_group.status are SELECTable from
+  //   `FROM ad_group_ad` in SDK v23 (high confidence yes — campaign.id +
+  //   ad_group.id already work — but per the 8-instance integer-drift /
+  //   SDK-trap history we probe before shipping), and (b) detect rows
+  //   where ad_group_ad.status=ENABLED while campaign.status=PAUSED —
+  //   the empirical bug scenario.
+  //
+  // CONTEXT
+  //   User reported "نشط" badges on creative cards whose parent campaigns
+  //   are PAUSED on Google Ads. Diagnostic traced root cause to
+  //   normalizeAdStatus in google.ts directly mirroring ad_group_ad.status
+  //   with zero parent rollup. Google's effective serving status is the
+  //   min-restrictive of (campaign, ad_group, ad_group_ad).status — a
+  //   PAUSED parent blocks serving regardless of child state.
+  //
+  //   Integer enums (verified via Google docs): 2=ENABLED, 3=PAUSED,
+  //   4=REMOVED across CampaignStatusEnum + AdGroupStatusEnum +
+  //   AdGroupAdStatusEnum proto definitions.
+  //
+  // CURRENT STATUS (2026-05-25)
+  //   Probe code complete, awaiting re-authentication of imaa's Google
+  //   connection. First attempt returned `invalid_grant` from Google
+  //   OAuth — refresh token rejected (token expiry / revocation /
+  //   rotation). This is the known OAuth Testing-mode 7-day refresh
+  //   limit per tech-debt #4 — Google rotates refresh tokens for apps
+  //   in Testing mode every ~7 days, and our `connections` row stored
+  //   value goes stale.
+  //
+  // WHEN CONNECTION IS RESTORED
+  //   1. User re-authenticates imaa in /dashboard/connections/google
+  //      → fresh refresh_token written to connections.access_token
+  //   2. Re-run: `node scripts/_pmax-recon.mjs` — Q9 will execute,
+  //      print the bucket distribution + mismatch list, and either
+  //      confirm the bug is empirically reproducible on imaa (expected)
+  //      or report "(none in this date range — bug exists in theory
+  //      but not reproducible on imaa right now)" if all campaigns are
+  //      currently aligned.
+  //   3. Proceed to Commit 2 (production fix in google.ts + ads.ts +
+  //      cache.ts) using Q9 results as the verification trail.
+  // ---------------------------------------------------------------
+  const stage5DateFrom = "2026-04-25";
+  const stage5DateTo = "2026-05-25";
+  results.q9_1_status_select = await runQuery(
+    customer,
+    "Q9-1 — campaign.status + ad_group.status from FROM ad_group_ad",
+    `
+      SELECT
+        ad_group_ad.ad.id,
+        ad_group_ad.status,
+        ad_group.id,
+        ad_group.status,
+        campaign.id,
+        campaign.status,
+        campaign.name
+      FROM ad_group_ad
+      WHERE segments.date BETWEEN '${stage5DateFrom}' AND '${stage5DateTo}'
+        AND ad_group_ad.status != 'REMOVED'
+      LIMIT 50
+    `
+  );
+
+  if (results.q9_1_status_select.ok) {
+    const rows = results.q9_1_status_select.rows;
+    console.log(`\n✓ SELECT accepted. ${rows.length} rows returned.`);
+
+    // 2=ENABLED, 3=PAUSED, 4=REMOVED. Min-restrictive: REMOVED > PAUSED > ENABLED.
+    const statusName = (n) =>
+      n === 2 ? "ENABLED" : n === 3 ? "PAUSED" : n === 4 ? "REMOVED" : `OTHER_${n}`;
+    const effective = (c, ag, ad) => {
+      const all = [c, ag, ad];
+      if (all.some((s) => s === 4)) return "REMOVED";
+      if (all.some((s) => s === 3)) return "PAUSED";
+      if (all.every((s) => s === 2)) return "ENABLED";
+      return "OTHER";
+    };
+
+    // Q9-2: count rows grouped by (campaign.status, ad_group_ad.status).
+    // The (3, 2) bucket is the bug scenario — parent paused, ad enabled.
+    const bucketCounts = new Map();
+    const mismatchRows = [];
+    for (const row of rows) {
+      const c = Number(row.campaign?.status);
+      const ag = Number(row.ad_group?.status);
+      const ad = Number(row.ad_group_ad?.status);
+      const key = `(campaign=${c}/${statusName(c)}, ad=${ad}/${statusName(ad)})`;
+      bucketCounts.set(key, (bucketCounts.get(key) ?? 0) + 1);
+
+      // Bug instance: ad is ENABLED but campaign is not ENABLED.
+      if (ad === 2 && c !== 2) {
+        mismatchRows.push({
+          campaign_id: String(row.campaign?.id ?? ""),
+          campaign_name: String(row.campaign?.name ?? ""),
+          campaign_status: statusName(c),
+          ad_group_status: statusName(ag),
+          ad_group_ad_status: statusName(ad),
+          effective: effective(c, ag, ad),
+          ad_id: String(row.ad_group_ad?.ad?.id ?? ""),
+        });
+      }
+    }
+
+    console.log(`\nBucket distribution (campaign.status, ad_group_ad.status):`);
+    for (const [bucket, n] of [...bucketCounts.entries()].sort()) {
+      console.log(`  ${bucket}: ${n} rows`);
+    }
+    results.q9_2_buckets = Object.fromEntries(bucketCounts);
+
+    console.log(
+      `\nMismatch rows (ad ENABLED but parent campaign not ENABLED) — the bug instances:`
+    );
+    if (mismatchRows.length === 0) {
+      console.log("  (none in this date range — bug exists in theory but not reproducible on imaa right now)");
+    } else {
+      for (const r of mismatchRows.slice(0, 10)) {
+        console.log(
+          `  ad_id=${r.ad_id} campaign="${r.campaign_name}" status=campaign:${r.campaign_status}/ag:${r.ad_group_status}/ad:${r.ad_group_ad_status} → effective=${r.effective}`
+        );
+      }
+      if (mismatchRows.length > 10) {
+        console.log(`  … and ${mismatchRows.length - 10} more`);
+      }
+    }
+    results.q9_2_mismatch_count = mismatchRows.length;
+    results.q9_2_mismatch_sample = mismatchRows.slice(0, 5);
+  }
+
+  // ---------------------------------------------------------------
+  // Q7 — Phase 3 RETAIL field-isolation (M-PMax Commit 6)
+  //
+  // asset_group_product_group_view is the retail-PMax product-level row
+  // resource. Per Google's retail-reporting docs, joins to
+  // asset_group + asset_group_listing_group_filter are documented. We
+  // iterate additively to surface any SDK-vs-runtime traps (M5 / M6 /
+  // M-PMax trifecta — never trust the docs without runtime verification).
+  // ---------------------------------------------------------------
+  results.q7a_pgv_base = await runQuery(
+    customer,
+    "Q7a — asset_group_product_group_view BASE (6 fields)",
+    `
+      SELECT
+        asset_group.id,
+        asset_group.name,
+        asset_group_product_group_view.resource_name,
+        metrics.impressions,
+        metrics.clicks,
+        metrics.cost_micros
+      FROM asset_group_product_group_view
+      WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+      LIMIT 20
+    `
+  );
+  if (results.q7a_pgv_base.ok) {
+    console.log("\nFirst 3 rows:");
+    console.log(JSON.stringify(results.q7a_pgv_base.rows.slice(0, 3), null, 2));
+  }
+
+  if (results.q7a_pgv_base.ok) {
+    results.q7b_pgv_conversions = await runQuery(
+      customer,
+      "Q7b — base + conversions + conversions_value + campaign context",
+      `
+        SELECT
+          campaign.id,
+          campaign.name,
+          asset_group.id,
+          asset_group.name,
+          asset_group_product_group_view.resource_name,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM asset_group_product_group_view
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        LIMIT 20
+      `
+    );
+    if (results.q7b_pgv_conversions.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q7b_pgv_conversions.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q7b_pgv_conversions = { ok: false, error: "skipped (Q7a failed)" };
+  }
+
+  if (results.q7b_pgv_conversions.ok) {
+    results.q7c_lgf_join = await runQuery(
+      customer,
+      "Q7c — + asset_group_listing_group_filter.id + .path",
+      `
+        SELECT
+          campaign.id,
+          campaign.name,
+          asset_group.id,
+          asset_group.name,
+          asset_group_product_group_view.resource_name,
+          asset_group_listing_group_filter.id,
+          asset_group_listing_group_filter.path,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM asset_group_product_group_view
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        LIMIT 20
+      `
+    );
+    if (results.q7c_lgf_join.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q7c_lgf_join.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q7c_lgf_join = { ok: false, error: "skipped (Q7b failed)" };
+  }
+
+  if (results.q7c_lgf_join.ok) {
+    results.q7d_case_value = await runQuery(
+      customer,
+      "Q7d — + asset_group_listing_group_filter.case_value.product_brand.value (probe oneof access)",
+      `
+        SELECT
+          asset_group.id,
+          asset_group_product_group_view.resource_name,
+          asset_group_listing_group_filter.id,
+          asset_group_listing_group_filter.path,
+          asset_group_listing_group_filter.case_value.product_brand.value,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros
+        FROM asset_group_product_group_view
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        LIMIT 20
+      `
+    );
+    if (results.q7d_case_value.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q7d_case_value.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q7d_case_value = { ok: false, error: "skipped (Q7c failed)" };
+  }
+
+  if (results.q7c_lgf_join.ok) {
+    results.q7e_type_vertical = await runQuery(
+      customer,
+      "Q7e — + asset_group_listing_group_filter.type + .vertical (metadata)",
+      `
+        SELECT
+          asset_group.id,
+          asset_group_product_group_view.resource_name,
+          asset_group_listing_group_filter.id,
+          asset_group_listing_group_filter.path,
+          asset_group_listing_group_filter.type,
+          asset_group_listing_group_filter.vertical,
+          metrics.impressions
+        FROM asset_group_product_group_view
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        LIMIT 20
+      `
+    );
+    if (results.q7e_type_vertical.ok) {
+      console.log("\nFirst 3 rows:");
+      console.log(
+        JSON.stringify(results.q7e_type_vertical.rows.slice(0, 3), null, 2)
+      );
+    }
+  } else {
+    results.q7e_type_vertical = { ok: false, error: "skipped (Q7c failed)" };
+  }
+
+  // ---------------------------------------------------------------
+  // Summary
+  // ---------------------------------------------------------------
+  console.log(`\n${"=".repeat(70)}`);
+  console.log("SUMMARY");
+  console.log("=".repeat(70));
+  console.log(
+    JSON.stringify(
+      {
+        q1_pmax_campaigns: results.q1_pmax_campaigns.ok
+          ? results.q1_pmax_campaigns.rows.length
+          : `FAILED: ${results.q1_pmax_campaigns.error}`,
+        q2_asset_groups: results.q2_asset_groups.ok
+          ? results.q2_asset_groups.rows.length
+          : `FAILED: ${results.q2_asset_groups.error}`,
+        q3_asset_breakdown_rows: results.q3_asset_breakdown.ok
+          ? results.q3_asset_breakdown.rows.length
+          : `FAILED: ${results.q3_asset_breakdown.error}`,
+        q3_aggregation: results.q3_aggregation ?? null,
+        q4_metrics_rows: results.q4_metrics.ok
+          ? results.q4_metrics.rows.length
+          : `FAILED: ${results.q4_metrics.error}`,
+        q5_retail_pmax: results.q5_retail.ok
+          ? results.q5_retail.rows.length > 0 &&
+            results.q5_retail.rows.some(
+              (r) => r.campaign?.shopping_setting?.merchant_id
+            )
+            ? "YES (retail PMax detected)"
+            : "NO (standard PMax)"
+          : `FAILED: ${results.q5_retail.error}`,
+        q6a_base: results.q6a_base.ok
+          ? `${results.q6a_base.rows.length} rows`
+          : `FAILED: ${results.q6a_base.error}`,
+        q6b_image: results.q6b_image.ok
+          ? `${results.q6b_image.rows.length} rows`
+          : `FAILED: ${results.q6b_image.error}`,
+        q6c_video: results.q6c_video.ok
+          ? `${results.q6c_video.rows.length} rows`
+          : `FAILED: ${results.q6c_video.error}`,
+        q7a_pgv_base: results.q7a_pgv_base.ok
+          ? `${results.q7a_pgv_base.rows.length} rows`
+          : `FAILED: ${results.q7a_pgv_base.error}`,
+        q7b_pgv_conversions: results.q7b_pgv_conversions.ok
+          ? `${results.q7b_pgv_conversions.rows.length} rows`
+          : `FAILED: ${results.q7b_pgv_conversions.error}`,
+        q7c_lgf_join: results.q7c_lgf_join.ok
+          ? `${results.q7c_lgf_join.rows.length} rows`
+          : `FAILED: ${results.q7c_lgf_join.error}`,
+        q7d_case_value: results.q7d_case_value.ok
+          ? `${results.q7d_case_value.rows.length} rows`
+          : `FAILED: ${results.q7d_case_value.error}`,
+        q7e_type_vertical: results.q7e_type_vertical.ok
+          ? `${results.q7e_type_vertical.rows.length} rows`
+          : `FAILED: ${results.q7e_type_vertical.error}`,
+        q8a_spv_base: results.q8a_spv_base.ok
+          ? `${results.q8a_spv_base.rows.length} rows`
+          : `FAILED: ${results.q8a_spv_base.error}`,
+        q8b_spv_conversions: results.q8b_spv_conversions.ok
+          ? `${results.q8b_spv_conversions.rows.length} rows`
+          : `FAILED: ${results.q8b_spv_conversions.error}`,
+        q8c_spv_campaign: results.q8c_spv_campaign.ok
+          ? `${results.q8c_spv_campaign.rows.length} rows`
+          : `FAILED: ${results.q8c_spv_campaign.error}`,
+        q8d_spv_join_probe: results.q8d_spv_join_probe.ok
+          ? `${results.q8d_spv_join_probe.rows.length} rows`
+          : `FAILED: ${results.q8d_spv_join_probe.error}`,
+        q8e_spv_metadata: results.q8e_spv_metadata.ok
+          ? `${results.q8e_spv_metadata.rows.length} rows`
+          : `FAILED: ${results.q8e_spv_metadata.error}`,
+        q6f_status_unfiltered: results.q6f_status_unfiltered.ok
+          ? `${results.q6f_status_unfiltered.rows.length} rows`
+          : `FAILED: ${results.q6f_status_unfiltered.error}`,
+        q6f_status_distribution: results.q6f_status_distribution ?? null,
+        q6f_status_filtered: results.q6f_status_filtered.ok
+          ? `${results.q6f_status_filtered.rows.length} rows`
+          : `FAILED: ${results.q6f_status_filtered.error}`,
+        q9_1_status_select: results.q9_1_status_select?.ok
+          ? `${results.q9_1_status_select.rows.length} rows`
+          : `FAILED: ${results.q9_1_status_select?.error ?? "not run"}`,
+        q9_2_buckets: results.q9_2_buckets ?? null,
+        q9_2_mismatch_count: results.q9_2_mismatch_count ?? null,
+        q9_2_mismatch_sample: results.q9_2_mismatch_sample ?? null,
+      },
+      null,
+      2
+    )
+  );
+}
+
+main().catch((err) => {
+  console.error("Unexpected fatal error:", err);
+  process.exit(1);
+});

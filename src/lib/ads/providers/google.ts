@@ -20,6 +20,144 @@ import {
   type TimeSeriesPoint,
 } from "@/lib/google-ads/timeseries";
 
+// ──────────────────────────────────────────────────────────────────
+// Performance Max enum maps (ADR-013)
+// ──────────────────────────────────────────────────────────────────
+// Integer values verified against Google Ads proto definitions
+// (ad_strength_pb2 + asset_group_primary_status_pb2). The SDK can
+// serialize enum fields as EITHER the integer or the string label
+// depending on call site / response shape — the readers below handle
+// both modes (see `readAdStrength` / `readPrimaryStatus`).
+//
+// Trap avoided: an earlier recon note assumed ad_strength=5 meant GOOD.
+// Per the proto, 5 = AVERAGE. Always cross-check with proto, not docs.
+const AD_STRENGTH_MAP = {
+  0: "UNSPECIFIED",
+  1: "UNKNOWN",
+  2: "PENDING",
+  3: "NO_ADS",
+  4: "POOR",
+  5: "AVERAGE",
+  6: "GOOD",
+  7: "EXCELLENT",
+} as const;
+
+type AdStrengthLabel = (typeof AD_STRENGTH_MAP)[keyof typeof AD_STRENGTH_MAP];
+
+const PRIMARY_STATUS_MAP = {
+  0: "UNSPECIFIED",
+  1: "UNKNOWN",
+  2: "ELIGIBLE",
+  3: "PAUSED",
+  4: "REMOVED",
+  5: "NOT_ELIGIBLE",
+  6: "LIMITED",
+  7: "PENDING",
+} as const;
+
+type PrimaryStatusLabel =
+  (typeof PRIMARY_STATUS_MAP)[keyof typeof PRIMARY_STATUS_MAP];
+
+// AssetTypeEnum subset — the three values M-PMax actually disambiguates
+// (text vs image vs YouTube video drive the type_data render branch).
+// Other values (CALLOUT, SITELINK, PROMOTION, etc.) collapse to "OTHER"
+// since they're surfaced separately via the ADR-012 extensions pipeline,
+// not as asset_group assets.
+const ASSET_TYPE_MAP: Record<number, string> = {
+  0: "UNSPECIFIED",
+  1: "UNKNOWN",
+  2: "YOUTUBE_VIDEO",
+  3: "MEDIA_BUNDLE",
+  4: "IMAGE",
+  5: "TEXT",
+};
+
+function readAssetType(raw: unknown): string {
+  if (typeof raw === "number") {
+    return ASSET_TYPE_MAP[raw] ?? `OTHER_${raw}`;
+  }
+  if (typeof raw === "string" && raw.length > 0) return raw;
+  return "UNKNOWN";
+}
+
+// Field type is best derived from the resource_name suffix, which IS the
+// authoritative label ("...~HEADLINE", "...~MARKETING_IMAGE", etc.) — the
+// integer enum has shifted across Google Ads API versions (Q6 against imaa
+// returned field_type=19 with resource_name suffix SQUARE_MARKETING_IMAGE,
+// while older protos numbered 19 as LONG_HEADLINE). Resource_name suffix is
+// version-stable; the integer is the fallback.
+function readAssetFieldType(
+  resourceName: unknown,
+  fieldTypeInt: unknown
+): string {
+  if (typeof resourceName === "string" && resourceName.length > 0) {
+    const tail = resourceName.split("~").pop();
+    if (tail && tail.length > 0) return tail;
+  }
+  if (typeof fieldTypeInt === "number") {
+    return `FIELD_TYPE_${fieldTypeInt}`;
+  }
+  if (typeof fieldTypeInt === "string" && fieldTypeInt.length > 0) {
+    return fieldTypeInt;
+  }
+  return "UNKNOWN";
+}
+
+function readAdStrength(raw: unknown): AdStrengthLabel {
+  if (typeof raw === "number") {
+    return AD_STRENGTH_MAP[raw as keyof typeof AD_STRENGTH_MAP] ?? "UNKNOWN";
+  }
+  if (typeof raw === "string") {
+    return (Object.values(AD_STRENGTH_MAP) as string[]).includes(raw)
+      ? (raw as AdStrengthLabel)
+      : "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
+
+function readPrimaryStatus(raw: unknown): PrimaryStatusLabel {
+  if (typeof raw === "number") {
+    return (
+      PRIMARY_STATUS_MAP[raw as keyof typeof PRIMARY_STATUS_MAP] ?? "UNKNOWN"
+    );
+  }
+  if (typeof raw === "string") {
+    return (Object.values(PRIMARY_STATUS_MAP) as string[]).includes(raw)
+      ? (raw as PrimaryStatusLabel)
+      : "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
+
+/**
+ * Collapse asset_group.primary_status into the UnifiedAdCommon 3-value
+ * status union. Mirrors the same "collapse-to-3-states" precedent
+ * `computeEffectiveAdStatus` uses for the ad-level rollup (Google has
+ * many statuses; the common-level field stays ACTIVE/PAUSED/DELETED only).
+ *
+ * The raw primary_status label is preserved in `type_data.primaryStatus`
+ * for richer UI (tooltip can distinguish LIMITED from a plain PAUSED).
+ */
+function normalizeAssetGroupStatus(
+  primaryStatus: PrimaryStatusLabel
+): "ACTIVE" | "PAUSED" | "DELETED" {
+  switch (primaryStatus) {
+    case "ELIGIBLE":
+      return "ACTIVE";
+    case "PAUSED":
+      return "PAUSED";
+    case "REMOVED":
+      return "DELETED";
+    case "NOT_ELIGIBLE":
+    case "LIMITED":
+    case "PENDING":
+    case "UNSPECIFIED":
+    case "UNKNOWN":
+    default:
+      return "PAUSED";
+  }
+}
+
 /**
  * GoogleAdsAdapter wraps the Google Ads-specific fetchers and normalizes
  * their output to the Unified shapes consumed by /api/ads/* endpoints.
@@ -175,14 +313,20 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
   async getAds(range: DateRangeInput): Promise<UnifiedAd[]> {
     const { dateFrom, dateTo } = this.resolveDateRange(range);
 
-    // Pass 1: fetch ad rows (now includes imageAssetResourceNames)
-    const result = await fetchAds({
-      customerId: this.customerId,
-      refreshToken: this.refreshToken,
-      dateFrom,
-      dateTo,
-      loginCustomerId: this.loginCustomerId,
-    });
+    // Pass 1: parallel — ad rows (cost + creative fields) + ad-level
+    // purchase merger (ADR-011 sibling, Commit 4b). The merger query is
+    // independent of fetchAds output and runs against `FROM ad_group_ad`
+    // with the same date filter, so they share the wall-time path.
+    const [result, adPurchaseTotals] = await Promise.all([
+      fetchAds({
+        customerId: this.customerId,
+        refreshToken: this.refreshToken,
+        dateFrom,
+        dateTo,
+        loginCustomerId: this.loginCustomerId,
+      }),
+      this.fetchPurchaseAdTotals(dateFrom, dateTo),
+    ]);
 
     if (!result) return [];
 
@@ -227,10 +371,63 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       }),
     ]);
 
-    // Pass 5: normalize with URL lookups + extensions baked in.
-    return activeAds.map((ad) =>
-      this.normalizeAd(ad, urlMap, extensionsMap)
+    // Pass 5: normalize with URL lookups + extensions + purchase merger.
+    const normalizedAds = activeAds.map((ad) =>
+      this.normalizeAd(ad, urlMap, extensionsMap, adPurchaseTotals)
     );
+
+    // Pass 6 (M-PMax / ADR-013): asset_group rows + per-asset enrichment
+    // + asset_group purchase merger (Commit 5). PMax campaigns return
+    // ZERO rows from passes 1-5 (no ad_group_ad), so pass 6 is the sole
+    // creative-unit surface for them. All three queries run in parallel
+    // — they reach Google independently (different GAQL resources /
+    // different segment constraints), so none blocks the others.
+    const [assetGroupRows, assetsByGroupId, assetGroupPurchaseTotals] =
+      await Promise.all([
+        this.fetchAssetGroupRows(dateFrom, dateTo),
+        this.fetchAssetGroupAssets(),
+        this.fetchPurchaseAssetGroupTotals(dateFrom, dateTo),
+      ]);
+
+    // Merge: layer in `type_data.assets` + purchase-attribution trio onto
+    // each asset_group row. Pure-functional rebuild (no in-place mutation
+    // on the discriminated union — same pattern as MetaAdapter.getAds
+    // per ADR-013 long-term-fit). Purchase lookup mirrors the normalizeAd
+    // pattern from Commit 4b: entry present → hasConversionData=true even
+    // when purchases=0; entry absent / null Map → hasConversionData=false.
+    const enrichedAssetGroups: UnifiedAd[] = assetGroupRows.map((row) => {
+      if (row.ad_type !== "PMAX_ASSET_GROUP") return row;
+
+      const assets = assetsByGroupId.get(row.id) ?? [];
+
+      const purchaseEntry = assetGroupPurchaseTotals?.get(row.id);
+      const hasConversionData =
+        assetGroupPurchaseTotals != null && purchaseEntry !== undefined;
+      const purchases: number | null = hasConversionData
+        ? purchaseEntry!.purchases
+        : null;
+      const revenue: number | null = hasConversionData
+        ? purchaseEntry!.revenue
+        : null;
+      const roas: number | null =
+        hasConversionData && row.spend > 0
+          ? purchaseEntry!.revenue / row.spend
+          : null;
+
+      return {
+        ...row,
+        purchases,
+        revenue,
+        roas,
+        hasConversionData,
+        type_data: {
+          ...row.type_data,
+          assets,
+        },
+      };
+    });
+
+    return [...normalizedAds, ...enrichedAssetGroups];
   }
 
   // ───────────────────────────────────────────────────────────────
@@ -313,9 +510,15 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
    * the results in normalizeCampaignToInsight + normalizeTotalsToInsight.
    *
    * Returns null when:
-   * - purchaseActionIds is null (cache not populated for this account)
+   * - `purchaseActionIds` is null (cache not populated for this customer)
+   * - `purchaseActionIds.size === 0` (configured but no PURCHASE/STORE_SALE
+   *   actions exist for the account — strict "tracking configured"
+   *   semantic, aligned across all four siblings in Commit 5 / ADR-013;
+   *   previously this branch proceeded with an empty Map which surfaced
+   *   hasConversionData=true + zeros — flagged in Commit 4b as the
+   *   loose/strict semantic divergence, resolved here).
    * - the Google API call fails (auth, quota, transient — caught here)
-   * Both null cases trigger purchases=null + hasConversionData=false in
+   * All null cases trigger purchases=null + hasConversionData=false in
    * the normalize functions, per ADR-011 / ADR-008.
    *
    * Returned map: campaign.id (string) -> { purchases, revenue } summed
@@ -332,6 +535,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     dateTo: string
   ): Promise<Map<string, { purchases: number; revenue: number }> | null> {
     if (this.purchaseActionIds === null) return null;
+    if (this.purchaseActionIds.size === 0) return null;
 
     try {
       const api = new GoogleAdsApi({
@@ -405,6 +609,214 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
   }
 
   /**
+   * Segmented purchase merger at AD LEVEL (Commit 4b, ADR-013).
+   * Sibling of fetchPurchaseCampaignTotals — same two-query GAQL pattern,
+   * same `segments.conversion_action` constraint (cost metrics live in the
+   * Pass 1 fetchAds query; this query carries only conversions). Restores
+   * semantically-correct purchases/revenue/ROAS on Google Search/Display
+   * ad cards after Commit 4 exposed that normalizeAd had been mapping
+   * raw `metrics.conversions` (all conversion-action types) into the
+   * `purchases` field — months-old ADR-011 violation surfaced by the
+   * retrofit (see feedback_existing_code_audit_during_retrofit.md).
+   *
+   * Returns null when:
+   * - `purchaseActionIds` is null (cache not populated for this customer)
+   * - `purchaseActionIds.size === 0` (configured but no PURCHASE/STORE_SALE-
+   *   categorized actions for the account — strict "tracking configured"
+   *   semantic per Commit 4b plan; diverges from the campaign-level
+   *   sibling, which proceeds with empty Set and surfaces 0/0 with
+   *   hasConversionData=true. The campaign-level path may want the same
+   *   stricter reading in a follow-up alignment commit.)
+   * - the Google API call fails (caught here, logged, degrades to null)
+   *
+   * Returned Map: `ad_group_ad.ad.id` (string) -> { purchases, revenue }.
+   * IMPORTANT: every ad that appears in the GAQL response gets an entry,
+   * even if NONE of its conversion-action rows matched a purchase ID
+   * (initialized at {0,0}). This preserves the "—" vs "0" distinction:
+   *  - entry present + values 0  →  "tracking configured, this ad had 0 purchases"
+   *  - entry absent (no GAQL rows at all)  →  hasConversionData=false → "—"
+   */
+  private async fetchPurchaseAdTotals(
+    dateFrom: string,
+    dateTo: string
+  ): Promise<Map<string, { purchases: number; revenue: number }> | null> {
+    if (this.purchaseActionIds === null) return null;
+    if (this.purchaseActionIds.size === 0) return null;
+
+    try {
+      const api = new GoogleAdsApi({
+        client_id: process.env.GOOGLE_ADS_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_ADS_CLIENT_SECRET!,
+        developer_token: process.env.GOOGLE_ADS_DEVELOPER_TOKEN!,
+      });
+
+      const customer = api.Customer({
+        customer_id: this.customerId,
+        refresh_token: this.refreshToken,
+        ...(this.loginCustomerId
+          ? { login_customer_id: this.loginCustomerId }
+          : {}),
+      });
+
+      // ad_group_ad.status filter matches the Pass 1 fetchAds query so the
+      // two result sets are joinable on ad.id without ghost rows.
+      const query = `
+        SELECT
+          ad_group_ad.ad.id,
+          segments.conversion_action,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM ad_group_ad
+        WHERE segments.date BETWEEN '${dateFrom}' AND '${dateTo}'
+          AND ad_group_ad.status != 'REMOVED'
+      `;
+
+      const rows = await customer.query(query);
+
+      const byAdId = new Map<
+        string,
+        { purchases: number; revenue: number }
+      >();
+
+      for (const row of rows) {
+        const adId = String(row.ad_group_ad?.ad?.id ?? "");
+        if (!adId) continue;
+
+        // Init on first sighting so this ad ends up with hasConversionData=true
+        // even when none of its rows match a purchase action (legitimate 0).
+        const existing = byAdId.get(adId) ?? { purchases: 0, revenue: 0 };
+
+        const resourcePath = String(row.segments?.conversion_action ?? "");
+        const actionId = resourcePath.split("/").pop() ?? "";
+
+        if (this.purchaseActionIds.has(actionId)) {
+          const conversions = Number(row.metrics?.conversions) || 0;
+          const conversionsValue =
+            Number(row.metrics?.conversions_value) || 0;
+          existing.purchases += conversions;
+          existing.revenue += conversionsValue;
+        }
+
+        byAdId.set(adId, existing);
+      }
+
+      return byAdId;
+    } catch (err) {
+      const message =
+        err instanceof errors.GoogleAdsFailure
+          ? err.errors?.map((e) => e.message).join("; ") ??
+            "GoogleAdsFailure (no detail)"
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      console.warn(
+        `[GoogleAdsAdapter] fetchPurchaseAdTotals failed for ${this.customerId}: ${message}. Degrading ad-level purchases to null.`
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Segmented purchase merger at PMAX ASSET_GROUP LEVEL (Commit 5, ADR-013).
+   * Sibling of fetchPurchaseAdTotals — same two-query GAQL pattern, same
+   * `segments.conversion_action` constraint (cost metrics live in the
+   * Pass 6 fetchAssetGroupRows query; this query carries only conversions),
+   * same strict "tracking configured" semantic.
+   *
+   * The `FROM asset_group` GAQL resource + `PERFORMANCE_MAX` channel filter
+   * scope the join to PMax campaigns only — same selector pattern the rest
+   * of the asset_group queries use (Stage 3 recon Q2/Q4 / ADR-013).
+   *
+   * Returns null in the same conditions as fetchPurchaseAdTotals: cache
+   * miss, no purchase actions configured, or Google API failure. Returned
+   * Map: `asset_group.id` (string) -> { purchases, revenue }. "First
+   * sighting" Map semantic preserved (entry present with {0,0} means
+   * "tracking configured, zero purchases attributed to this asset_group"
+   * — preserves the '—' vs '0' distinction at the asset_group card UI).
+   */
+  private async fetchPurchaseAssetGroupTotals(
+    dateFrom: string,
+    dateTo: string
+  ): Promise<Map<string, { purchases: number; revenue: number }> | null> {
+    if (this.purchaseActionIds === null) return null;
+    if (this.purchaseActionIds.size === 0) return null;
+
+    try {
+      const api = new GoogleAdsApi({
+        client_id: process.env.GOOGLE_ADS_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_ADS_CLIENT_SECRET!,
+        developer_token: process.env.GOOGLE_ADS_DEVELOPER_TOKEN!,
+      });
+
+      const customer = api.Customer({
+        customer_id: this.customerId,
+        refresh_token: this.refreshToken,
+        ...(this.loginCustomerId
+          ? { login_customer_id: this.loginCustomerId }
+          : {}),
+      });
+
+      const query = `
+        SELECT
+          asset_group.id,
+          segments.conversion_action,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM asset_group
+        WHERE segments.date BETWEEN '${dateFrom}' AND '${dateTo}'
+          AND campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+      `;
+
+      const rows = await customer.query(query);
+
+      const byAssetGroup = new Map<
+        string,
+        { purchases: number; revenue: number }
+      >();
+
+      for (const row of rows) {
+        const assetGroupId = String(row.asset_group?.id ?? "");
+        if (!assetGroupId) continue;
+
+        // First-sighting init: every asset_group with any GAQL row ends up
+        // with hasConversionData=true even if none of its rows match a
+        // purchase action (legitimate 0 purchase count).
+        const existing = byAssetGroup.get(assetGroupId) ?? {
+          purchases: 0,
+          revenue: 0,
+        };
+
+        const resourcePath = String(row.segments?.conversion_action ?? "");
+        const actionId = resourcePath.split("/").pop() ?? "";
+
+        if (this.purchaseActionIds.has(actionId)) {
+          const conversions = Number(row.metrics?.conversions) || 0;
+          const conversionsValue =
+            Number(row.metrics?.conversions_value) || 0;
+          existing.purchases += conversions;
+          existing.revenue += conversionsValue;
+        }
+
+        byAssetGroup.set(assetGroupId, existing);
+      }
+
+      return byAssetGroup;
+    } catch (err) {
+      const message =
+        err instanceof errors.GoogleAdsFailure
+          ? err.errors?.map((e) => e.message).join("; ") ??
+            "GoogleAdsFailure (no detail)"
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      console.warn(
+        `[GoogleAdsAdapter] fetchPurchaseAssetGroupTotals failed for ${this.customerId}: ${message}. Degrading PMax asset_group purchases to null.`
+      );
+      return null;
+    }
+  }
+
+  /**
    * Segmented Q2 query for purchase conversions per day.
    *
    * Time-series companion to fetchPurchaseCampaignTotals. Same GAQL
@@ -420,6 +832,8 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     dateTo: string
   ): Promise<Map<string, { purchases: number; revenue: number }> | null> {
     if (this.purchaseActionIds === null) return null;
+    // Strict semantic, aligned with the other three siblings in Commit 5.
+    if (this.purchaseActionIds.size === 0) return null;
 
     try {
       const api = new GoogleAdsApi({
@@ -664,15 +1078,21 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
   };
 
   /**
-   * AdRow → UnifiedAd. Composite name from campaign + ad group since Google
-   * ads lack a user-friendly name field. Creative content (headlines, images,
-   * video assets) is NOT included — Google has 35+ ad types with wildly
-   * different schemas; surfacing them needs a separate fetcher.
+   * AdRow → UnifiedAd discriminated variant. Branches on Google's internal
+   * ad type, returns one of: RSA, RDA, IMAGE_AD, UNKNOWN_GOOGLE (Phase 4.8
+   * M-PMax / ADR-013).
+   *
+   * Composite name from campaign + ad group since Google ads lack a
+   * user-friendly name field.
    */
   private normalizeAd = (
     ad: AdRow,
     urlMap?: Map<string, string>,
-    extensionsMap?: Map<string, UnifiedAdExtensions>
+    extensionsMap?: Map<string, UnifiedAdExtensions>,
+    adPurchaseTotals?: Map<
+      string,
+      { purchases: number; revenue: number }
+    > | null
   ): UnifiedAd => {
     // Resolve collected asset resource names to URLs via the batched map.
     const resolvedUrls: string[] = [];
@@ -683,79 +1103,424 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       }
     }
 
-    // Single image → imageUrl; multiple → carouselImages (reuses Meta's
-    // CarouselImage / CarouselDisplay render path with zero UI changes).
-    const imageUrl = resolvedUrls.length > 0 ? resolvedUrls[0] : undefined;
-    const carouselImages =
-      resolvedUrls.length > 1 ? resolvedUrls : undefined;
-
     // Phase 4.8 M6 — attach extensions if any (Google-only; undefined when
     // the ad has no extensions or fetchAdExtensions returned empty).
     const extensions = extensionsMap?.get(ad.id);
 
-    return {
+    // Commit 4b — purchase merger lookup (ADR-011 sibling at ad level).
+    // adPurchaseTotals null → cache miss / merger failure / no purchase
+    // actions configured → hasConversionData=false (UI shows "—").
+    // Entry absent (ad had no GAQL rows in the segmented query) →
+    // hasConversionData=false (same UX). Entry present → hasConversionData
+    // =true even if purchases=0 (preserves "configured + zero" distinction).
+    const purchaseEntry = adPurchaseTotals?.get(ad.id);
+    const hasConversionData =
+      adPurchaseTotals != null && purchaseEntry !== undefined;
+    const purchases: number | null = hasConversionData
+      ? purchaseEntry!.purchases
+      : null;
+    const revenue: number | null = hasConversionData
+      ? purchaseEntry!.revenue
+      : null;
+    const roas: number | null =
+      hasConversionData && ad.spend > 0
+        ? purchaseEntry!.revenue / ad.spend
+        : null;
+
+    // Common fields shared across all Google variants.
+    const common = {
       id: ad.id,
       name: `${ad.campaign_name} — ${ad.ad_group_name}`,
       currency: this.accountInfo.currency,
-      status: this.normalizeAdStatus(ad.status),
+      status: this.computeEffectiveAdStatus(
+        ad.campaign_status,
+        ad.ad_group_status,
+        ad.status
+      ),
       campaignId: ad.campaign_id,
       campaignName: ad.campaign_name,
       adsetId: ad.ad_group_id,
       adsetName: ad.ad_group_name,
-      creativeId: undefined,
-      imageUrl,
-      thumbnailUrl: undefined,
-      videoId: undefined,
-      creativeType: this.adTypeToCreativeType(
-        ad.type,
-        resolvedUrls.length > 0
-      ),
-      previewLink: ad.final_url ?? undefined,
-      headlines: ad.headlines,
-      descriptions: ad.descriptions,
-      carouselImages,
-      extensions,
       spend: ad.spend,
-      revenue: ad.revenue,
-      roas: ad.roas,
-      purchases: ad.conversions,
+      revenue,
+      roas,
+      purchases,
+      hasConversionData,
       impressions: ad.impressions,
       clicks: ad.clicks,
       ctr: ad.ctr * 100,
       cpc: ad.cpc,
-      provider: "google",
+      extensions,
+      provider: "google" as const,
     };
+
+    const finalUrl = ad.final_url ?? undefined;
+    const headlines = ad.headlines ?? [];
+    const descriptions = ad.descriptions ?? [];
+
+    // Branch by Google's internal ad type → discriminated variant.
+    switch (ad.type) {
+      case "RESPONSIVE_SEARCH_AD":
+      case "EXPANDED_TEXT_AD":
+        return {
+          ...common,
+          ad_type: "RSA",
+          type_data: {
+            headlines,
+            descriptions,
+            finalUrl,
+          },
+        };
+
+      case "RESPONSIVE_DISPLAY_AD":
+      case "LEGACY_RESPONSIVE_DISPLAY_AD":
+        return {
+          ...common,
+          ad_type: "RDA",
+          type_data: {
+            headlines,
+            descriptions,
+            marketingImages:
+              resolvedUrls.length > 0 ? resolvedUrls : undefined,
+            finalUrl,
+          },
+        };
+
+      case "IMAGE_AD":
+        return {
+          ...common,
+          ad_type: "IMAGE_AD",
+          type_data: {
+            // SDK currently rejects image_ad.image_asset SELECT (M5); this
+            // stays undefined until SDK supports the field. Variant kept
+            // for forward-compat per ADR-013.
+            imageUrl: resolvedUrls.length > 0 ? resolvedUrls[0] : undefined,
+            finalUrl,
+          },
+        };
+
+      default:
+        // Shopping, App, Call, Smart Campaigns, Demand Gen, Video, etc.
+        // No specific render branch in v1 — falls through to placeholder.
+        // Original Google type preserved in type_data.googleAdType for
+        // diagnostic visibility.
+        return {
+          ...common,
+          ad_type: "UNKNOWN_GOOGLE",
+          type_data: {
+            googleAdType: ad.type,
+            finalUrl,
+          },
+        };
+    }
   };
 
-  private normalizeAdStatus(googleStatus: string): UnifiedAd["status"] {
-    if (googleStatus === "ENABLED") return "ACTIVE";
-    if (googleStatus === "REMOVED") return "DELETED";
+  /**
+   * Computes effective ad serving status as min-restrictive rollup of
+   * (campaign.status, ad_group.status, ad_group_ad.status). Matches
+   * Google Ads UI's "Status" column logic — a PAUSED parent blocks
+   * serving regardless of child status.
+   *
+   * Priority: REMOVED > PAUSED > ENABLED. Replaces the prior
+   * normalizeAdStatus which directly mirrored ad_group_ad.status only
+   * and surfaced "نشط" badges on ads whose parent campaigns were paused
+   * (Stage 5 user report — root cause analysis in chat).
+   */
+  private computeEffectiveAdStatus(
+    campaignStatus: string,
+    adGroupStatus: string,
+    adStatus: string
+  ): UnifiedAd["status"] {
+    const statuses = [campaignStatus, adGroupStatus, adStatus];
+    if (statuses.includes("REMOVED")) return "DELETED";
+    if (statuses.includes("PAUSED")) return "PAUSED";
+    if (statuses.every((s) => s === "ENABLED")) return "ACTIVE";
+    // Conservative fallback — any UNSPECIFIED / UNKNOWN / future-enum
+    // value in the chain collapses to PAUSED rather than misleadingly
+    // claiming the ad is serving.
     return "PAUSED";
   }
 
   /**
-   * Best-effort mapping from Google's ad type strings → Unified creativeType.
-   * Phase 4.8 M5 Commit 2: when image assets resolved successfully, prefer
-   * "image" so the UI uses the photo render branch instead of the SERP-style
-   * text card. RDA falls back to "text" only when its marketing_images
-   * couldn't be resolved (rare — usually a transient asset API failure).
+   * Performance Max asset_group rows (ADR-013, Commit 3).
+   *
+   * One GAQL pass against `FROM asset_group` with 11 confirmed-working
+   * fields (Stage 3 recon). PMax campaigns expose no `ad_group_ad`, so this
+   * is the sole creative-unit surface for them. Returns UnifiedAd rows of
+   * the PMAX_ASSET_GROUP variant; `assets[]` is intentionally empty here
+   * and populated by `fetchAssetGroupAssets` in Commit 4.
+   *
+   * Fields explicitly NOT in the SELECT (per ADR-013 field-isolation
+   * discipline):
+   *  - `asset_group.asset_coverage` (v19+ field, not Stage-3 tested)
+   *  - `asset_group.status` (richer `primary_status` already covers it)
+   *  - `asset_group_asset.performance_label` (proven runtime-rejected in
+   *    Stage 3 — bundled into the future v2 work)
+   *
+   * Error handling mirrors `fetchPurchaseCampaignTotals`: a GoogleAdsFailure
+   * (or any thrown error) is logged and degrades the result to []. Callers
+   * concatenate the result with prior passes, so [] is a safe no-op for
+   * accounts without PMax campaigns.
    */
-  private adTypeToCreativeType(
-    googleType: string,
-    hasResolvedImages: boolean = false
-  ): UnifiedAd["creativeType"] {
-    if (googleType.includes("VIDEO")) return "video";
-    if (hasResolvedImages) return "image";
-    if (googleType === "IMAGE_AD") return "image";
-    if (
-      googleType === "RESPONSIVE_SEARCH_AD" ||
-      googleType === "EXPANDED_TEXT_AD" ||
-      googleType === "RESPONSIVE_DISPLAY_AD" ||
-      googleType === "LEGACY_RESPONSIVE_DISPLAY_AD"
-    ) {
-      return "text";
+  private async fetchAssetGroupRows(
+    dateFrom: string,
+    dateTo: string
+  ): Promise<UnifiedAd[]> {
+    try {
+      const api = new GoogleAdsApi({
+        client_id: process.env.GOOGLE_ADS_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_ADS_CLIENT_SECRET!,
+        developer_token: process.env.GOOGLE_ADS_DEVELOPER_TOKEN!,
+      });
+
+      const customer = api.Customer({
+        customer_id: this.customerId,
+        refresh_token: this.refreshToken,
+        ...(this.loginCustomerId
+          ? { login_customer_id: this.loginCustomerId }
+          : {}),
+      });
+
+      const query = `
+        SELECT
+          campaign.id,
+          campaign.name,
+          asset_group.id,
+          asset_group.name,
+          asset_group.ad_strength,
+          asset_group.primary_status,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM asset_group
+        WHERE segments.date BETWEEN '${dateFrom}' AND '${dateTo}'
+      `;
+
+      const rows = await customer.query(query);
+
+      const out: UnifiedAd[] = [];
+      for (const row of rows) {
+        const assetGroupId = String(row.asset_group?.id ?? "");
+        if (!assetGroupId) continue;
+
+        const impressions = Number(row.metrics?.impressions) || 0;
+        const clicks = Number(row.metrics?.clicks) || 0;
+        const costMicros = Number(row.metrics?.cost_micros) || 0;
+        const spend = costMicros / 1_000_000;
+
+        // Drop zero-activity rows — same convention as fetchAds active filter.
+        if (impressions === 0 && spend === 0) continue;
+
+        // CTR computed client-side from clicks/impressions instead of metrics.ctr.
+        // Mathematically equivalent (Google's metrics.ctr = clicks/impressions).
+        // Choice rationale: minimize GAQL field surface to reduce M5-class
+        // field-rejection risk.
+        const ctr = impressions > 0 ? (clicks / impressions) * 100 : 0;
+        const cpc = clicks > 0 ? spend / clicks : 0;
+
+        const adStrength = readAdStrength(row.asset_group?.ad_strength);
+        const primaryStatus = readPrimaryStatus(
+          row.asset_group?.primary_status
+        );
+
+        out.push({
+          ad_type: "PMAX_ASSET_GROUP",
+          id: assetGroupId,
+          name: String(row.asset_group?.name ?? ""),
+          accountId: this.customerId,
+          currency: this.accountInfo.currency,
+          status: normalizeAssetGroupStatus(primaryStatus),
+          campaignId: String(row.campaign?.id ?? ""),
+          campaignName: String(row.campaign?.name ?? ""),
+          spend,
+          // Purchase trio + hasConversionData start as the "no data" defaults
+          // here; the Pass 6 merge step overwrites them per-row using
+          // fetchPurchaseAssetGroupTotals (Commit 5). Keeping the defaults
+          // inline rather than threading the Map through means
+          // fetchAssetGroupRows stays focused on row construction and the
+          // merger lookup lives in one place (parallel structure to the
+          // type_data.assets merge).
+          revenue: null,
+          roas: null,
+          purchases: null,
+          hasConversionData: false,
+          impressions,
+          clicks,
+          ctr,
+          cpc,
+          provider: "google",
+          type_data: {
+            adStrength,
+            primaryStatus,
+            assets: [],
+          },
+        });
+      }
+
+      return out;
+    } catch (err) {
+      const message =
+        err instanceof errors.GoogleAdsFailure
+          ? err.errors?.map((e) => e.message).join("; ") ??
+            "GoogleAdsFailure (no detail)"
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      console.warn(
+        `[GoogleAdsAdapter] fetchAssetGroupRows failed for ${this.customerId}: ${message}. Returning [] (no PMax asset_group rows this fetch).`
+      );
+      return [];
     }
-    // Shopping, App, Call, Smart Campaigns, Demand Gen — no surface yet.
-    return "unknown";
   }
+
+  /**
+   * Performance Max per-asset enrichment (ADR-013, Commit 4).
+   *
+   * One GAQL pass against `FROM asset_group_asset` with 8 confirmed-working
+   * fields (Q6a/b/c iterations in scripts/_pmax-recon.mjs — all three
+   * additive iterations passed against imaa: base 6 fields, +image URL,
+   * +YouTube video id). The fields surface text content, image URLs, and
+   * YouTube video IDs alongside the structural identifiers (field_type,
+   * asset_type).
+   *
+   * Resource_name suffix is the authoritative source for field_type label
+   * (version-stable across Google Ads API revisions; the integer enum
+   * shifted between protos). Asset type uses the integer enum subset that
+   * M-PMax actually disambiguates (text vs image vs YouTube video).
+   *
+   * Returns a Map keyed by asset_group.id (stringified) — empty when no
+   * PMax campaigns exist or the query fails. Caller merges into
+   * PMAX_ASSET_GROUP rows' type_data.assets via Promise.all in Pass 6.
+   *
+   * Fields explicitly NOT in the SELECT (per ADR-013 field-isolation
+   * discipline):
+   *  - `asset_group_asset.performance_label` — confirmed rejected in
+   *    Stage 3 Q3 (third instance of SDK-vs-runtime trap). Deferred to
+   *    v2 per the ADR.
+   *  - `asset_group_asset.primary_status` — not in Q6 iterations; can be
+   *    added in a follow-up with field-isolation verification. The
+   *    `assets[i].primaryStatus?` slot stays empty for now.
+   *
+   * Status filter (Stage 4 hotfix): `AND asset_group_asset.status !=
+   * 'REMOVED'` filters out historical unlinked assets. Verified
+   * SELECTable + WHERE-filterable via Q6f probe — see
+   * `docs/recon/pmax-recon-stage-4-2026-05-24.md`. Same pattern as
+   * `ad_group_ad.status != 'REMOVED'` in `fetchAds`. PAUSED links still
+   * surface (intentional — they're "currently attached, advertiser-
+   * paused" which is a distinct state from "unlinked").
+   */
+  private async fetchAssetGroupAssets(): Promise<
+    Map<string, AssetGroupAssetEntry[]>
+  > {
+    try {
+      const api = new GoogleAdsApi({
+        client_id: process.env.GOOGLE_ADS_CLIENT_ID!,
+        client_secret: process.env.GOOGLE_ADS_CLIENT_SECRET!,
+        developer_token: process.env.GOOGLE_ADS_DEVELOPER_TOKEN!,
+      });
+
+      const customer = api.Customer({
+        customer_id: this.customerId,
+        refresh_token: this.refreshToken,
+        ...(this.loginCustomerId
+          ? { login_customer_id: this.loginCustomerId }
+          : {}),
+      });
+
+      // `AND asset_group_asset.status != 'REMOVED'` matches the same
+      // precedent used by `fetchAds` at google-ads/ads.ts:188 for
+      // ad_group_ad. Without this filter, Google returns every link the
+      // asset_group has ever recorded — on imaa that meant 207 rows
+      // including 160 REMOVED historical entries (assets unlinked months
+      // ago). 77% payload reduction (207 → 47 active rows). Q6f probe
+      // (Stage 4 recon) verified the field is SELECTable in SDK v23 and
+      // that GAQL accepts the string literal 'REMOVED' in WHERE even
+      // though the response payload returns the integer enum value (3).
+      // See docs/recon/pmax-recon-stage-4-2026-05-24.md.
+      const query = `
+        SELECT
+          asset_group.id,
+          asset_group.name,
+          asset_group_asset.field_type,
+          asset.id,
+          asset.type,
+          asset.text_asset.text,
+          asset.image_asset.full_size.url,
+          asset.youtube_video_asset.youtube_video_id
+        FROM asset_group_asset
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+          AND asset_group_asset.status != 'REMOVED'
+      `;
+
+      const rows = await customer.query(query);
+
+      const byAssetGroup = new Map<string, AssetGroupAssetEntry[]>();
+      for (const row of rows) {
+        const agId = String(row.asset_group?.id ?? "");
+        if (!agId) continue;
+
+        const fieldType = readAssetFieldType(
+          row.asset_group_asset?.resource_name,
+          row.asset_group_asset?.field_type
+        );
+        const assetType = readAssetType(row.asset?.type);
+
+        const text =
+          typeof row.asset?.text_asset?.text === "string"
+            ? row.asset.text_asset.text
+            : undefined;
+        const imageUrl =
+          typeof row.asset?.image_asset?.full_size?.url === "string"
+            ? row.asset.image_asset.full_size.url
+            : undefined;
+        const youtubeVideoId =
+          typeof row.asset?.youtube_video_asset?.youtube_video_id === "string"
+            ? row.asset.youtube_video_asset.youtube_video_id
+            : undefined;
+
+        const entry: AssetGroupAssetEntry = {
+          fieldType,
+          assetType,
+          ...(text !== undefined ? { text } : {}),
+          ...(imageUrl !== undefined ? { imageUrl } : {}),
+          ...(youtubeVideoId !== undefined ? { youtubeVideoId } : {}),
+        };
+
+        const existing = byAssetGroup.get(agId) ?? [];
+        existing.push(entry);
+        byAssetGroup.set(agId, existing);
+      }
+
+      return byAssetGroup;
+    } catch (err) {
+      const message =
+        err instanceof errors.GoogleAdsFailure
+          ? err.errors?.map((e) => e.message).join("; ") ??
+            "GoogleAdsFailure (no detail)"
+          : err instanceof Error
+          ? err.message
+          : String(err);
+      console.warn(
+        `[GoogleAdsAdapter] fetchAssetGroupAssets failed for ${this.customerId}: ${message}. Returning empty Map (asset_group rows will render with no per-asset detail).`
+      );
+      return new Map();
+    }
+  }
+
 }
+
+/**
+ * Shape of one entry in PMAX_ASSET_GROUP `type_data.assets[]`. Mirrors the
+ * inline definition in `types.ts` so `fetchAssetGroupAssets` can declare its
+ * return type cleanly.
+ */
+type AssetGroupAssetEntry = {
+  fieldType: string;
+  assetType: string;
+  primaryStatus?: string;
+  text?: string;
+  imageUrl?: string;
+  youtubeVideoId?: string;
+};
