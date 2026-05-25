@@ -11,7 +11,45 @@
  */
 
 import { GoogleAdsApi, errors } from "google-ads-api";
-import type { UnifiedAdExtensions } from "@/lib/ads/types";
+import type {
+  UnifiedAdExtensions,
+  ImageAssetFieldType,
+} from "@/lib/ads/types";
+
+/**
+ * Image extension field_types per M8 / ADR-014.
+ * Authoritative source is the resource_name suffix walk (see Q9/Q10
+ * recon — integer 26 resolves to AD_IMAGE on imaa, NOT LANDSCAPE_LOGO
+ * as public docs claim). These string literals are matched against
+ * the `~`-separated suffix of campaign_asset.resource_name.
+ */
+const IMAGE_FIELD_TYPES = new Set<string>([
+  "AD_IMAGE",
+  "BUSINESS_LOGO",
+  "LANDSCAPE_LOGO",
+  "MARKETING_IMAGE",
+  "SQUARE_MARKETING_IMAGE",
+  "PORTRAIT_MARKETING_IMAGE",
+]);
+
+/**
+ * Extract the field_type label from `campaign_asset.resource_name`.
+ * Pattern: `customers/X/campaignAssets/CAMPAIGN_ID~ASSET_ID~LABEL`.
+ * Returns undefined when the suffix is missing or non-conforming.
+ *
+ * Per ADR-014 §Decision 7 + memory feedback_resource_name_over_integer_enums:
+ * the integer map is unreliable (Google's public docs disagree with
+ * on-the-wire reality for image field_types). The suffix is version-stable.
+ */
+function suffixLabel(resourceName: string): string | undefined {
+  if (typeof resourceName !== "string" || resourceName.length === 0) {
+    return undefined;
+  }
+  const parts = resourceName.split("~");
+  if (parts.length < 2) return undefined;
+  const tail = parts[parts.length - 1];
+  return tail.length > 0 ? tail : undefined;
+}
 
 /**
  * Extract a readable error string from a Google Ads SDK error.
@@ -119,8 +157,19 @@ export async function fetchAdExtensions(
       else campaignToAdIds.set(campId, [adId]);
     }
 
-    // Expand each campaign-level linkage into one Linkage per ad in scope
+    // Expand each campaign-level linkage into one Linkage per ad in scope.
+    // For IMAGE field_types: enforce strict status='ENABLED' per ADR-014
+    // §Decision 3 (user requirement: currently serving only, not
+    // historical). M6 text-extension types continue using the != REMOVED
+    // filter from the WHERE clause — M6 retrofit deferred per
+    // ADR-014 §Open Items §1.
     for (const campLink of campaignAssetLinkages) {
+      if (
+        IMAGE_FIELD_TYPES.has(campLink.fieldType) &&
+        campLink.status !== "ENABLED"
+      ) {
+        continue;
+      }
       const adIds = campaignToAdIds.get(campLink.campaignId);
       if (!adIds) continue;
       for (const adId of adIds) {
@@ -138,6 +187,7 @@ export async function fetchAdExtensions(
     const sitelinkNames = new Set<string>();
     const calloutNames = new Set<string>();
     const snippetNames = new Set<string>();
+    const imageNames = new Set<string>();
 
     for (const link of linkages) {
       if (link.fieldType === "SITELINK")
@@ -146,17 +196,21 @@ export async function fetchAdExtensions(
         calloutNames.add(link.assetResourceName);
       else if (link.fieldType === "STRUCTURED_SNIPPET")
         snippetNames.add(link.assetResourceName);
+      else if (IMAGE_FIELD_TYPES.has(link.fieldType))
+        imageNames.add(link.assetResourceName);
     }
 
     // =================================================================
     // Pass 3: parallel per-type asset fetches (isolated failures)
     // =================================================================
 
-    const [sitelinksMap, calloutsMap, snippetsMap] = await Promise.all([
-      fetchSitelinks(customer, sitelinkNames),
-      fetchCallouts(customer, calloutNames),
-      fetchStructuredSnippets(customer, snippetNames),
-    ]);
+    const [sitelinksMap, calloutsMap, snippetsMap, imagesMap] =
+      await Promise.all([
+        fetchSitelinks(customer, sitelinkNames),
+        fetchCallouts(customer, calloutNames),
+        fetchStructuredSnippets(customer, snippetNames),
+        fetchImages(customer, imageNames),
+      ]);
 
     // =================================================================
     // Pass 4: join linkages → per-ad extensions
@@ -189,6 +243,21 @@ export async function fetchAdExtensions(
           extensions.structuredSnippets = extensions.structuredSnippets ?? [];
           extensions.structuredSnippets.push(snippet);
         }
+      } else if (IMAGE_FIELD_TYPES.has(link.fieldType)) {
+        const img = imagesMap.get(link.assetResourceName);
+        if (img) {
+          extensions.images = extensions.images ?? [];
+          // Dedup by assetId — imaa proves the same 9 AD_IMAGE assets
+          // inherit across 4 campaign_asset rows per ad (Q10). Without
+          // dedup an ad inheriting from multiple campaign linkages would
+          // render the same image N times.
+          if (!extensions.images.some((existing) => existing.assetId === img.assetId)) {
+            extensions.images.push({
+              ...img,
+              fieldType: link.fieldType as ImageAssetFieldType,
+            });
+          }
+        }
       }
     }
 
@@ -214,6 +283,14 @@ interface CampaignLinkage {
   campaignId: string;
   fieldType: string;
   assetResourceName: string;
+  /**
+   * campaign_asset.status as returned by GAQL (string label).
+   * Carried per-row so the image branch can apply strict `= 'ENABLED'`
+   * per ADR-014 §Decision 3 while M6 branches (sitelinks/callouts/
+   * snippets) continue using the `!= 'REMOVED'` WHERE filter
+   * (M6 retrofit deferred per ADR-014 §Open Items §1).
+   */
+  status?: string;
 }
 
 async function fetchAdLevelLinkages(
@@ -222,6 +299,13 @@ async function fetchAdLevelLinkages(
   dateTo: string
 ): Promise<AdLinkage[]> {
   try {
+    // Pre-M8 behavior preserved — this fetcher only services M6 text
+    // extensions (SITELINK/CALLOUT/STRUCTURED_SNIPPET) in practice. Image
+    // linkages don't attach via ad_group_ad_asset_view (M8 recon Q5
+    // returned 0 image rows on imaa) so the suffix-walk pattern used by
+    // fetchCampaignAssetLinkages isn't needed here. If Google adds
+    // ad-level image attachment in a future API version, re-introduce
+    // suffix walk with its own recon probe.
     const query = `
       SELECT
         ad_group_ad.ad.id,
@@ -280,11 +364,21 @@ async function fetchCampaignAssetLinkages(
   customer: CustomerHandle
 ): Promise<CampaignLinkage[]> {
   try {
+    // SELECT additions (M8):
+    //  - campaign_asset.status — carried per-row to enforce strict ENABLED
+    //    for IMAGE field_types (ADR-014 §Decision 3) without retrofitting
+    //    the M6 WHERE filter (deferred per ADR-014 §Open Items §1).
+    //  - campaign_asset.resource_name — authoritative field_type label
+    //    via `~`-separated suffix (ADR-014 §Decision 7 — public docs
+    //    misreport integer 26 as LANDSCAPE_LOGO when on-the-wire it's
+    //    AD_IMAGE).
     const query = `
       SELECT
         campaign.id,
         campaign_asset.field_type,
-        campaign_asset.asset
+        campaign_asset.asset,
+        campaign_asset.status,
+        campaign_asset.resource_name
       FROM campaign_asset
       WHERE campaign_asset.status != 'REMOVED'
     `;
@@ -299,21 +393,47 @@ async function fetchCampaignAssetLinkages(
         campaignIdRaw !== undefined && campaignIdRaw !== null
           ? String(campaignIdRaw)
           : undefined;
+
+      // Authoritative: resource_name suffix. Fallback: integer map.
+      const linkResourceNameRaw: unknown = row.campaign_asset?.resource_name;
+      const suffix =
+        typeof linkResourceNameRaw === "string"
+          ? suffixLabel(linkResourceNameRaw)
+          : undefined;
       const fieldTypeRaw: unknown = row.campaign_asset?.field_type;
       const fieldType =
-        typeof fieldTypeRaw === "string"
+        suffix ??
+        (typeof fieldTypeRaw === "string"
           ? fieldTypeRaw
           : typeof fieldTypeRaw === "number"
             ? mapFieldTypeIntToString(fieldTypeRaw)
-            : undefined;
+            : undefined);
+
       const assetResourceNameRaw: unknown = row.campaign_asset?.asset;
       const assetResourceName =
         typeof assetResourceNameRaw === "string"
           ? assetResourceNameRaw
           : undefined;
 
+      const statusRaw: unknown = row.campaign_asset?.status;
+      const status =
+        typeof statusRaw === "string"
+          ? statusRaw
+          : typeof statusRaw === "number"
+            ? // AssetLinkStatus: 2=ENABLED, 3=REMOVED, 4=PAUSED (order
+              // SWAPPED vs the standard 2/3/4 pattern — order-swap trap
+              // documented in M8 recon). The WHERE already excludes
+              // REMOVED, so this mini-map only needs to disambiguate
+              // ENABLED vs PAUSED at the row level.
+              statusRaw === 2
+              ? "ENABLED"
+              : statusRaw === 4
+                ? "PAUSED"
+                : undefined
+            : undefined;
+
       if (campaignId && fieldType && assetResourceName) {
-        out.push({ campaignId, fieldType, assetResourceName });
+        out.push({ campaignId, fieldType, assetResourceName, status });
       }
     }
     return out;
@@ -430,6 +550,108 @@ async function fetchCallouts(
   }
 }
 
+/**
+ * Image data extracted from `asset.image_asset.*` for a single asset.
+ * `fieldType` is set by the caller post-fetch (it lives on the LINKAGE
+ * row, not the asset row — same asset can attach as different field_types
+ * across linkages).
+ */
+type ImageAssetData = {
+  url: string;
+  assetId: string;
+  widthPx?: number;
+  heightPx?: number;
+};
+
+async function fetchImages(
+  customer: CustomerHandle,
+  resourceNames: Set<string>
+): Promise<Map<string, ImageAssetData>> {
+  if (resourceNames.size === 0) return new Map();
+
+  try {
+    const quoted = Array.from(resourceNames)
+      .map((n) => `'${n}'`)
+      .join(", ");
+    // M8 v1 SELECTs: full_size.{url, width_pixels, height_pixels} all
+    // nested under .full_size (verified via SDK protos
+    // node_modules/google-ads-api/.../fields.d.ts + live probe against
+    // imaa AD_IMAGE assets pre-push 2026-05-26). The flat
+    // `full_size_image_url` field that M5 originally used does NOT exist
+    // in v23 — rejects with query_error 32 even when SELECTed alone.
+    //
+    // EXCLUDED from v1: asset.image_asset.file_size + .mime_type.
+    // M8 Q1 recon proved bundling them rejects with query_error 32
+    // (SDK trap #5). Add only after per-field isolation verification —
+    // tracked in ADR-014 §Open Items §4.
+    const query = `
+      SELECT
+        asset.resource_name,
+        asset.id,
+        asset.image_asset.full_size.url,
+        asset.image_asset.full_size.width_pixels,
+        asset.image_asset.full_size.height_pixels
+      FROM asset
+      WHERE asset.resource_name IN (${quoted})
+    `;
+
+    const rows = await customer.query(query);
+
+    const map = new Map<string, ImageAssetData>();
+    for (const row of rows) {
+      const rn = row.asset?.resource_name;
+      const assetIdRaw = row.asset?.id;
+      // SDK types lag the schema for image_asset sub-fields — cast to
+      // a loose shape and validate at runtime. All three image fields
+      // live under .full_size in v23.
+      const imageAsset = row.asset?.image_asset as
+        | {
+            full_size?: {
+              url?: unknown;
+              width_pixels?: unknown;
+              height_pixels?: unknown;
+            };
+          }
+        | undefined;
+      const url = imageAsset?.full_size?.url;
+      const widthRaw = imageAsset?.full_size?.width_pixels;
+      const heightRaw = imageAsset?.full_size?.height_pixels;
+
+      if (
+        typeof rn === "string" &&
+        typeof url === "string" &&
+        url.length > 0 &&
+        (typeof assetIdRaw === "string" ||
+          typeof assetIdRaw === "number")
+      ) {
+        const widthPx =
+          typeof widthRaw === "number"
+            ? widthRaw
+            : typeof widthRaw === "string" && widthRaw.length > 0
+              ? Number(widthRaw) || undefined
+              : undefined;
+        const heightPx =
+          typeof heightRaw === "number"
+            ? heightRaw
+            : typeof heightRaw === "string" && heightRaw.length > 0
+              ? Number(heightRaw) || undefined
+              : undefined;
+        map.set(rn, {
+          url,
+          assetId: String(assetIdRaw),
+          widthPx,
+          heightPx,
+        });
+      }
+    }
+    return map;
+  } catch (error) {
+    const msg = formatGoogleError(error);
+    console.error("[google-ads/extensions] fetchImages failed:", msg);
+    return new Map();
+  }
+}
+
 async function fetchStructuredSnippets(
   customer: CustomerHandle,
   resourceNames: Set<string>
@@ -483,15 +705,33 @@ async function fetchStructuredSnippets(
 }
 
 // =================================================================
-// field_type integer → string mapping
-// Subset of AssetFieldTypeEnum we care about per ADR-012 v1 scope.
-// SDK sometimes returns integer enum values instead of strings depending
-// on the GAQL response codec; this normalizes both shapes.
+// field_type integer → string mapping (FALLBACK ONLY).
+//
+// Per ADR-014 §Decision 7: the authoritative source is the
+// `resource_name` suffix walk via suffixLabel(). This map fires only
+// when resource_name is malformed/missing. Integer values per Google's
+// AssetFieldTypeEnum proto + on-the-wire reality on imaa.
+//
+// ⚠ Public Google Ads docs list integer 26 = LANDSCAPE_LOGO, but Q9
+// recon proved 26 = AD_IMAGE on imaa (11th integer-drift instance,
+// first where public docs are themselves wrong — see
+// feedback_resource_name_over_integer_enums.md). The mapping below
+// follows on-the-wire reality, not the docs.
 // =================================================================
 const FIELD_TYPE_MAP: Record<number, string> = {
+  // M6 text extensions
   11: "CALLOUT",
   12: "STRUCTURED_SNIPPET",
   13: "SITELINK",
+  // M8 image extensions
+  5: "MARKETING_IMAGE",
+  18: "BUSINESS_NAME", // adjacent integer surfaced by Q9 — included for diagnostic logging
+  19: "SQUARE_MARKETING_IMAGE",
+  20: "PORTRAIT_MARKETING_IMAGE",
+  26: "AD_IMAGE", // public docs wrong; on-the-wire on imaa
+  27: "BUSINESS_LOGO",
+  // LANDSCAPE_LOGO integer unverified on imaa (0 rows in Q10). Add when
+  // a real account surfaces it via suffix walk; do not guess.
 };
 
 function mapFieldTypeIntToString(n: number): string | undefined {

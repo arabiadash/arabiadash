@@ -441,7 +441,20 @@ function CreativeCard({
   const extensionCount =
     (ad.extensions?.sitelinks?.length ?? 0) +
     (ad.extensions?.callouts?.length ?? 0) +
-    (ad.extensions?.structuredSnippets?.length ?? 0);
+    (ad.extensions?.structuredSnippets?.length ?? 0) +
+    (ad.extensions?.images?.length ?? 0);
+
+  // M8 / ADR-014 §Decision 4 — split by fieldType for UI:
+  //  - AD_IMAGE + MARKETING_IMAGE family → prominent grid (creative slot)
+  //  - BUSINESS_LOGO / LANDSCAPE_LOGO   → small inline badge next to ad name
+  const creativeImages = ad.extensions?.images?.filter(
+    (img) =>
+      img.fieldType === "AD_IMAGE" || img.fieldType.includes("MARKETING_IMAGE")
+  );
+  const logos = ad.extensions?.images?.filter(
+    (img) =>
+      img.fieldType === "BUSINESS_LOGO" || img.fieldType === "LANDSCAPE_LOGO"
+  );
 
   return (
     <div
@@ -614,10 +627,22 @@ function CreativeCard({
 
       <div className="p-3">
         <h4
-          className="font-semibold text-gray-900 text-xs line-clamp-2 mb-2 min-h-[2rem]"
+          className="font-semibold text-gray-900 text-xs line-clamp-2 mb-2 min-h-[2rem] flex items-center gap-1.5"
           title={ad.name}
         >
-          {ad.name}
+          {logos && logos.length > 0 && (
+            // ADR-014 §Decision 4 — inline logo next to advertiser name.
+            // Mirrors Google Search visual (logo next to domain). Only
+            // first logo if multiple — rare but defensive.
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={logos[0].url}
+              alt=""
+              loading="lazy"
+              className="h-5 w-5 rounded object-contain flex-shrink-0 bg-white"
+            />
+          )}
+          <span className="min-w-0 truncate">{ad.name}</span>
         </h4>
 
         <div className="grid grid-cols-2 gap-2 text-xs">
@@ -812,6 +837,15 @@ function AdDetailModal({
     ad.ad_type === "RSA" || ad.ad_type === "RDA"
       ? ad.type_data.descriptions
       : undefined;
+
+  // M8 / ADR-014 §Decision 4 — image extensions split by fieldType.
+  // Mirrors the compact CreativeCard split so the modal renders the
+  // same semantic distinction (logos as identity, creative images as
+  // primary visual content).
+  const creativeImages = ad.extensions?.images?.filter(
+    (img) =>
+      img.fieldType === "AD_IMAGE" || img.fieldType.includes("MARKETING_IMAGE")
+  );
 
   const imageUrl: string | undefined = (() => {
     if (isMeta) return metaData?.imageUrl ?? metaData?.thumbnailUrl;
@@ -1034,6 +1068,28 @@ function AdDetailModal({
                   </li>
                 ))}
               </ol>
+            </div>
+          )}
+
+          {/* Phase 4.8 M8 — Image Extensions (creative grid) per ADR-014 §Decision 4.
+              Rendered ABOVE text extensions because images are visually primary. */}
+          {creativeImages && creativeImages.length > 0 && (
+            <div>
+              <p className="text-xs text-gray-500 mb-2">
+                الصور الإعلانية ({creativeImages.length})
+              </p>
+              <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                {creativeImages.map((img) => (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    key={img.assetId}
+                    src={img.url}
+                    alt=""
+                    loading="lazy"
+                    className="aspect-square w-full rounded-lg object-cover bg-gray-100 border border-gray-200"
+                  />
+                ))}
+              </div>
             </div>
           )}
 
