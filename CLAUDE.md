@@ -286,14 +286,33 @@ Effective ad status (commit `e621e9b`):
 - **ADR-012** — Google asset extensions architecture
 - **ADR-013** — PMax architecture. **Decisions 1-3 superseded by 2026-05-25 addendum** removing retail variants. `PMAX_ASSET_GROUP` (Decision 4+) remains canonical.
 
-### Open issues (5 open, all production-hardening targets for Phase 11 launch)
+### Open issues (13 open — verified via `gh issue list --state open` on 2026-05-25 post-M-PMax merge)
 
-| # | Title | Status |
+**Bug + tech-debt (Phase 11 launch blocker — user-facing)**
+| # | Title | Opened |
 |---|-------|--------|
-| #1 | Connection UI: delete/reconnect button missing | open |
-| #2 | Silent OAuth failure error distinction | open |
-| #3 | Google OAuth verification (Testing → Production mode) | open |
-| #4 | Trial workspace Infinity exemption broken | open |
-| #6 | Reports Meta-only block (mitigated when Meta connected) | open |
-| #5 | Effective ad status re-ship | **resolved** `e621e9b` |
-| #33 | Meta OAuth setup ("URL Blocked") | **resolved** 2026-05-26 (invisible-char in redirect_uri) |
+| #32 | Reports page blocked behind Meta-only check — Google-only users see empty state | 2026-05-24 |
+
+**Tech-debt — pre-launch hardening batch (2026-05-18)**
+| # | Title |
+|---|-------|
+| #24 | normalizeAd: mirror #15 purchase filter for per-ad creative surface — **likely already shipped** via M-PMax Commit 4b (`d1a8581`); needs verification + close |
+| #25 | Migrate google-ads sync helpers from `connections.access_token` to `platform_credentials.refresh_token` (ADR-010 drift) |
+| #26 | Q2 result caching at adapter layer |
+| #27 | Rename `admin` parameter to `client` in `conversion-actions.ts` helpers |
+| #28 | Cleanup test `auth.users` accounts before Phase 11 launch |
+| #29 | `meta_insights_cache` legacy table cleanup (pre-SWR schema, unused) |
+| #30 | Schema-wide GRANT review — anon role has TRUNCATE/TRIGGER/REFERENCES on multiple tables |
+
+**Tech-debt — early Google integration (2026-05-15)**
+| # | Title |
+|---|-------|
+| #1 | Re-sync 4 Google accounts dropped during migration |
+| #2 | Add `user_enabled` BOOLEAN to connections table |
+| #3 | Add `date_from <= date_to` validation on ads + campaigns routes |
+| #4 | Verify Google access_token refresh behavior under load |
+| #6 | Workspace actions list shows stale state after `setWorkspaceAsDefault` |
+
+**Resolved during this milestone**
+- **#33** Meta OAuth "URL Blocked" on production — resolved 2026-05-26 (invisible-char in Facebook Console's Valid OAuth Redirect URIs field; fix = retype URL manually)
+- **Effective ad status fix** — shipped via commit `e621e9b`; no tracking issue exists (Q9 probe verified, imaa bug scenarios reproduced + fixed)
