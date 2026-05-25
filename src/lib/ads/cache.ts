@@ -35,8 +35,14 @@ import type { Json } from "@/lib/supabase/database.types";
  *       would fail discriminated-union narrowing in the renderAdCard
  *       switch; bump invalidates so all clients refetch the
  *       narrower union.
+ * - v8: M8 Image Extensions on Search ads — UnifiedAdExtensions
+ *       now includes images?: Array<{url, fieldType, assetId,
+ *       widthPx?, heightPx?}>. Cached v7 rows lack this field;
+ *       bump invalidates so all clients fetch fresh data including
+ *       images. Per ADR-014 + Memory #28 cache-bump verification
+ *       protocol — Google + Meta fresh-fetch confirmed pre-push.
  */
-const CACHE_SCHEMA_VERSION = "v7";
+const CACHE_SCHEMA_VERSION = "v8";
 
 const CACHE_TTL_MINUTES = 15;
 

@@ -128,13 +128,37 @@ export interface UnifiedInsight {
 }
 
 // =================================================================
-// Asset Extensions (Google-only). Per ADR-012.
+// Asset Extensions (Google-only). Per ADR-012 + ADR-014 (images).
 // =================================================================
 /**
+ * Image asset field_type discriminator (M8 / ADR-014 §Decision 1).
+ *
+ * Six explicit string literals cover the on-the-wire universe verified
+ * via Q9/Q10 recon (AD_IMAGE + BUSINESS_LOGO observed on imaa;
+ * LANDSCAPE_LOGO + MARKETING_IMAGE family added for forward-compat).
+ *
+ * The `(string & {})` catch-all preserves IDE autocomplete on the
+ * known literals while still accepting unknown labels at runtime —
+ * required because the resource_name suffix walk per ADR-014 §Decision 7
+ * may return labels Google adds in future API versions before we update
+ * this union. Defensive per integer-drift discipline.
+ */
+export type ImageAssetFieldType =
+  | "AD_IMAGE"
+  | "BUSINESS_LOGO"
+  | "LANDSCAPE_LOGO"
+  | "MARKETING_IMAGE"
+  | "SQUARE_MARKETING_IMAGE"
+  | "PORTRAIT_MARKETING_IMAGE"
+  | (string & {});
+
+/**
  * Asset Extensions surfaced on Google ads.
- * Per ADR-012 — see docs/decisions/012-google-ads-extensions.md.
- * v1 scope: SITELINK + CALLOUT + STRUCTURED_SNIPPET.
- * Future: PROMOTION, PRICE, CALL, LEAD_FORM, IMAGE variants, LOCATION.
+ * Per ADR-012 (M6 text extensions) + ADR-014 (M8 image extensions).
+ *
+ * v1 scope (M6): SITELINK + CALLOUT + STRUCTURED_SNIPPET.
+ * v2 scope (M8): + image extensions (AD_IMAGE family + LOGO variants).
+ * Future: PROMOTION, PRICE, CALL, LEAD_FORM, LOCATION.
  *
  * All fields optional + array-typed for graceful degradation.
  * Meta-side adapters never populate this field (extensions = Google concept).
@@ -163,6 +187,34 @@ export interface UnifiedAdExtensions {
   structuredSnippets?: Array<{
     header: string;
     values: string[];
+  }>;
+
+  /**
+   * Image extensions on Search ads (M8 / ADR-014).
+   *
+   * Single array with per-entry `fieldType` discriminator (Option C from
+   * ADR-014 §Decision 1). UI splits at render time:
+   *  - AD_IMAGE / MARKETING_IMAGE family → prominent image grid
+   *    (primary creative content)
+   *  - BUSINESS_LOGO / LANDSCAPE_LOGO → small inline badge next to the
+   *    advertiser/campaign name (mirrors Google Search visual)
+   *
+   * Filtered server-side to status='ENABLED' on both campaign_asset
+   * AND campaign (ADR-014 §Decision 3 — strict "currently serving").
+   * This is a deliberate departure from M6's `!= 'REMOVED'` filter
+   * which includes PAUSED rows; M6 retrofit deferred per
+   * ADR-014 §Open Items §1.
+   *
+   * Deduped by `assetId` server-side (same asset can attach to multiple
+   * campaign_asset rows that inherit to the same ad — imaa's Brand
+   * campaign family shares 9 AD_IMAGE assets across 4 campaigns).
+   */
+  images?: Array<{
+    url: string;
+    fieldType: ImageAssetFieldType;
+    assetId: string;
+    widthPx?: number;
+    heightPx?: number;
   }>;
 }
 

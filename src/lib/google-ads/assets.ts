@@ -61,7 +61,7 @@ export async function fetchAssetUrls(
     const query = `
       SELECT
         asset.resource_name,
-        asset.image_asset.full_size_image_url
+        asset.image_asset.full_size.url
       FROM asset
       WHERE asset.resource_name IN (${quoted})
     `;
@@ -71,12 +71,18 @@ export async function fetchAssetUrls(
     const urlMap = new Map<string, string>();
     for (const row of rows) {
       const resourceName = row.asset?.resource_name;
-      // SDK types omit full_size_image_url on IImageAsset — GAQL returns it
-      // but the type declarations lag. Cast through unknown to read it.
+      // v23 nests the image URL under .full_size.url — NOT the flat
+      // .full_size_image_url field. The previous flat path rejected with
+      // query_error 32 in v23, silently breaking RDA marketing_images
+      // (caught return new Map() at the bottom suppressed it for an
+      // unknown duration). Pre-push verification for M8 surfaced this
+      // M5 bug; fixed here in the same commit as M8 since the root
+      // cause + the fix are identical (see also fetchImages in
+      // src/lib/google-ads/extensions.ts and ADR-014 §Open Items §3).
       const imageAsset = row.asset?.image_asset as
-        | { full_size_image_url?: unknown }
+        | { full_size?: { url?: unknown } }
         | undefined;
-      const url = imageAsset?.full_size_image_url;
+      const url = imageAsset?.full_size?.url;
       if (
         typeof resourceName === "string" &&
         typeof url === "string" &&
