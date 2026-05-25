@@ -266,7 +266,18 @@ export async function fetchKeywords(
       // (even with {0,0}) = "tracking configured, real-zero purchases" →
       // renders "0 ر.س" / "0". Map present but key absent = same as
       // null Map for that specific keyword.
-      const purchaseEntry = purchaseTotals?.get(String(criterionId));
+      //
+      // CRITICAL — composite key (ad_group_id|criterion_id): ad_group_criterion
+      // .criterion_id is NOT unique account-wide; the same numeric ID is
+      // reused across ad_groups when keyword text matches (e.g., "عطور"
+      // → criterion_id=85274071 in 3 different ad_groups on imaa). Keying
+      // the Map by criterion_id alone collides → each colliding keyword
+      // receives summed purchases from ALL ad_groups (~11.6% over-count
+      // surfaced pre-merge on perfumes-KSA). See
+      // feedback_merger_composite_keys.md for the lesson.
+      const purchaseEntry = purchaseTotals?.get(
+        `${adGroupId}|${criterionId}`
+      );
       const hasConversionData =
         purchaseTotals != null && purchaseEntry !== undefined;
       const purchases: number | null = hasConversionData
@@ -424,15 +435,31 @@ async function fetchPurchaseKeywordTotals(
 
     for (const row of rows) {
       const criterionIdRaw = row.ad_group_criterion?.criterion_id;
-      if (criterionIdRaw === undefined || criterionIdRaw === null) continue;
-      const criterionId = String(criterionIdRaw);
+      const adGroupIdRaw = row.ad_group?.id;
+      if (
+        criterionIdRaw === undefined ||
+        criterionIdRaw === null ||
+        adGroupIdRaw === undefined ||
+        adGroupIdRaw === null
+      ) {
+        continue;
+      }
+      // Composite Map key (ad_group_id|criterion_id) — criterion_id is
+      // NOT unique account-wide; keying by criterion_id alone would
+      // collide across ad_groups and over-attribute purchases to
+      // colliding keywords. Verified empirically on imaa 2026-05-27
+      // (11 of 192 criterion_ids span multiple ad_groups). See caller
+      // (fetchKeywords merge step above) for the matching lookup +
+      // feedback_merger_composite_keys.md for the pre-push probe
+      // discipline lesson.
+      const compositeKey = `${adGroupIdRaw}|${criterionIdRaw}`;
 
       // First-sighting init: every keyword with any segmented GAQL row
       // gets an entry (initialized {0,0}) even if NONE of its rows
       // match a purchase action. This produces hasConversionData=true
       // in the caller — preserving the "configured + zero purchases"
       // vs "no data" distinction (M-PMax precedent).
-      const existing = byCriterion.get(criterionId) ?? {
+      const existing = byCriterion.get(compositeKey) ?? {
         purchases: 0,
         revenue: 0,
       };
@@ -447,7 +474,7 @@ async function fetchPurchaseKeywordTotals(
         existing.revenue += conversionsValue;
       }
 
-      byCriterion.set(criterionId, existing);
+      byCriterion.set(compositeKey, existing);
     }
 
     return byCriterion;

@@ -1607,7 +1607,7 @@ function AdDetailModal({
                 <p className="text-xs text-gray-500">المبيعات</p>
                 {ad.hasConversionData && ad.purchases !== null ? (
                   <p className="text-lg font-bold text-gray-900">
-                    {ad.purchases}
+                    {Math.round(ad.purchases).toLocaleString("en-US")}
                   </p>
                 ) : (
                   <p
