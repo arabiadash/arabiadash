@@ -128,6 +128,59 @@ export interface UnifiedInsight {
 }
 
 // =================================================================
+// Keywords (Google Search-only). Per ADR-015 (M7).
+// =================================================================
+/**
+ * Keyword match type. Enum verified clean via M7 recon Q1 2026-05-26 —
+ * standard 2/3/4 = EXACT/PHRASE/BROAD pattern, no integer drift.
+ */
+export type KeywordMatchType = "EXACT" | "PHRASE" | "BROAD";
+
+/**
+ * Status filter for the keywords fetch. Triggers different GAQL WHERE
+ * clauses (strict ENABLED vs include PAUSED). REMOVED always excluded.
+ */
+export type KeywordStatusFilter = "enabled" | "all";
+
+/**
+ * Quality info enum label (3 of the 4 quality_info subfields use it).
+ * Most low-traffic keywords return undefined — render as "—" in UI.
+ */
+export type KeywordQualityLabel =
+  | "BELOW_AVERAGE"
+  | "AVERAGE"
+  | "ABOVE_AVERAGE";
+
+/**
+ * One keyword row per ADR-015 §Decision 1 (M7 scope: list + filter + sort
+ * + match-type breakdown; conversion metrics deferred to M7.5).
+ */
+export interface UnifiedAdKeyword {
+  /** ad_group_criterion.criterion_id (stringified for consistency with other IDs). */
+  id: string;
+  /** ad_group_criterion.keyword.text — the actual search term. */
+  text: string;
+  matchType: KeywordMatchType;
+  status: "ENABLED" | "PAUSED" | "REMOVED";
+
+  // Performance metrics for the active date range (from FROM keyword_view)
+  spend: number;
+  impressions: number;
+  clicks: number;
+  /** CTR as percentage (0-100), already normalized from Google's 0-1 ratio. */
+  ctr: number;
+  /** Average CPC in account currency (cost_micros / 1M / clicks aggregated by Google). */
+  cpc: number;
+
+  // Quality info — undefined when Google lacks enough data to compute.
+  // UI must render "—" not "0" for these.
+  qualityScore?: number; // 1-10 integer
+  creativeQualityScore?: KeywordQualityLabel;
+  postClickQualityScore?: KeywordQualityLabel;
+  searchPredictedCtr?: KeywordQualityLabel;
+}
+
+// =================================================================
 // Asset Extensions (Google-only). Per ADR-012 + ADR-014 (images).
 // =================================================================
 /**
@@ -345,6 +398,20 @@ export interface UnifiedAdCommon {
    * regardless of variant; Meta variants leave it undefined.
    */
   extensions?: UnifiedAdExtensions;
+
+  /**
+   * Keywords targeting this ad (Google Search ads only, M7 / ADR-015).
+   *
+   * Keywords live at the ad_group level in Google Ads — all ads in the
+   * same ad_group share the same keyword set. The fetcher dedups by
+   * ad_group_id and attaches the same array reference to every ad in
+   * that group. UI shows a "shared with N ads" badge to make this
+   * inheritance visible.
+   *
+   * Meta variants + PMax variants + Display ads leave this undefined.
+   * Status filter is strict ENABLED by default (per ADR-015 §Decision 5).
+   */
+  keywords?: Array<UnifiedAdKeyword>;
 
   provider: AdProvider;
 }

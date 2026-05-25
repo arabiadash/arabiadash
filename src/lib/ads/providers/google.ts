@@ -15,6 +15,7 @@ import { fetchCampaigns, type CampaignRow } from "@/lib/google-ads/campaigns";
 import { fetchAds, type AdRow } from "@/lib/google-ads/ads";
 import { fetchAssetUrls } from "@/lib/google-ads/assets";
 import { fetchAdExtensions } from "@/lib/google-ads/extensions";
+import { fetchKeywords } from "@/lib/google-ads/keywords";
 import {
   fetchTimeSeries,
   type TimeSeriesPoint,
@@ -345,11 +346,20 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       }
     }
 
-    // Pass 3 + 4: parallel — image URLs AND asset extensions.
-    // Both reach Google Ads API independently; running in parallel keeps
-    // wall time = max(image URL latency, extensions latency) instead of sum.
-    // Empty image-set short-circuits without firing a request.
-    const [urlMap, extensionsMap] = await Promise.all([
+    // Build the unique ad_group_id set for keyword fetching (M7 / ADR-015).
+    // Keywords live per-ad_group, not per-ad — multiple ads in the same
+    // ad_group share the same keyword set. Dedup at fetch time means one
+    // GAQL query per ad_group, not one per ad.
+    const adGroupIdsInScope = new Set<string>();
+    for (const ad of activeAds) {
+      if (ad.ad_group_id) adGroupIdsInScope.add(ad.ad_group_id);
+    }
+
+    // Pass 3 + 4 + 5: parallel — image URLs, asset extensions, AND keywords.
+    // All three reach Google Ads API independently; parallel keeps wall
+    // time = max(latencies) instead of sum. Empty-input branches short-
+    // circuit without firing a request.
+    const [urlMap, extensionsMap, keywordsByAdGroup] = await Promise.all([
       allResourceNames.size > 0
         ? fetchAssetUrls({
             customerId: this.customerId,
@@ -369,11 +379,28 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
           activeAds.map((ad) => [ad.id, ad.campaign_id])
         ),
       }),
+      // Phase 4.8 M7 — Keywords per ADR-015. Strict ENABLED default per
+      // §Decision 5. UI re-fetches with statusFilter='all' if user toggles.
+      fetchKeywords({
+        customerId: this.customerId,
+        refreshToken: this.refreshToken,
+        loginCustomerId: this.loginCustomerId,
+        dateFrom,
+        dateTo,
+        adGroupIds: adGroupIdsInScope,
+        statusFilter: "enabled",
+      }),
     ]);
 
-    // Pass 5: normalize with URL lookups + extensions + purchase merger.
+    // Pass 6: normalize with URL lookups + extensions + keywords + purchase merger.
     const normalizedAds = activeAds.map((ad) =>
-      this.normalizeAd(ad, urlMap, extensionsMap, adPurchaseTotals)
+      this.normalizeAd(
+        ad,
+        urlMap,
+        extensionsMap,
+        keywordsByAdGroup,
+        adPurchaseTotals
+      )
     );
 
     // Pass 6 (M-PMax / ADR-013): asset_group rows + per-asset enrichment
@@ -1089,6 +1116,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     ad: AdRow,
     urlMap?: Map<string, string>,
     extensionsMap?: Map<string, UnifiedAdExtensions>,
+    keywordsByAdGroup?: Map<string, import("../types").UnifiedAdKeyword[]>,
     adPurchaseTotals?: Map<
       string,
       { purchases: number; revenue: number }
@@ -1106,6 +1134,14 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     // Phase 4.8 M6 — attach extensions if any (Google-only; undefined when
     // the ad has no extensions or fetchAdExtensions returned empty).
     const extensions = extensionsMap?.get(ad.id);
+
+    // Phase 4.8 M7 — attach keywords from the ad's parent ad_group
+    // (ADR-015). Keywords are per-ad_group, not per-ad — all ads in the
+    // same group share the same reference. Undefined when ad has no
+    // ad_group_id (shouldn't happen for Search) or no keywords matched.
+    const keywords = ad.ad_group_id
+      ? keywordsByAdGroup?.get(ad.ad_group_id)
+      : undefined;
 
     // Commit 4b — purchase merger lookup (ADR-011 sibling at ad level).
     // adPurchaseTotals null → cache miss / merger failure / no purchase
@@ -1151,6 +1187,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       ctr: ad.ctr * 100,
       cpc: ad.cpc,
       extensions,
+      keywords,
       provider: "google" as const,
     };
 

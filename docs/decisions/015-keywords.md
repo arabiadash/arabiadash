@@ -81,16 +81,15 @@ v1 surfaces cost / clicks / impressions / CTR / average_cpc only. ROAS / purchas
 
 If user research shows demand for per-keyword conversion analysis, M7.5 adds it as a standalone commit reusing the ADR-011 family pattern.
 
-### 5. Status filter — strict `ENABLED` by default, UI toggle for "show all"
+### 5. Status filter — strict `ENABLED` enforced server-side; UI toggle deferred to M7.1
 
-Matches M8's locked decision (ADR-014 §Decision 3). UI provides a filter dropdown:
+**v1 ships strict ENABLED only.** GAQL WHERE includes `ad_group_criterion.status = 'ENABLED'`. No UI toggle for "show all" — that requires a re-fetch architecture (different GAQL payload, separate cache key) that's heavier than initial scoping anticipated.
 
-```
-نشط فقط (default)   ← strict ENABLED
-الكل                ← ENABLED + PAUSED (excludes REMOVED via WHERE)
-```
+**Deferred to M7.1:** UI dropdown `نشط فقط / الكل` triggering a per-status-filter re-fetch. Adds: route-level keyword endpoint accepting `?status=` param, dual cache keys, useState wiring in the modal. ~30 LOC. Defer until a user explicitly asks to see PAUSED keywords (likely never — paused keywords aren't currently serving by definition).
 
-The strict-ENABLED default is enforced at the GAQL WHERE level; the "all" option triggers a re-fetch with `status != 'REMOVED'` instead of `status = 'ENABLED'`. Two separate cached payloads keyed by filter choice.
+Matches M8's locked-decision intent (ADR-014 §Decision 3: currently-serving only). M8 also ships strict ENABLED with no UI toggle. M7 v1 maintains the same posture.
+
+`fetchKeywords` keeps its `statusFilter: KeywordStatusFilter` parameter (always `"enabled"` from the adapter today) so the re-fetch path is a one-call-site flip when M7.1 lands.
 
 ### 6. Quality info — fetch all 4 subfields, render "—" for undefined
 
@@ -112,15 +111,15 @@ Format: `الكلمات المفتاحية لمجموعة '[campaign.name] / [ad
 
 The campaign-name prefix disambiguates imaa's "Ad group 1" duplicates (5 of 6 ad_groups share that name). The `N إعلان` count comes from the already-loaded `googleAds` list — no extra GAQL needed; UI counts ads sharing the same `adsetId` (which is the ad_group_id field on UnifiedAdCommon).
 
-### 8. Filter / sort UI controls
+### 8. Filter / sort UI controls (v1)
 
-Single control row above the keywords table:
+Two controls above the keywords table (status dropdown deferred to M7.1 per §Decision 5):
 
-| Control | Default | Options |
-|---|---|---|
-| Sort | التكلفة | التكلفة / الانطباعات / النقرات / CTR / Quality Score |
-| Status | نشط فقط | نشط فقط / الكل |
-| Match type | الكل | الكل / EXACT / PHRASE / BROAD |
+| Control | Default | Options | Scope |
+|---|---|---|---|
+| Sort | التكلفة | التكلفة / الانطباعات / النقرات / CTR / Quality Score | Client-side (already-loaded array) |
+| Match type | الكل | الكل / EXACT / PHRASE / BROAD | Client-side (already-loaded array) |
+| ~~Status~~ | ~~نشط فقط~~ | ~~نشط فقط / الكل~~ | **Deferred to M7.1** (would require re-fetch path; see §Decision 5) |
 
 Sort + match-type filters apply client-side (already-loaded array). Status filter triggers a re-fetch (different GAQL payload). Match-type filter uses the integer-mapped string labels from `KeywordMatchType` per recon §4 — no integer drift, so a small static map suffices:
 
