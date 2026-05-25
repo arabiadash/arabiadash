@@ -2,6 +2,31 @@ import { META_API_VERSION, type MetaAdAccount } from "./oauth";
 import { getRevenue, getPurchaseCount } from "./metrics";
 import type { UnifiedAd } from "@/lib/ads/types";
 
+/**
+ * Normalize a Meta ad account ID to the `act_` prefixed form Graph
+ * API requires.
+ *
+ * Storage convention (per api/auth/meta/discover/route.ts:112): the
+ * `connections.account_id` column stores BARE numeric IDs (e.g.,
+ * "6757675274310431"). The Frontend strips `act_` before POST to
+ * /api/auth/meta/select-accounts. The DB row is canonical bare.
+ *
+ * Graph API REQUIRES the `act_` prefix on every endpoint that
+ * scopes by ad account (insights, campaigns, ads, etc.). Without
+ * it, Facebook returns 400 "(#100) Tried accessing nonexisting
+ * field (insights)" — the URL hits the user node, not the ad
+ * account node.
+ *
+ * This helper is the bridge. Idempotent: passing an already-prefixed
+ * ID returns it unchanged.
+ *
+ * Empirical proof of the bug: scripts/_diagnose-meta-fetch.mjs probe
+ * 2026-05-26 — bare ID returns 400, prefixed ID returns real data.
+ */
+function actId(accountId: string): string {
+  return accountId.startsWith("act_") ? accountId : `act_${accountId}`;
+}
+
 interface AdAccountsResponse {
   data: MetaAdAccount[];
   paging?: {
@@ -179,7 +204,7 @@ export async function getCampaigns(
   accessToken: string,
   accountId: string
 ): Promise<MetaCampaign[]> {
-  const url = `https://graph.facebook.com/${META_API_VERSION}/${accountId}/campaigns`;
+  const url = `https://graph.facebook.com/${META_API_VERSION}/${actId(accountId)}/campaigns`;
   const params = new URLSearchParams({
     fields:
       "id,name,status,objective,daily_budget,lifetime_budget,start_time,stop_time,created_time,updated_time",
@@ -274,7 +299,7 @@ async function fetchInsightsChunked(
   timeIncrement: TimeIncrement | undefined,
   level: "account" | "campaign"
 ): Promise<MetaInsight[]> {
-  const baseUrl = `https://graph.facebook.com/${META_API_VERSION}/${accountId}/insights`;
+  const baseUrl = `https://graph.facebook.com/${META_API_VERSION}/${actId(accountId)}/insights`;
 
   // Lifetime: don't chunk — let Meta return its `maximum` aggregate.
   if (!isCustomRange(range) && range === "lifetime") {
@@ -443,7 +468,7 @@ export async function getAds(
   accountId: string,
   range: DateRangeInput = "30d"
 ): Promise<MetaAd[]> {
-  const baseUrl = `https://graph.facebook.com/${META_API_VERSION}/${accountId}/ads`;
+  const baseUrl = `https://graph.facebook.com/${META_API_VERSION}/${actId(accountId)}/ads`;
   const dates = resolveRangeToDates(range);
 
   // Date filtering happens via the `.time_range(...)` modifier on the insights
@@ -623,7 +648,7 @@ export async function resolveImageHashesToUrls(
     const chunk = hashes.slice(i, i + CHUNK_SIZE);
     try {
       const url =
-        `https://graph.facebook.com/${META_API_VERSION}/${accountId}/adimages?` +
+        `https://graph.facebook.com/${META_API_VERSION}/${actId(accountId)}/adimages?` +
         `hashes=${encodeURIComponent(JSON.stringify(chunk))}` +
         `&fields=hash,url,permalink_url` +
         `&access_token=${encodeURIComponent(accessToken)}`;
