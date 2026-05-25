@@ -1370,13 +1370,17 @@ function AdDetailModal({
                           </span>
                         </td>
                         <td className="px-2 py-2 text-left tabular-nums text-gray-700">
-                          {k.spend.toFixed(0)}
+                          {formatAndConvert(
+                            k.spend,
+                            (ad.currency as Currency) || accountCurrency,
+                            displayCurrency
+                          )}
                         </td>
                         <td className="px-2 py-2 text-left tabular-nums text-gray-700">
-                          {k.clicks}
+                          {Math.round(k.clicks).toLocaleString("en-US")}
                         </td>
                         <td className="px-2 py-2 text-left tabular-nums text-gray-700">
-                          {k.impressions}
+                          {Math.round(k.impressions).toLocaleString("en-US")}
                         </td>
                         <td className="px-2 py-2 text-left tabular-nums text-gray-700">
                           {k.ctr > 0 ? `${k.ctr.toFixed(1)}%` : "—"}
