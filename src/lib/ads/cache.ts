@@ -58,8 +58,25 @@ import type { Json } from "@/lib/supabase/database.types";
  *       attribution. Per ADR-016 + Memory #28 verification protocol
  *       (5th attempt — protocol caught M5/M8 GAQL bugs on v7→v8,
  *       passed clean on v8→v9).
+ * - v11: M7.5 hotfix — composite-key fix for keyword purchase merger
+ *       (commit 0d90f83). The fix changes per-keyword purchase VALUES
+ *       (revenue + count) but not the UnifiedAdKeyword SHAPE. Cached
+ *       v10 rows from earlier M7.5 preview builds contained the
+ *       BUGGY inflated values (criterion_id collision sum across
+ *       ad_groups → KPI strip showed +11.6% over-count vs ground
+ *       truth). Bumping to v11 forces fresh fetches with corrected
+ *       composite-key merger, eliminating stale-cache serving of
+ *       incorrect data for up to 24h post-deploy.
+ *
+ *       Memory #28 nuance captured: code-resident correctness fixes
+ *       that change CACHED VALUES (not shape) STILL need a cache
+ *       bump. The original Memory #28 protocol assumed shape changes
+ *       as the bump trigger; value-only correctness changes are the
+ *       new sub-pattern. Pre-push verification protocol caught
+ *       nothing here because the GAQL probe succeeded (bug was in
+ *       JS Map keying), but cache served stale buggy data.
  */
-const CACHE_SCHEMA_VERSION = "v10";
+const CACHE_SCHEMA_VERSION = "v11";
 
 const CACHE_TTL_MINUTES = 15;
 
