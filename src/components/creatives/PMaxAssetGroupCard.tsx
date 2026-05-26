@@ -1,6 +1,6 @@
 import { Sparkles } from "lucide-react";
 import type { UnifiedAd } from "@/lib/ads/types";
-import { formatAndConvert, type Currency } from "@/lib/currency";
+import { formatAndConvert, formatCount, type Currency } from "@/lib/currency";
 
 // =================================================================
 // PMaxAssetGroupCard — compact variant (Stage 5 UX redesign, ADR-013)
@@ -229,7 +229,7 @@ export function PMaxAssetGroupCard({
           <div className="text-left">
             <p className="text-gray-500 text-[10px]">المبيعات</p>
             {ad.hasConversionData && ad.purchases !== null ? (
-              <p className="font-bold text-gray-900">{ad.purchases}</p>
+              <p className="font-bold text-gray-900">{formatCount(ad.purchases)}</p>
             ) : (
               <p
                 className="font-bold text-gray-400"
