@@ -4719,6 +4719,21 @@ export default function ReportsClient({
                           <div className="text-center py-10 text-gray-500">
                             <p className="text-sm">لا توجد حسابات Google مربوطة</p>
                           </div>
+                        ) : googleAdsError === "reauth_required" ? (
+                          /* ADR-017: Arabic CTA banner for invalid_grant / consent_revoked */
+                          <div className="rounded-xl border-2 border-amber-400 bg-amber-50 p-4">
+                            <h3 className="font-bold text-amber-900">إعادة ربط حساب Google مطلوبة</h3>
+                            <p className="text-sm text-amber-800 mt-1">
+                              انتهت صلاحية الربط مع Google Ads. اضغط على الزر أدناه لإعادة الربط
+                              والاستمرار في عرض بيانات حملاتك.
+                            </p>
+                            <a
+                              href="/dashboard/connections/google"
+                              className="inline-block mt-3 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-semibold"
+                            >
+                              أعد ربط حساب Google
+                            </a>
+                          </div>
                         ) : googleAdsLoading && googleAds.length === 0 ? (
                           <div className="text-center py-10 text-gray-500">
                             <p className="text-sm">جاري التحميل...</p>

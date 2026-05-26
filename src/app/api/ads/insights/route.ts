@@ -17,6 +17,7 @@ import type {
   InsightLevel,
   UnifiedInsight,
 } from "@/lib/ads/types";
+import { isReauthError, ReauthRequiredError } from "@/lib/google-ads/errors";
 
 const VALID_RANGES: readonly DateRange[] = [
   "7d",
@@ -147,6 +148,18 @@ export async function GET(request: NextRequest) {
     } = await supabase.auth.getUser();
     if (authError || !user) {
       return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
+
+    // Dev-only test injection (ADR-017): header x-fake-error:
+    // invalid_grant triggers ReauthRequiredError for CTA propagation
+    // testing. Permanently safe — NODE_ENV !== "production" guard +
+    // non-standard header name. DO NOT REMOVE; reusable for future
+    // reauth-flow regression testing.
+    if (
+      process.env.NODE_ENV !== "production" &&
+      request.headers.get("x-fake-error") === "invalid_grant"
+    ) {
+      throw new ReauthRequiredError("invalid_grant");
     }
 
     const adapter = await getAdapterForProvider(user.id, provider, accountId);
@@ -295,6 +308,19 @@ export async function GET(request: NextRequest) {
       throw err;
     }
   } catch (err) {
+    // ADR-017: surface reauth requirement as actionable 401 instead of 500.
+    if (isReauthError(err)) {
+      return NextResponse.json(
+        {
+          error: "reauth_required",
+          provider: err.provider,
+          reason: err.reason,
+          reauthUrl: err.reauthUrl,
+          message: "انتهت صلاحية ربط حساب Google. يرجى إعادة الربط للمتابعة.",
+        },
+        { status: 401 }
+      );
+    }
     console.error("[ads/insights] Error:", err);
     return NextResponse.json({ error: "fetch_failed" }, { status: 500 });
   }

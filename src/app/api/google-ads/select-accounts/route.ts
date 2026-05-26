@@ -107,18 +107,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const refreshToken = credential.refresh_token;
     const nowIso = new Date().toISOString();
 
     // 4. Upsert selected accounts as active. onConflict handles
     // re-selection of previously-deactivated accounts (their row gets
     // status flipped back to 'active').
+    //
+    // ADR-017: refresh_token is NOT duplicated into connections.access_token
+    // for Google. Read path uses platform_credentials.refresh_token via
+    // factory.ts's getRefreshTokenForUser helper.
     const rowsToUpsert = body.account_ids.map((accountId) => ({
       user_id: user.id,
       workspace_id: workspace.id,
       platform: "google",
       account_id: accountId,
-      access_token: refreshToken,
+      access_token: null,
       status: "active",
       metadata: {},
       connected_at: nowIso,

@@ -16,7 +16,7 @@ export type Database = {
     Tables: {
       connections: {
         Row: {
-          access_token: string
+          access_token: string | null
           account_id: string
           account_name: string | null
           connected_at: string | null
@@ -33,7 +33,7 @@ export type Database = {
           workspace_id: number
         }
         Insert: {
-          access_token: string
+          access_token?: string | null
           account_id: string
           account_name?: string | null
           connected_at?: string | null
@@ -50,7 +50,7 @@ export type Database = {
           workspace_id: number
         }
         Update: {
-          access_token?: string
+          access_token?: string | null
           account_id?: string
           account_name?: string | null
           connected_at?: string | null

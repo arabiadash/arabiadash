@@ -20,6 +20,7 @@ import {
   fetchTimeSeries,
   type TimeSeriesPoint,
 } from "@/lib/google-ads/timeseries";
+import { classifyGoogleAdsError } from "@/lib/google-ads/errors";
 
 // ──────────────────────────────────────────────────────────────────
 // Performance Max enum maps (ADR-013)
@@ -203,6 +204,26 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     private purchaseActionIds: Set<string> | null = null
   ) {}
 
+  /**
+   * ADR-017: outermost wrap point for SDK-hitting methods. Any
+   * invalid_grant/consent_revoked/token_expired error originating
+   * inside the underlying Promise.all fetcher graph propagates here
+   * via standard async rejection, then converts to a typed
+   * ReauthRequiredError the API layer catches and maps to HTTP 401.
+   *
+   * Non-reauth errors re-throw unchanged so the existing 500 path
+   * preserves its semantics (rate limits, transient SDK 5xx, etc.).
+   */
+  private async withReauthMapping<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      const reauth = classifyGoogleAdsError(err);
+      if (reauth) throw reauth;
+      throw err;
+    }
+  }
+
   async getAccount(): Promise<UnifiedAccount> {
     return {
       id: this.customerId,
@@ -215,27 +236,30 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
   }
 
   async getCampaigns(): Promise<UnifiedCampaign[]> {
-    // Default to last 30 days for status + recent performance discovery.
-    // Google's campaign resource has no spend/budget without a date range,
-    // so this fetcher returns metadata + last-30d metrics combined.
-    const { dateFrom, dateTo } = this.resolveDateRange("30d");
-    const result = await fetchCampaigns({
-      customerId: this.customerId,
-      refreshToken: this.refreshToken,
-      dateFrom,
-      dateTo,
-      loginCustomerId: this.loginCustomerId,
+    return this.withReauthMapping(async () => {
+      // Default to last 30 days for status + recent performance discovery.
+      // Google's campaign resource has no spend/budget without a date range,
+      // so this fetcher returns metadata + last-30d metrics combined.
+      const { dateFrom, dateTo } = this.resolveDateRange("30d");
+      const result = await fetchCampaigns({
+        customerId: this.customerId,
+        refreshToken: this.refreshToken,
+        dateFrom,
+        dateTo,
+        loginCustomerId: this.loginCustomerId,
+      });
+
+      if (!result) return [];
+
+      return result.campaigns.map((c) => this.normalizeCampaign(c));
     });
-
-    if (!result) return [];
-
-    return result.campaigns.map((c) => this.normalizeCampaign(c));
   }
 
   async getAccountInsights(
     range: DateRangeInput,
     timeIncrement?: TimeIncrement
   ): Promise<UnifiedInsight[]> {
+    return this.withReauthMapping(async () => {
     const { dateFrom, dateTo } = this.resolveDateRange(range);
 
     // Daily breakdown → use the time-series fetcher (one row per day).
@@ -281,12 +305,14 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
         purchaseCampaigns
       ),
     ];
+    });
   }
 
   async getCampaignInsights(
     range: DateRangeInput,
     _timeIncrement?: TimeIncrement
   ): Promise<UnifiedInsight[]> {
+    return this.withReauthMapping(async () => {
     // timeIncrement intentionally ignored — per-campaign daily series
     // needs a different GAQL query (segments.date on campaign-level). Add
     // when the UI surfaces that view.
@@ -309,9 +335,11 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     return result.campaigns.map((c) =>
       this.normalizeCampaignToInsight(c, dateFrom, dateTo, purchaseCampaigns)
     );
+    });
   }
 
   async getAds(range: DateRangeInput): Promise<UnifiedAd[]> {
+    return this.withReauthMapping(async () => {
     const { dateFrom, dateTo } = this.resolveDateRange(range);
 
     // Pass 1: parallel — ad rows (cost + creative fields) + ad-level
@@ -459,6 +487,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     });
 
     return [...normalizedAds, ...enrichedAssetGroups];
+    });
   }
 
   // ───────────────────────────────────────────────────────────────
