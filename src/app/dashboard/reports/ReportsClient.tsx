@@ -54,6 +54,7 @@ import { DateRangePicker } from "@/components/DateRangePicker";
 import {
   formatAndConvert,
   formatCurrency as formatCurrencyWithSymbol,
+  formatCount,
   convertCurrency,
   CURRENCY_LABELS,
   type Currency,
@@ -664,7 +665,7 @@ function CreativeCard({
           <div className="text-left">
             <p className="text-gray-500 text-[10px]">المبيعات</p>
             {ad.hasConversionData && ad.purchases !== null ? (
-              <p className="font-bold text-gray-900">{ad.purchases}</p>
+              <p className="font-bold text-gray-900">{formatCount(ad.purchases)}</p>
             ) : (
               <p
                 className="font-bold text-gray-400"

@@ -112,3 +112,18 @@ export function formatAndConvert(
   const converted = convertCurrency(amount, from, to);
   return formatCurrency(converted, to, options);
 }
+
+/**
+ * Format a numeric count for display.
+ * Rounds to nearest integer + applies thousand separators.
+ * Handles null/undefined/NaN gracefully (returns "—").
+ *
+ * Examples:
+ *   formatCount(401.219743) → "401"
+ *   formatCount(12940.956571) → "12,941"
+ *   formatCount(null) → "—"
+ */
+export function formatCount(value: number | null | undefined): string {
+  if (value === null || value === undefined || isNaN(value)) return "—";
+  return Math.round(value).toLocaleString("en-US");
+}
