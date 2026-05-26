@@ -419,6 +419,22 @@ export default function SettingsClient({
                 );
               })}
             </ul>
+
+            {/* ADR-017 §Decision 5 — Issue #1 discoverability hint. Always-visible
+                per Refinement 3 cost evaluation: collapsible variant would need
+                ~15-20 LOC (state + transition + a11y). Always-visible is benign
+                for fully-connected users and clear for users missing accounts. */}
+            <div className="border-t border-gray-100 px-6 py-4 bg-gray-50">
+              <p className="text-sm text-gray-600">
+                تحتاج تضيف حسابات Google إلى مساحات العمل؟{" "}
+                <Link
+                  href="/dashboard/connections/google/select"
+                  className="text-indigo-600 hover:text-indigo-700 font-semibold underline"
+                >
+                  اضغط هنا
+                </Link>
+              </p>
+            </div>
           </div>
 
           {/* Tabs */}

@@ -5,6 +5,7 @@ import {
   syncConversionActionsForCustomer,
   type SyncResult as ConversionActionsSyncResult,
 } from "@/lib/google-ads/conversion-actions";
+import { getRefreshTokenForUser } from "@/lib/google-ads/credentials";
 
 export interface SyncResult {
   customer_id: string;
@@ -34,7 +35,7 @@ export async function syncGoogleAccountsForUser(
 ): Promise<SyncResult[]> {
   const { data: connections, error: fetchError } = await adminClient
     .from("connections")
-    .select("account_id, access_token, metadata")
+    .select("account_id, metadata")
     .eq("user_id", userId)
     .eq("platform", "google");
 
@@ -47,12 +48,25 @@ export async function syncGoogleAccountsForUser(
     return [];
   }
 
+  // ADR-017: refresh_token is per-user, not per-connection. Read once.
+  const refreshToken = await getRefreshTokenForUser(
+    adminClient,
+    userId,
+    "google"
+  );
+  if (!refreshToken) {
+    console.warn(
+      `[sync-accounts-logic] No refresh_token for user ${userId} — skipping sync`
+    );
+    return [];
+  }
+
   const results: SyncResult[] = [];
 
   for (const conn of connections) {
     const details = await fetchCustomerDetails(
       conn.account_id,
-      conn.access_token
+      refreshToken
     );
 
     if (!details) {
@@ -104,7 +118,7 @@ export async function syncGoogleAccountsForUser(
         adminClient,
         userId,
         conn.account_id,
-        conn.access_token,
+        refreshToken,
         managerId
       );
 

@@ -1,9 +1,12 @@
 import { createClient } from "@/lib/supabase/server";
+import { createClient as createAdminClient } from "@supabase/supabase-js";
 import { MetaAdapter } from "./providers/meta";
 import { GoogleAdsAdapter } from "./providers/google";
 import type { AdProviderAdapter } from "./types";
 import type { AdProvider } from "./cache";
+import type { Database } from "@/lib/supabase/database.types";
 import { getPurchaseActionIds } from "@/lib/google-ads/conversion-actions";
+import { getRefreshTokenForUser } from "@/lib/google-ads/credentials";
 
 /**
  * Get the user's adapter for a specific ad provider, optionally scoped to
@@ -79,6 +82,15 @@ export async function getAdapterForProvider(
 
   switch (provider) {
     case "meta":
+      // Meta still stores its access_token in connections.access_token
+      // (per ADR-017 §Alternative E — Meta migration deferred to a future
+      // milestone). A null here would mean DB corruption for a Meta row.
+      if (!connection.access_token) {
+        throw new Error(
+          `Meta connection ${connection.id} has null access_token. ` +
+            `Re-OAuth required.`
+        );
+      }
       return new MetaAdapter(connection.access_token, connection.account_id, {
         name: connection.account_name || "",
         currency: metadata.currency,
@@ -86,12 +98,28 @@ export async function getAdapterForProvider(
       });
 
     case "google": {
-      // For Google, the `access_token` column holds the long-lived
-      // refresh_token (the column name is provider-agnostic). The
-      // login_customer_id (MCC) is only passed for accounts linked under
-      // our manager; standalone accounts have manager_customer_id = null
-      // in metadata, which we collapse to undefined here.
-      //
+      // ADR-017: refresh_token lives in platform_credentials (single source
+      // of truth). Use service-role client because RLS blocks user-scoped
+      // reads of credential rows.
+      const adminClient = createAdminClient<Database>(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!,
+        { auth: { persistSession: false } }
+      );
+
+      const refreshToken = await getRefreshTokenForUser(
+        adminClient,
+        userId,
+        "google"
+      );
+
+      if (!refreshToken) {
+        throw new Error(
+          `User ${userId} has an active Google connection (${connection.account_id}) ` +
+            `but no refresh_token in platform_credentials. Re-OAuth required.`
+        );
+      }
+
       // Pre-load the purchase action IDs from the conversion_actions
       // cache. The adapter uses this set to filter Q2 segmented
       // conversions down to real purchases (#15, ADR-011).
@@ -110,7 +138,7 @@ export async function getAdapterForProvider(
       );
 
       return new GoogleAdsAdapter(
-        connection.access_token,
+        refreshToken,
         connection.account_id,
         {
           name: connection.account_name || "",

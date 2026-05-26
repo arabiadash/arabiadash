@@ -175,6 +175,15 @@ export function useProviderInsights(
             hadFailure = true;
             try {
               const errData = await response.json();
+              // ADR-017: surface reauth_required for the Arabic CTA banner.
+              if (
+                response.status === 401 &&
+                errData?.error === "reauth_required"
+              ) {
+                setError("reauth_required");
+                if (token === reqTokenRef.current) setLoading(false);
+                return;
+              }
               console.warn(
                 `[useProviderInsights] HTTP ${response.status}:`,
                 errData?.error

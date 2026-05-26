@@ -158,6 +158,17 @@ export function useProviderAds(
             hadFailure = true;
             try {
               const errData = await response.json();
+              // ADR-017: surface reauth_required so the UI can render the
+              // Arabic reauth CTA. Setting error inside the loop is safe
+              // because the final state write happens after the loop.
+              if (
+                response.status === 401 &&
+                errData?.error === "reauth_required"
+              ) {
+                setError("reauth_required");
+                if (token === reqTokenRef.current) setLoading(false);
+                return;
+              }
               console.warn(
                 `[useProviderAds] HTTP ${response.status}:`,
                 errData?.error
