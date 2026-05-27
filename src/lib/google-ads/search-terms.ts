@@ -190,14 +190,28 @@ export async function fetchSearchTerms(
     // Q1 + Q2 in parallel — both reach Google independently. Wall time
     // = max(latencies) instead of sum.
     const [rows, purchaseTotals] = await Promise.all([
-      customer.query(q1),
-      fetchPurchaseSearchTermTotals({
-        customer,
-        adGroupIds,
-        dateFrom,
-        dateTo,
-        purchaseActionIds: purchaseActionIds ?? null,
-      }),
+      (async () => {
+        const t = performance.now();
+        const r = await customer.query(q1);
+        console.log(
+          `[perf-recon] searchTerms.Q1 ${(performance.now() - t).toFixed(0)}ms rows=${r.length}`
+        );
+        return r;
+      })(),
+      (async () => {
+        const t = performance.now();
+        const r = await fetchPurchaseSearchTermTotals({
+          customer,
+          adGroupIds,
+          dateFrom,
+          dateTo,
+          purchaseActionIds: purchaseActionIds ?? null,
+        });
+        console.log(
+          `[perf-recon] searchTerms.Q2_fetchPurchaseSearchTermTotals ${(performance.now() - t).toFixed(0)}ms mapSize=${r?.size ?? "null"}`
+        );
+        return r;
+      })(),
     ]);
 
     // Aggregator: a single (ad_group_id, search_term) pair can appear

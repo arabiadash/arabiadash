@@ -85,6 +85,10 @@ function isRateLimitError(err: unknown): boolean {
 }
 
 export async function GET(request: NextRequest) {
+  // [perf-recon] M9 post-ship 2-min load investigation. Remove after
+  // bottleneck identified + fix shipped. Tagged for grep.
+  const perf_t0 = performance.now();
+  const perf_reqId = Math.random().toString(36).slice(2, 8);
   try {
     const provider = (request.nextUrl.searchParams.get("provider") ||
       "meta") as AdProvider;
@@ -144,6 +148,7 @@ export async function GET(request: NextRequest) {
       throw new ReauthRequiredError("invalid_grant");
     }
 
+    const perf_t_adapter_start = performance.now();
     const adapter = await getAdapterForProvider(user.id, provider, accountId);
     if (!adapter) {
       return NextResponse.json(
@@ -151,6 +156,9 @@ export async function GET(request: NextRequest) {
         { status: 404 }
       );
     }
+    console.log(
+      `[perf-recon][${perf_reqId}] adapter_init ${(performance.now() - perf_t_adapter_start).toFixed(0)}ms provider=${provider}`
+    );
 
     // We need the account_id (string, e.g. act_123) for the creatives_cache key.
     // The adapter has it but doesn't expose it; resolve via the connection row.
@@ -183,8 +191,39 @@ export async function GET(request: NextRequest) {
     // 1. Force refresh: skip cache, fetch fresh, write back.
     if (forceRefresh) {
       try {
+        const perf_t_getAds_start = performance.now();
         const ads = await adapter.getAds(parsed);
+        console.log(
+          `[perf-recon][${perf_reqId}] adapter_getAds ${(performance.now() - perf_t_getAds_start).toFixed(0)}ms path=force-refresh ads_count=${ads.length}`
+        );
+        const perf_t_cache_start = performance.now();
         await setCachedCreatives({ ...cacheParams, data: ads });
+        console.log(
+          `[perf-recon][${perf_reqId}] cache_write ${(performance.now() - perf_t_cache_start).toFixed(0)}ms`
+        );
+        const perf_payload = JSON.stringify(ads);
+        const perf_total_kw = ads.reduce(
+          (s, a) =>
+            s +
+            ("keywords" in a && Array.isArray(a.keywords)
+              ? a.keywords.length
+              : 0),
+          0
+        );
+        const perf_total_st = ads.reduce(
+          (s, a) =>
+            s +
+            ("searchTerms" in a && Array.isArray(a.searchTerms)
+              ? a.searchTerms.length
+              : 0),
+          0
+        );
+        console.log(
+          `[perf-recon][${perf_reqId}] payload_size=${perf_payload.length}B (${(perf_payload.length / 1024).toFixed(0)}KB) ads_count=${ads.length} total_keywords=${perf_total_kw} total_search_terms=${perf_total_st}`
+        );
+        console.log(
+          `[perf-recon][${perf_reqId}] TOTAL ${(performance.now() - perf_t0).toFixed(0)}ms path=force-refresh`
+        );
         return NextResponse.json({
           data: ads,
           source: "fresh",
@@ -255,8 +294,37 @@ export async function GET(request: NextRequest) {
 
     // 5. Cache miss — fetch synchronously.
     try {
+      const perf_t_getAds_start = performance.now();
       const ads = await adapter.getAds(parsed);
+      console.log(
+        `[perf-recon][${perf_reqId}] adapter_getAds ${(performance.now() - perf_t_getAds_start).toFixed(0)}ms path=cache-miss ads_count=${ads.length}`
+      );
+      const perf_t_cache_start = performance.now();
       await setCachedCreatives({ ...cacheParams, data: ads });
+      console.log(
+        `[perf-recon][${perf_reqId}] cache_write ${(performance.now() - perf_t_cache_start).toFixed(0)}ms`
+      );
+      const perf_payload = JSON.stringify(ads);
+      const perf_total_kw = ads.reduce(
+        (s, a) =>
+          s +
+          ("keywords" in a && Array.isArray(a.keywords) ? a.keywords.length : 0),
+        0
+      );
+      const perf_total_st = ads.reduce(
+        (s, a) =>
+          s +
+          ("searchTerms" in a && Array.isArray(a.searchTerms)
+            ? a.searchTerms.length
+            : 0),
+        0
+      );
+      console.log(
+        `[perf-recon][${perf_reqId}] payload_size=${perf_payload.length}B (${(perf_payload.length / 1024).toFixed(0)}KB) ads_count=${ads.length} total_keywords=${perf_total_kw} total_search_terms=${perf_total_st}`
+      );
+      console.log(
+        `[perf-recon][${perf_reqId}] TOTAL ${(performance.now() - perf_t0).toFixed(0)}ms path=cache-miss`
+      );
       return NextResponse.json({
         data: ads,
         source: "fresh",

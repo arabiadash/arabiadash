@@ -204,15 +204,29 @@ export async function fetchKeywords(
     // (ADR-011-family purchase totals filtered by purchaseActionIds).
     // Both reach Google independently — wall time = max(Q1, Q2) instead of sum.
     const [rows, purchaseTotals] = await Promise.all([
-      customer.query(query),
-      fetchPurchaseKeywordTotals({
-        customer,
-        adGroupIds,
-        dateFrom,
-        dateTo,
-        statusFilter,
-        purchaseActionIds: purchaseActionIds ?? null,
-      }),
+      (async () => {
+        const t = performance.now();
+        const r = await customer.query(query);
+        console.log(
+          `[perf-recon] keywords.Q1 ${(performance.now() - t).toFixed(0)}ms rows=${r.length}`
+        );
+        return r;
+      })(),
+      (async () => {
+        const t = performance.now();
+        const r = await fetchPurchaseKeywordTotals({
+          customer,
+          adGroupIds,
+          dateFrom,
+          dateTo,
+          statusFilter,
+          purchaseActionIds: purchaseActionIds ?? null,
+        });
+        console.log(
+          `[perf-recon] keywords.Q2_fetchPurchaseKeywordTotals ${(performance.now() - t).toFixed(0)}ms mapSize=${r?.size ?? "null"}`
+        );
+        return r;
+      })(),
     ]);
 
     const byAdGroup = new Map<string, UnifiedAdKeyword[]>();

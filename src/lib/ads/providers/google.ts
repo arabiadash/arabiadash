@@ -342,21 +342,41 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
   async getAds(range: DateRangeInput): Promise<UnifiedAd[]> {
     return this.withReauthMapping(async () => {
     const { dateFrom, dateTo } = this.resolveDateRange(range);
+    // [perf-recon] M9 post-ship 2-min load investigation. Tagged for grep.
+    const perfT0 = performance.now();
 
     // Pass 1: parallel — ad rows (cost + creative fields) + ad-level
     // purchase merger (ADR-011 sibling, Commit 4b). The merger query is
     // independent of fetchAds output and runs against `FROM ad_group_ad`
     // with the same date filter, so they share the wall-time path.
+    const pass1Start = performance.now();
     const [result, adPurchaseTotals] = await Promise.all([
-      fetchAds({
-        customerId: this.customerId,
-        refreshToken: this.refreshToken,
-        dateFrom,
-        dateTo,
-        loginCustomerId: this.loginCustomerId,
-      }),
-      this.fetchPurchaseAdTotals(dateFrom, dateTo),
+      (async () => {
+        const t = performance.now();
+        const r = await fetchAds({
+          customerId: this.customerId,
+          refreshToken: this.refreshToken,
+          dateFrom,
+          dateTo,
+          loginCustomerId: this.loginCustomerId,
+        });
+        console.log(
+          `[perf-recon] google.fetchAds ${(performance.now() - t).toFixed(0)}ms`
+        );
+        return r;
+      })(),
+      (async () => {
+        const t = performance.now();
+        const r = await this.fetchPurchaseAdTotals(dateFrom, dateTo);
+        console.log(
+          `[perf-recon] google.fetchPurchaseAdTotals ${(performance.now() - t).toFixed(0)}ms`
+        );
+        return r;
+      })(),
     ]);
+    console.log(
+      `[perf-recon] google.pass1 (fetchAds + adPurchaseTotals) ${(performance.now() - pass1Start).toFixed(0)}ms`
+    );
 
     if (!result) return [];
 
@@ -388,60 +408,97 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     // keywords, AND search terms (M9 / ADR-018). All four reach Google
     // Ads API independently; parallel keeps wall time = max(latencies)
     // instead of sum. Empty-input branches short-circuit without firing.
+    console.log(
+      `[perf-recon] google.pass2_start activeAds=${activeAds.length} adGroups=${adGroupIdsInScope.size} resourceNames=${allResourceNames.size}`
+    );
+    const pass2Start = performance.now();
     const [urlMap, extensionsMap, keywordsByAdGroup, searchTermsByAdGroup] =
       await Promise.all([
-      allResourceNames.size > 0
-        ? fetchAssetUrls({
-            customerId: this.customerId,
-            refreshToken: this.refreshToken,
-            loginCustomerId: this.loginCustomerId,
-            resourceNames: Array.from(allResourceNames),
-          })
-        : Promise.resolve(new Map<string, string>()),
+      (async () => {
+        const t = performance.now();
+        const r =
+          allResourceNames.size > 0
+            ? await fetchAssetUrls({
+                customerId: this.customerId,
+                refreshToken: this.refreshToken,
+                loginCustomerId: this.loginCustomerId,
+                resourceNames: Array.from(allResourceNames),
+              })
+            : new Map<string, string>();
+        console.log(
+          `[perf-recon] google.fetchAssetUrls ${(performance.now() - t).toFixed(0)}ms resourceNames=${allResourceNames.size}`
+        );
+        return r;
+      })(),
       // Phase 4.8 M6 — Asset Extensions per ADR-012
-      fetchAdExtensions({
-        customerId: this.customerId,
-        refreshToken: this.refreshToken,
-        loginCustomerId: this.loginCustomerId,
-        dateFrom,
-        dateTo,
-        adIdToCampaignId: new Map(
-          activeAds.map((ad) => [ad.id, ad.campaign_id])
-        ),
-      }),
+      (async () => {
+        const t = performance.now();
+        const r = await fetchAdExtensions({
+          customerId: this.customerId,
+          refreshToken: this.refreshToken,
+          loginCustomerId: this.loginCustomerId,
+          dateFrom,
+          dateTo,
+          adIdToCampaignId: new Map(
+            activeAds.map((ad) => [ad.id, ad.campaign_id])
+          ),
+        });
+        console.log(
+          `[perf-recon] google.fetchAdExtensions ${(performance.now() - t).toFixed(0)}ms ads=${activeAds.length}`
+        );
+        return r;
+      })(),
       // Phase 4.8 M7 — Keywords per ADR-015. Strict ENABLED default per
       // §Decision 5. UI re-fetches with statusFilter='all' if user toggles.
       // M7.5 / ADR-016: purchaseActionIds plumbed through for the 7th
       // ADR-011 merger sibling (fetchPurchaseKeywordTotals). null/empty
       // surface as hasConversionData=false at the keyword level.
-      fetchKeywords({
-        customerId: this.customerId,
-        refreshToken: this.refreshToken,
-        loginCustomerId: this.loginCustomerId,
-        dateFrom,
-        dateTo,
-        adGroupIds: adGroupIdsInScope,
-        statusFilter: "enabled",
-        purchaseActionIds: this.purchaseActionIds,
-      }),
+      (async () => {
+        const t = performance.now();
+        const r = await fetchKeywords({
+          customerId: this.customerId,
+          refreshToken: this.refreshToken,
+          loginCustomerId: this.loginCustomerId,
+          dateFrom,
+          dateTo,
+          adGroupIds: adGroupIdsInScope,
+          statusFilter: "enabled",
+          purchaseActionIds: this.purchaseActionIds,
+        });
+        console.log(
+          `[perf-recon] google.fetchKeywords ${(performance.now() - t).toFixed(0)}ms adGroups=${adGroupIdsInScope.size}`
+        );
+        return r;
+      })(),
       // Phase 4.8 M9 — Search Terms per ADR-018. 8th ADR-011-family
       // merger sibling (fetchPurchaseSearchTermTotals). Status filter
       // applied CLIENT-SIDE per §Decision 3 (no fetch-time filter — fetch
       // all statuses, UI hides EXCLUDED/UNKNOWN by default). Composite
       // key ${adGroupId}<SOH>${searchTerm} per §Decision 2.
-      fetchSearchTerms({
-        customerId: this.customerId,
-        refreshToken: this.refreshToken,
-        loginCustomerId: this.loginCustomerId,
-        dateFrom,
-        dateTo,
-        adGroupIds: adGroupIdsInScope,
-        purchaseActionIds: this.purchaseActionIds,
-      }),
+      (async () => {
+        const t = performance.now();
+        const r = await fetchSearchTerms({
+          customerId: this.customerId,
+          refreshToken: this.refreshToken,
+          loginCustomerId: this.loginCustomerId,
+          dateFrom,
+          dateTo,
+          adGroupIds: adGroupIdsInScope,
+          purchaseActionIds: this.purchaseActionIds,
+        });
+        console.log(
+          `[perf-recon] google.fetchSearchTerms ${(performance.now() - t).toFixed(0)}ms adGroups=${adGroupIdsInScope.size}`
+        );
+        return r;
+      })(),
     ]);
+    console.log(
+      `[perf-recon] google.pass2 (urls+extensions+keywords+searchTerms) ${(performance.now() - pass2Start).toFixed(0)}ms`
+    );
 
     // Pass 7: normalize with URL lookups + extensions + keywords + search
     // terms + purchase merger.
+    const normalizeStart = performance.now();
     const normalizedAds = activeAds.map((ad) =>
       this.normalizeAd(
         ad,
@@ -452,6 +509,9 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
         adPurchaseTotals
       )
     );
+    console.log(
+      `[perf-recon] google.normalizeAds ${(performance.now() - normalizeStart).toFixed(0)}ms ads=${activeAds.length}`
+    );
 
     // Pass 6 (M-PMax / ADR-013): asset_group rows + per-asset enrichment
     // + asset_group purchase merger (Commit 5). PMax campaigns return
@@ -459,12 +519,37 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     // creative-unit surface for them. All three queries run in parallel
     // — they reach Google independently (different GAQL resources /
     // different segment constraints), so none blocks the others.
+    const pass3Start = performance.now();
     const [assetGroupRows, assetsByGroupId, assetGroupPurchaseTotals] =
       await Promise.all([
-        this.fetchAssetGroupRows(dateFrom, dateTo),
-        this.fetchAssetGroupAssets(),
-        this.fetchPurchaseAssetGroupTotals(dateFrom, dateTo),
+        (async () => {
+          const t = performance.now();
+          const r = await this.fetchAssetGroupRows(dateFrom, dateTo);
+          console.log(
+            `[perf-recon] google.fetchAssetGroupRows ${(performance.now() - t).toFixed(0)}ms`
+          );
+          return r;
+        })(),
+        (async () => {
+          const t = performance.now();
+          const r = await this.fetchAssetGroupAssets();
+          console.log(
+            `[perf-recon] google.fetchAssetGroupAssets ${(performance.now() - t).toFixed(0)}ms`
+          );
+          return r;
+        })(),
+        (async () => {
+          const t = performance.now();
+          const r = await this.fetchPurchaseAssetGroupTotals(dateFrom, dateTo);
+          console.log(
+            `[perf-recon] google.fetchPurchaseAssetGroupTotals ${(performance.now() - t).toFixed(0)}ms`
+          );
+          return r;
+        })(),
       ]);
+    console.log(
+      `[perf-recon] google.pass3 (PMax asset groups) ${(performance.now() - pass3Start).toFixed(0)}ms`
+    );
 
     // Merge: layer in `type_data.assets` + purchase-attribution trio onto
     // each asset_group row. Pure-functional rebuild (no in-place mutation
@@ -504,7 +589,11 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       };
     });
 
-    return [...normalizedAds, ...enrichedAssetGroups];
+    const finalAds = [...normalizedAds, ...enrichedAssetGroups];
+    console.log(
+      `[perf-recon] google.getAds TOTAL ${(performance.now() - perfT0).toFixed(0)}ms returnedAds=${finalAds.length} (RSA/RDA=${normalizedAds.length} PMax=${enrichedAssetGroups.length})`
+    );
+    return finalAds;
     });
   }
 
