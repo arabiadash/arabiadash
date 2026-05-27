@@ -937,6 +937,89 @@ function AdDetailModal({
 
   const totalKeywordCount = keywordsRaw.length;
 
+  // M9 / ADR-018 — Search Terms section state. Mirrors M7.5 keywords
+  // pattern: client-side sort + filter + pagination. Status filter is
+  // applied here (NOT in GAQL) per ADR-018 §Decision 3 to avoid cache
+  // fragmentation — one cached payload covers all UI preferences.
+  const [searchTermSortKey, setSearchTermSortKey] = useState<
+    | "spend"
+    | "impressions"
+    | "clicks"
+    | "ctr"
+    | "revenue"
+    | "purchases"
+    | "roas"
+  >("spend");
+  const [searchTermMatchFilter, setSearchTermMatchFilter] = useState<
+    "all" | "EXACT" | "PHRASE" | "BROAD"
+  >("all");
+  // Status filter default per ADR-018 §Decision 3: ADDED + NONE only.
+  // "الكل" opt-in surfaces EXCLUDED / ADDED_EXCLUDED / UNKNOWN.
+  const [searchTermStatusFilter, setSearchTermStatusFilter] = useState<
+    "default" | "all" | "ADDED" | "NONE" | "EXCLUDED" | "UNKNOWN"
+  >("default");
+  const [searchTermShowAll, setSearchTermShowAll] = useState(false);
+  const SEARCH_TERM_PAGE_SIZE = 50;
+
+  const searchTermsRaw = ad.searchTerms ?? [];
+  const filteredSearchTerms = useMemo(() => {
+    let result = searchTermsRaw;
+    if (searchTermStatusFilter === "default") {
+      result = result.filter(
+        (t) => t.status === "ADDED" || t.status === "NONE"
+      );
+    } else if (searchTermStatusFilter !== "all") {
+      result = result.filter((t) => t.status === searchTermStatusFilter);
+    }
+    if (searchTermMatchFilter !== "all") {
+      result = result.filter((t) => t.matchType === searchTermMatchFilter);
+    }
+    const sorted = [...result].sort((a, b) => {
+      // Same null-sinks-to-bottom convention as M7.5 keyword sort
+      // (revenue/purchases/roas all nullable when hasConversionData=false).
+      if (
+        searchTermSortKey === "revenue" ||
+        searchTermSortKey === "purchases" ||
+        searchTermSortKey === "roas"
+      ) {
+        const av = a[searchTermSortKey] ?? -Infinity;
+        const bv = b[searchTermSortKey] ?? -Infinity;
+        return bv - av;
+      }
+      return (b[searchTermSortKey] ?? 0) - (a[searchTermSortKey] ?? 0);
+    });
+    return sorted;
+  }, [
+    searchTermsRaw,
+    searchTermStatusFilter,
+    searchTermMatchFilter,
+    searchTermSortKey,
+  ]);
+
+  const visibleSearchTerms = searchTermShowAll
+    ? filteredSearchTerms
+    : filteredSearchTerms.slice(0, SEARCH_TERM_PAGE_SIZE);
+
+  // KPI strip totals — computed from filtered set per ADR-018 §Decision 4
+  // (same convention as M7.5 §Decision 2).
+  const searchTermKpiTotals = useMemo(() => {
+    let anyHasConversionData = false;
+    let revenueSum = 0;
+    let purchasesSum = 0;
+    for (const t of filteredSearchTerms) {
+      if (t.hasConversionData) {
+        anyHasConversionData = true;
+        if (t.revenue != null) revenueSum += t.revenue;
+        if (t.purchases != null) purchasesSum += t.purchases;
+      }
+    }
+    return anyHasConversionData
+      ? { revenue: revenueSum, purchases: purchasesSum, hasData: true as const }
+      : { revenue: null, purchases: null, hasData: false as const };
+  }, [filteredSearchTerms]);
+
+  const totalSearchTermCount = searchTermsRaw.length;
+
   const imageUrl: string | undefined = (() => {
     if (isMeta) return metaData?.imageUrl ?? metaData?.thumbnailUrl;
     if (ad.ad_type === "IMAGE_AD") return ad.type_data.imageUrl;
@@ -1521,6 +1604,273 @@ function AdDetailModal({
                     ? `عرض الأعلى 50 فقط`
                     : `عرض الكل (${filteredKeywords.length})`}
                 </button>
+              )}
+            </div>
+          )}
+
+          {/* Phase 4.8 M9 — Search Terms per ADR-018. Renders only when
+              the ad's parent ad_group has search terms (Google Search ads
+              only — Meta + PMax leave ad.searchTerms undefined). Mirrors
+              M7.5 keywords section structure. */}
+          {totalSearchTermCount > 0 && (
+            <div className="bg-gray-50 -mx-4 sm:-mx-6 px-4 sm:px-6 py-4 border-y border-gray-200">
+              {/* Header + sharing-context badge */}
+              <div className="mb-3">
+                <p className="text-sm font-semibold text-gray-800 mb-1">
+                  كلمات البحث الفعلية ({totalSearchTermCount})
+                </p>
+                <p className="text-[11px] text-gray-500 leading-relaxed">
+                  لمجموعة &lsquo;
+                  {ad.campaignName && ad.adsetName
+                    ? `${ad.campaignName} / ${ad.adsetName}`
+                    : ad.adsetName ?? ad.campaignName ?? "—"}
+                  &rsquo; — مشتركة بين {adGroupAdCount} إعلان في نفس المجموعة
+                </p>
+              </div>
+
+              {/* KPI strip — 2 cards (إجمالي المبيعات + إجمالي عمليات الشراء).
+                  Per ADR-018 §Decision 4: computed from filtered set,
+                  reactive to filter changes. Empty-state "—" with tooltip
+                  when no visible term has conversion data. */}
+              <div className="mb-3 grid grid-cols-2 gap-2">
+                <div className="bg-white rounded-lg p-2.5 border border-gray-200">
+                  <p className="text-[10px] text-gray-500 mb-0.5">
+                    إجمالي المبيعات
+                  </p>
+                  {searchTermKpiTotals.hasData ? (
+                    <p className="text-sm font-bold text-gray-800 tabular-nums">
+                      {formatAndConvert(
+                        searchTermKpiTotals.revenue,
+                        (ad.currency as Currency) || accountCurrency,
+                        displayCurrency
+                      )}
+                    </p>
+                  ) : (
+                    <p
+                      className="text-sm font-bold text-gray-400"
+                      title="لا توجد بيانات تحويل لهذا الحساب"
+                    >
+                      —
+                    </p>
+                  )}
+                </div>
+                <div className="bg-white rounded-lg p-2.5 border border-gray-200">
+                  <p className="text-[10px] text-gray-500 mb-0.5">
+                    إجمالي عمليات الشراء
+                  </p>
+                  {searchTermKpiTotals.hasData ? (
+                    <p className="text-sm font-bold text-gray-800 tabular-nums">
+                      {formatCount(searchTermKpiTotals.purchases)}
+                    </p>
+                  ) : (
+                    <p
+                      className="text-sm font-bold text-gray-400"
+                      title="لا توجد بيانات تحويل لهذا الحساب"
+                    >
+                      —
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Filter + sort dropdowns */}
+              <div className="mb-3 flex flex-wrap gap-1.5 text-[11px]">
+                <select
+                  value={searchTermStatusFilter}
+                  onChange={(e) =>
+                    setSearchTermStatusFilter(
+                      e.target.value as typeof searchTermStatusFilter
+                    )
+                  }
+                  className="bg-white border border-gray-200 rounded px-2 py-1"
+                >
+                  <option value="default">مضاف + لا يوجد</option>
+                  <option value="all">الكل</option>
+                  <option value="ADDED">مضاف</option>
+                  <option value="NONE">لا يوجد</option>
+                  <option value="EXCLUDED">مستبعد</option>
+                  <option value="UNKNOWN">غير معروف</option>
+                </select>
+                <select
+                  value={searchTermMatchFilter}
+                  onChange={(e) =>
+                    setSearchTermMatchFilter(
+                      e.target.value as typeof searchTermMatchFilter
+                    )
+                  }
+                  className="bg-white border border-gray-200 rounded px-2 py-1"
+                >
+                  <option value="all">كل أنواع المطابقة</option>
+                  <option value="EXACT">EXACT</option>
+                  <option value="PHRASE">PHRASE</option>
+                  <option value="BROAD">BROAD</option>
+                </select>
+                <select
+                  value={searchTermSortKey}
+                  onChange={(e) =>
+                    setSearchTermSortKey(
+                      e.target.value as typeof searchTermSortKey
+                    )
+                  }
+                  className="bg-white border border-gray-200 rounded px-2 py-1"
+                >
+                  <option value="spend">التكلفة</option>
+                  <option value="revenue">المبيعات</option>
+                  <option value="roas">ROAS</option>
+                  <option value="purchases">عمليات الشراء</option>
+                  <option value="impressions">الانطباعات</option>
+                  <option value="clicks">النقرات</option>
+                  <option value="ctr">CTR</option>
+                </select>
+              </div>
+
+              {/* Table — top 50 default + "عرض الكل (N)" toggle */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px] tabular-nums">
+                  <thead>
+                    <tr className="text-gray-500 border-b border-gray-200">
+                      <th className="text-right py-1.5 px-2 font-medium">
+                        الكلمة
+                      </th>
+                      <th className="text-center py-1.5 px-2 font-medium">
+                        الحالة
+                      </th>
+                      <th className="text-center py-1.5 px-2 font-medium">
+                        المطابقة
+                      </th>
+                      <th className="text-right py-1.5 px-2 font-medium">
+                        التكلفة
+                      </th>
+                      <th className="text-right py-1.5 px-2 font-medium">
+                        المبيعات
+                      </th>
+                      <th className="text-right py-1.5 px-2 font-medium">
+                        ROAS
+                      </th>
+                      <th className="text-right py-1.5 px-2 font-medium">
+                        الشراء
+                      </th>
+                      <th className="text-right py-1.5 px-2 font-medium">
+                        الانطباعات
+                      </th>
+                      <th className="text-right py-1.5 px-2 font-medium">
+                        النقرات
+                      </th>
+                      <th className="text-right py-1.5 px-2 font-medium">
+                        CTR
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleSearchTerms.map((t, i) => {
+                      const statusBadge =
+                        t.status === "ADDED"
+                          ? { cls: "bg-green-100 text-green-700", label: "مضاف" }
+                          : t.status === "NONE"
+                            ? { cls: "bg-gray-100 text-gray-700", label: "لا يوجد" }
+                            : t.status === "EXCLUDED"
+                              ? { cls: "bg-red-100 text-red-700", label: "مستبعد" }
+                              : t.status === "ADDED_EXCLUDED"
+                                ? { cls: "bg-amber-100 text-amber-700", label: "مضاف+مستبعد" }
+                                : { cls: "bg-yellow-100 text-yellow-700", label: "—" };
+                      const matchBadge =
+                        t.matchType === "EXACT"
+                          ? "bg-indigo-100 text-indigo-700"
+                          : t.matchType === "PHRASE"
+                            ? "bg-blue-100 text-blue-700"
+                            : "bg-sky-100 text-sky-700";
+                      return (
+                        <tr
+                          key={`${t.text}-${i}`}
+                          className="border-b border-gray-100 last:border-b-0 hover:bg-white/60"
+                        >
+                          <td
+                            className="text-right py-2 px-2 max-w-[220px] truncate text-gray-900"
+                            title={
+                              t.triggeredByKeywordText
+                                ? `${t.text} (من: ${t.triggeredByKeywordText})`
+                                : t.text
+                            }
+                          >
+                            {t.text}
+                          </td>
+                          <td className="text-center py-2 px-2">
+                            <span
+                              className={`inline-block px-1.5 py-0.5 rounded text-[10px] ${statusBadge.cls}`}
+                            >
+                              {statusBadge.label}
+                            </span>
+                          </td>
+                          <td className="text-center py-2 px-2">
+                            <span
+                              className={`inline-block px-1.5 py-0.5 rounded text-[10px] ${matchBadge}`}
+                            >
+                              {t.matchType}
+                            </span>
+                          </td>
+                          <td className="text-right py-2 px-2 text-gray-700">
+                            {formatAndConvert(
+                              t.spend,
+                              (ad.currency as Currency) || accountCurrency,
+                              displayCurrency
+                            )}
+                          </td>
+                          <td className="text-right py-2 px-2 text-gray-700">
+                            {t.hasConversionData && t.revenue != null
+                              ? formatAndConvert(
+                                  t.revenue,
+                                  (ad.currency as Currency) || accountCurrency,
+                                  displayCurrency
+                                )
+                              : "—"}
+                          </td>
+                          <td
+                            className={`text-right py-2 px-2 font-semibold ${t.roas != null ? getROASColor(t.roas) : "text-gray-400"}`}
+                          >
+                            {t.roas != null ? `${t.roas.toFixed(2)}x` : "—"}
+                          </td>
+                          <td className="text-right py-2 px-2 text-gray-700">
+                            {t.hasConversionData && t.purchases != null
+                              ? formatCount(t.purchases)
+                              : "—"}
+                          </td>
+                          <td className="text-right py-2 px-2 text-gray-700">
+                            {t.impressions.toLocaleString("en-US")}
+                          </td>
+                          <td className="text-right py-2 px-2 text-gray-700">
+                            {t.clicks.toLocaleString("en-US")}
+                          </td>
+                          <td className="text-right py-2 px-2 text-gray-700">
+                            {t.ctr.toFixed(2)}%
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Pagination toggle */}
+              {filteredSearchTerms.length > SEARCH_TERM_PAGE_SIZE && (
+                <button
+                  type="button"
+                  onClick={() => setSearchTermShowAll((v) => !v)}
+                  className="mt-2 text-xs text-indigo-600 hover:text-indigo-700 hover:underline"
+                >
+                  {searchTermShowAll
+                    ? `عرض الأعلى 50 فقط`
+                    : `عرض الكل (${filteredSearchTerms.length})`}
+                </button>
+              )}
+
+              {/* Empty-filtered-state message — surfaces when filters
+                  hide everything (e.g. all terms are EXCLUDED but
+                  default filter hides them). Distinct from the
+                  "no terms in date range" outer guard. */}
+              {filteredSearchTerms.length === 0 && (
+                <p className="text-xs text-gray-500 italic mt-2">
+                  لا تطابق أي كلمات بحث المرشحات الحالية.
+                </p>
               )}
             </div>
           )}

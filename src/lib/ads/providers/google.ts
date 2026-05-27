@@ -16,6 +16,7 @@ import { fetchAds, type AdRow } from "@/lib/google-ads/ads";
 import { fetchAssetUrls } from "@/lib/google-ads/assets";
 import { fetchAdExtensions } from "@/lib/google-ads/extensions";
 import { fetchKeywords } from "@/lib/google-ads/keywords";
+import { fetchSearchTerms } from "@/lib/google-ads/search-terms";
 import {
   fetchTimeSeries,
   type TimeSeriesPoint,
@@ -383,11 +384,12 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       if (ad.ad_group_id) adGroupIdsInScope.add(ad.ad_group_id);
     }
 
-    // Pass 3 + 4 + 5: parallel — image URLs, asset extensions, AND keywords.
-    // All three reach Google Ads API independently; parallel keeps wall
-    // time = max(latencies) instead of sum. Empty-input branches short-
-    // circuit without firing a request.
-    const [urlMap, extensionsMap, keywordsByAdGroup] = await Promise.all([
+    // Pass 3 + 4 + 5 + 6: parallel — image URLs, asset extensions,
+    // keywords, AND search terms (M9 / ADR-018). All four reach Google
+    // Ads API independently; parallel keeps wall time = max(latencies)
+    // instead of sum. Empty-input branches short-circuit without firing.
+    const [urlMap, extensionsMap, keywordsByAdGroup, searchTermsByAdGroup] =
+      await Promise.all([
       allResourceNames.size > 0
         ? fetchAssetUrls({
             customerId: this.customerId,
@@ -422,15 +424,31 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
         statusFilter: "enabled",
         purchaseActionIds: this.purchaseActionIds,
       }),
+      // Phase 4.8 M9 — Search Terms per ADR-018. 8th ADR-011-family
+      // merger sibling (fetchPurchaseSearchTermTotals). Status filter
+      // applied CLIENT-SIDE per §Decision 3 (no fetch-time filter — fetch
+      // all statuses, UI hides EXCLUDED/UNKNOWN by default). Composite
+      // key ${adGroupId}<SOH>${searchTerm} per §Decision 2.
+      fetchSearchTerms({
+        customerId: this.customerId,
+        refreshToken: this.refreshToken,
+        loginCustomerId: this.loginCustomerId,
+        dateFrom,
+        dateTo,
+        adGroupIds: adGroupIdsInScope,
+        purchaseActionIds: this.purchaseActionIds,
+      }),
     ]);
 
-    // Pass 6: normalize with URL lookups + extensions + keywords + purchase merger.
+    // Pass 7: normalize with URL lookups + extensions + keywords + search
+    // terms + purchase merger.
     const normalizedAds = activeAds.map((ad) =>
       this.normalizeAd(
         ad,
         urlMap,
         extensionsMap,
         keywordsByAdGroup,
+        searchTermsByAdGroup,
         adPurchaseTotals
       )
     );
@@ -1150,6 +1168,10 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     urlMap?: Map<string, string>,
     extensionsMap?: Map<string, UnifiedAdExtensions>,
     keywordsByAdGroup?: Map<string, import("../types").UnifiedAdKeyword[]>,
+    searchTermsByAdGroup?: Map<
+      string,
+      import("../types").UnifiedAdSearchTerm[]
+    >,
     adPurchaseTotals?: Map<
       string,
       { purchases: number; revenue: number }
@@ -1174,6 +1196,15 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     // ad_group_id (shouldn't happen for Search) or no keywords matched.
     const keywords = ad.ad_group_id
       ? keywordsByAdGroup?.get(ad.ad_group_id)
+      : undefined;
+
+    // Phase 4.8 M9 — attach search terms from the ad's parent ad_group
+    // (ADR-018). Same per-ad_group sharing semantic as keywords. Search
+    // terms are populated only for Search RSA ads; PMax variants leave
+    // this undefined (PMax search terms use a different resource —
+    // paid_organic_search_term_view — deferred to M9.5+).
+    const searchTerms = ad.ad_group_id
+      ? searchTermsByAdGroup?.get(ad.ad_group_id)
       : undefined;
 
     // Commit 4b — purchase merger lookup (ADR-011 sibling at ad level).
@@ -1221,6 +1252,7 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       cpc: ad.cpc,
       extensions,
       keywords,
+      searchTerms,
       provider: "google" as const,
     };
 
