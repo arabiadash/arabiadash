@@ -42,6 +42,8 @@ import {
 import { useProviderInsights } from "@/lib/hooks/use-provider-insights";
 import { useProviderAds } from "@/lib/hooks/use-provider-ads";
 import { useAds } from "@/lib/hooks/use-ads";
+import { useSearchTerms } from "@/lib/hooks/use-search-terms";
+import { useKeywords } from "@/lib/hooks/use-keywords";
 import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
 import { useElementHeight } from "@/lib/hooks/useElementHeight";
 import {
@@ -63,6 +65,8 @@ import {
   formatChartDayLabel,
   formatChartTooltipLabel,
   type DateRangeValue,
+  type DateRange,
+  type CustomDateRange,
   type UnifiedCampaign,
   type UnifiedAd,
   type UnifiedInsight,
@@ -805,6 +809,13 @@ interface AdDetailModalProps {
    * context. Defaults to 0 when not provided (Meta/PMax callers).
    */
   adGroupAdCount?: number;
+  /**
+   * ADR-019 (M9.1) — date range plumbed through for the lazy
+   * search-terms + keywords fetches. Must match the range used for
+   * the parent creatives fetch so KPIs and per-ad metrics align.
+   */
+  range?: DateRange;
+  customRange?: CustomDateRange;
 }
 
 function AdDetailModal({
@@ -813,6 +824,8 @@ function AdDetailModal({
   displayCurrency,
   onClose,
   adGroupAdCount = 0,
+  range,
+  customRange,
 }: AdDetailModalProps) {
   // PMAX_ASSET_GROUP gets its own dedicated modal — wholly different
   // shape (tabbed asset surfaces, wider shell, in-modal YouTube embeds,
@@ -874,7 +887,31 @@ function AdDetailModal({
   const [keywordShowAll, setKeywordShowAll] = useState(false);
   const KEYWORD_PAGE_SIZE = 50;
 
-  const keywordsRaw = ad.keywords ?? [];
+  // ADR-019 (M9.1) — keywords + search terms lazy-fetched on modal
+  // mount instead of being bundled into the creatives payload. AbortController
+  // inside both hooks cancels in-flight requests if the modal closes
+  // mid-fetch (unmount-race gate). The `enabled` flag fires only for
+  // Google Search ads (Meta/PMax leave adsetId blank or carry no
+  // ad_group-scoped data).
+  const supportsAdGroupData =
+    ad.provider === "google" &&
+    typeof ad.adsetId === "string" &&
+    ad.adsetId.length > 0 &&
+    typeof ad.accountId === "string" &&
+    ad.accountId.length > 0;
+
+  const {
+    keywords: keywordsRaw,
+    loading: keywordsLoading,
+    error: keywordsError,
+    refresh: refreshKeywords,
+  } = useKeywords({
+    accountId: ad.accountId ?? "",
+    adGroupId: ad.adsetId ?? "",
+    range,
+    customRange,
+    enabled: supportsAdGroupData,
+  });
   const filteredKeywords = useMemo(() => {
     let result = keywordsRaw;
     if (keywordMatchFilter !== "all") {
@@ -961,7 +998,19 @@ function AdDetailModal({
   const [searchTermShowAll, setSearchTermShowAll] = useState(false);
   const SEARCH_TERM_PAGE_SIZE = 50;
 
-  const searchTermsRaw = ad.searchTerms ?? [];
+  // ADR-019 (M9.1) — search terms via lazy fetch (see keywords hook above).
+  const {
+    searchTerms: searchTermsRaw,
+    loading: searchTermsLoading,
+    error: searchTermsError,
+    refresh: refreshSearchTerms,
+  } = useSearchTerms({
+    accountId: ad.accountId ?? "",
+    adGroupId: ad.adsetId ?? "",
+    range,
+    customRange,
+    enabled: supportsAdGroupData,
+  });
   const filteredSearchTerms = useMemo(() => {
     let result = searchTermsRaw;
     if (searchTermStatusFilter === "default") {
@@ -1368,14 +1417,17 @@ function AdDetailModal({
           {/* Phase 4.8 M7 — Keywords on Search ads per ADR-015. Renders
               only when the ad's parent ad_group has keywords (Google
               Search ads only — Meta + PMax leave ad.keywords undefined). */}
-          {totalKeywordCount > 0 && (
+          {/* ADR-019 (M9.1) — render the section frame whenever lazy fetch
+              is in flight, in error, or has data. Gates on supportsAdGroupData
+              to skip Meta/PMax variants entirely. */}
+          {supportsAdGroupData && (keywordsLoading || keywordsError || totalKeywordCount > 0) && (
             <div className="bg-gray-50 -mx-4 sm:-mx-6 px-4 sm:px-6 py-4 border-y border-gray-200">
               {/* Header + sharing-context badge per ADR-015 §Decision 7.
                   Format: "الكلمات المفتاحية لمجموعة '[campaign / ad_group]'
                   — مشتركة بين N إعلان في نفس المجموعة" */}
               <div className="mb-3">
                 <p className="text-sm font-semibold text-gray-800 mb-1">
-                  الكلمات المفتاحية ({totalKeywordCount})
+                  الكلمات المفتاحية{keywordsLoading ? "" : ` (${totalKeywordCount})`}
                 </p>
                 <p className="text-[11px] text-gray-500 leading-relaxed">
                   لمجموعة &lsquo;
@@ -1386,6 +1438,27 @@ function AdDetailModal({
                 </p>
               </div>
 
+              {keywordsLoading ? (
+                <div className="flex items-center justify-center py-6 text-gray-500">
+                  <Loader2 className="w-4 h-4 animate-spin ml-2" />
+                  <span className="text-xs">جاري تحميل الكلمات المفتاحية...</span>
+                </div>
+              ) : keywordsError ? (
+                <div className="text-center py-6">
+                  <p className="text-xs text-red-600 mb-2">
+                    {keywordsError === "reauth_required"
+                      ? "انتهت صلاحية ربط حساب Google"
+                      : "تعذّر تحميل الكلمات المفتاحية"}
+                  </p>
+                  <button
+                    onClick={() => refreshKeywords()}
+                    className="text-xs text-indigo-600 hover:underline"
+                  >
+                    إعادة المحاولة
+                  </button>
+                </div>
+              ) : (
+                <>
               {/* Match-type breakdown (3 bars) — visual at-a-glance */}
               <div className="mb-3 flex items-center gap-1.5 text-[10px]">
                 {(["EXACT", "PHRASE", "BROAD"] as const).map((mt) => {
@@ -1605,19 +1678,19 @@ function AdDetailModal({
                     : `عرض الكل (${filteredKeywords.length})`}
                 </button>
               )}
+                </>
+              )}
             </div>
           )}
 
-          {/* Phase 4.8 M9 — Search Terms per ADR-018. Renders only when
-              the ad's parent ad_group has search terms (Google Search ads
-              only — Meta + PMax leave ad.searchTerms undefined). Mirrors
-              M7.5 keywords section structure. */}
-          {totalSearchTermCount > 0 && (
+          {/* Phase 4.8 M9 — Search Terms per ADR-018, lazy-loaded per ADR-019.
+              Same loading/error/empty branches as the keywords section above. */}
+          {supportsAdGroupData && (searchTermsLoading || searchTermsError || totalSearchTermCount > 0) && (
             <div className="bg-gray-50 -mx-4 sm:-mx-6 px-4 sm:px-6 py-4 border-y border-gray-200">
               {/* Header + sharing-context badge */}
               <div className="mb-3">
                 <p className="text-sm font-semibold text-gray-800 mb-1">
-                  كلمات البحث الفعلية ({totalSearchTermCount})
+                  كلمات البحث الفعلية{searchTermsLoading ? "" : ` (${totalSearchTermCount})`}
                 </p>
                 <p className="text-[11px] text-gray-500 leading-relaxed">
                   لمجموعة &lsquo;
@@ -1628,6 +1701,27 @@ function AdDetailModal({
                 </p>
               </div>
 
+              {searchTermsLoading ? (
+                <div className="flex items-center justify-center py-6 text-gray-500">
+                  <Loader2 className="w-4 h-4 animate-spin ml-2" />
+                  <span className="text-xs">جاري تحميل كلمات البحث... قد يستغرق ~5 ثوانٍ</span>
+                </div>
+              ) : searchTermsError ? (
+                <div className="text-center py-6">
+                  <p className="text-xs text-red-600 mb-2">
+                    {searchTermsError === "reauth_required"
+                      ? "انتهت صلاحية ربط حساب Google"
+                      : "تعذّر تحميل كلمات البحث"}
+                  </p>
+                  <button
+                    onClick={() => refreshSearchTerms()}
+                    className="text-xs text-indigo-600 hover:underline"
+                  >
+                    إعادة المحاولة
+                  </button>
+                </div>
+              ) : (
+                <>
               {/* KPI strip — 2 cards (إجمالي المبيعات + إجمالي عمليات الشراء).
                   Per ADR-018 §Decision 4: computed from filtered set,
                   reactive to filter changes. Empty-state "—" with tooltip
@@ -1871,6 +1965,8 @@ function AdDetailModal({
                 <p className="text-xs text-gray-500 italic mt-2">
                   لا تطابق أي كلمات بحث المرشحات الحالية.
                 </p>
+              )}
+                </>
               )}
             </div>
           )}
@@ -2582,6 +2678,13 @@ interface CreativesGridProps {
   loading: boolean;
   accountCurrency: Currency;
   displayCurrency: Currency;
+  /**
+   * ADR-019 (M9.1) — date range forwarded to AdDetailModal so its
+   * lazy search-terms + keywords fetches use the same range as the
+   * parent creatives fetch.
+   */
+  range?: DateRange;
+  customRange?: CustomDateRange;
 }
 
 type CreativeStatusFilter = "all" | "ACTIVE" | "PAUSED";
@@ -2646,6 +2749,8 @@ function CreativesGrid({
   loading,
   accountCurrency,
   displayCurrency,
+  range,
+  customRange,
 }: CreativesGridProps) {
   const [statusFilter, setStatusFilter] =
     useState<CreativeStatusFilter>("all");
@@ -2790,6 +2895,10 @@ function CreativesGrid({
               ? ads.filter((a) => a.adsetId === selectedAd.adsetId).length
               : 0
           }
+          // ADR-019 (M9.1) — forward the active date range so the modal's
+          // lazy search-terms + keywords fetches align with the cards.
+          range={range}
+          customRange={customRange}
         />
       )}
     </>
@@ -4747,6 +4856,7 @@ export default function ReportsClient({
                         loading={adsLoading}
                         accountCurrency={accountCurrency}
                         displayCurrency={currency}
+                        {...dateRangeValueToOptions(dateRange)}
                       />
                     </>
                   )}
@@ -5112,6 +5222,7 @@ export default function ReportsClient({
                               loading={googleAdsLoading}
                               accountCurrency={"USD" as Currency}
                               displayCurrency={currency}
+                              {...dateRangeValueToOptions(dateRange)}
                             />
                             {googleAdsError === "partial_failure" && (
                               <p className="text-xs text-amber-600 mt-2 text-center">

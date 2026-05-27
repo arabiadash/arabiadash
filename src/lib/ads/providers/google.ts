@@ -375,21 +375,14 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       }
     }
 
-    // Build the unique ad_group_id set for keyword fetching (M7 / ADR-015).
-    // Keywords live per-ad_group, not per-ad — multiple ads in the same
-    // ad_group share the same keyword set. Dedup at fetch time means one
-    // GAQL query per ad_group, not one per ad.
-    const adGroupIdsInScope = new Set<string>();
-    for (const ad of activeAds) {
-      if (ad.ad_group_id) adGroupIdsInScope.add(ad.ad_group_id);
-    }
-
-    // Pass 3 + 4 + 5 + 6: parallel — image URLs, asset extensions,
-    // keywords, AND search terms (M9 / ADR-018). All four reach Google
-    // Ads API independently; parallel keeps wall time = max(latencies)
-    // instead of sum. Empty-input branches short-circuit without firing.
-    const [urlMap, extensionsMap, keywordsByAdGroup, searchTermsByAdGroup] =
-      await Promise.all([
+    // ADR-019 (M9.1) — keywords + search terms are no longer fetched
+    // eagerly here. JSON serialization of the shared per-ad_group
+    // references inflated payloads 5.7× (search terms) / 6× (keywords),
+    // pushing cache writes past the Supabase JSONB inflection point.
+    // The UI now lazy-fetches via /api/ads/{search-terms,keywords} on
+    // modal open. This pass keeps only image URLs + asset extensions —
+    // both small payloads with no shared-reference inflation issue.
+    const [urlMap, extensionsMap] = await Promise.all([
       allResourceNames.size > 0
         ? fetchAssetUrls({
             customerId: this.customerId,
@@ -409,46 +402,15 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
           activeAds.map((ad) => [ad.id, ad.campaign_id])
         ),
       }),
-      // Phase 4.8 M7 — Keywords per ADR-015. Strict ENABLED default per
-      // §Decision 5. UI re-fetches with statusFilter='all' if user toggles.
-      // M7.5 / ADR-016: purchaseActionIds plumbed through for the 7th
-      // ADR-011 merger sibling (fetchPurchaseKeywordTotals). null/empty
-      // surface as hasConversionData=false at the keyword level.
-      fetchKeywords({
-        customerId: this.customerId,
-        refreshToken: this.refreshToken,
-        loginCustomerId: this.loginCustomerId,
-        dateFrom,
-        dateTo,
-        adGroupIds: adGroupIdsInScope,
-        statusFilter: "enabled",
-        purchaseActionIds: this.purchaseActionIds,
-      }),
-      // Phase 4.8 M9 — Search Terms per ADR-018. 8th ADR-011-family
-      // merger sibling (fetchPurchaseSearchTermTotals). Status filter
-      // applied CLIENT-SIDE per §Decision 3 (no fetch-time filter — fetch
-      // all statuses, UI hides EXCLUDED/UNKNOWN by default). Composite
-      // key ${adGroupId}<SOH>${searchTerm} per §Decision 2.
-      fetchSearchTerms({
-        customerId: this.customerId,
-        refreshToken: this.refreshToken,
-        loginCustomerId: this.loginCustomerId,
-        dateFrom,
-        dateTo,
-        adGroupIds: adGroupIdsInScope,
-        purchaseActionIds: this.purchaseActionIds,
-      }),
     ]);
 
-    // Pass 7: normalize with URL lookups + extensions + keywords + search
-    // terms + purchase merger.
+    // Normalize with URL lookups + extensions + purchase merger.
+    // Keywords + search terms attach later via modal-open lazy fetch.
     const normalizedAds = activeAds.map((ad) =>
       this.normalizeAd(
         ad,
         urlMap,
         extensionsMap,
-        keywordsByAdGroup,
-        searchTermsByAdGroup,
         adPurchaseTotals
       )
     );
@@ -505,6 +467,58 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     });
 
     return [...normalizedAds, ...enrichedAssetGroups];
+    });
+  }
+
+  /**
+   * ADR-019 (M9.1) — per-ad_group search terms lazy fetch. Invoked
+   * from /api/ads/search-terms when a user opens an AdDetailModal.
+   *
+   * Single ad_group scope: reuses the existing fetchSearchTerms
+   * helper (8th ADR-011 family merger sibling per ADR-018) with a
+   * 1-element Set. Returns the deduplicated UnifiedAdSearchTerm[]
+   * array for the specific ad_group + date range.
+   */
+  async getSearchTermsForAdGroup(
+    adGroupId: string,
+    range: DateRangeInput
+  ): Promise<import("../types").UnifiedAdSearchTerm[]> {
+    return this.withReauthMapping(async () => {
+      const { dateFrom, dateTo } = this.resolveDateRange(range);
+      const byAdGroup = await fetchSearchTerms({
+        customerId: this.customerId,
+        refreshToken: this.refreshToken,
+        loginCustomerId: this.loginCustomerId,
+        dateFrom,
+        dateTo,
+        adGroupIds: new Set([adGroupId]),
+        purchaseActionIds: this.purchaseActionIds,
+      });
+      return byAdGroup.get(adGroupId) ?? [];
+    });
+  }
+
+  /**
+   * ADR-019 (M9.1) — per-ad_group keywords lazy fetch. Same shape
+   * + invariants as getSearchTermsForAdGroup.
+   */
+  async getKeywordsForAdGroup(
+    adGroupId: string,
+    range: DateRangeInput
+  ): Promise<import("../types").UnifiedAdKeyword[]> {
+    return this.withReauthMapping(async () => {
+      const { dateFrom, dateTo } = this.resolveDateRange(range);
+      const byAdGroup = await fetchKeywords({
+        customerId: this.customerId,
+        refreshToken: this.refreshToken,
+        loginCustomerId: this.loginCustomerId,
+        dateFrom,
+        dateTo,
+        adGroupIds: new Set([adGroupId]),
+        statusFilter: "enabled",
+        purchaseActionIds: this.purchaseActionIds,
+      });
+      return byAdGroup.get(adGroupId) ?? [];
     });
   }
 
@@ -1167,11 +1181,6 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     ad: AdRow,
     urlMap?: Map<string, string>,
     extensionsMap?: Map<string, UnifiedAdExtensions>,
-    keywordsByAdGroup?: Map<string, import("../types").UnifiedAdKeyword[]>,
-    searchTermsByAdGroup?: Map<
-      string,
-      import("../types").UnifiedAdSearchTerm[]
-    >,
     adPurchaseTotals?: Map<
       string,
       { purchases: number; revenue: number }
@@ -1190,22 +1199,8 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     // the ad has no extensions or fetchAdExtensions returned empty).
     const extensions = extensionsMap?.get(ad.id);
 
-    // Phase 4.8 M7 — attach keywords from the ad's parent ad_group
-    // (ADR-015). Keywords are per-ad_group, not per-ad — all ads in the
-    // same group share the same reference. Undefined when ad has no
-    // ad_group_id (shouldn't happen for Search) or no keywords matched.
-    const keywords = ad.ad_group_id
-      ? keywordsByAdGroup?.get(ad.ad_group_id)
-      : undefined;
-
-    // Phase 4.8 M9 — attach search terms from the ad's parent ad_group
-    // (ADR-018). Same per-ad_group sharing semantic as keywords. Search
-    // terms are populated only for Search RSA ads; PMax variants leave
-    // this undefined (PMax search terms use a different resource —
-    // paid_organic_search_term_view — deferred to M9.5+).
-    const searchTerms = ad.ad_group_id
-      ? searchTermsByAdGroup?.get(ad.ad_group_id)
-      : undefined;
+    // ADR-019 (M9.1) — keywords + searchTerms attach via modal-open
+    // lazy fetch (/api/ads/keywords + /api/ads/search-terms), not here.
 
     // Commit 4b — purchase merger lookup (ADR-011 sibling at ad level).
     // adPurchaseTotals null → cache miss / merger failure / no purchase
@@ -1251,8 +1246,6 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       ctr: ad.ctr * 100,
       cpc: ad.cpc,
       extensions,
-      keywords,
-      searchTerms,
       provider: "google" as const,
     };
 
