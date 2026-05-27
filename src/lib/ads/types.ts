@@ -476,31 +476,14 @@ export interface UnifiedAdCommon {
    */
   extensions?: UnifiedAdExtensions;
 
-  /**
-   * Keywords targeting this ad (Google Search ads only, M7 / ADR-015).
-   *
-   * Keywords live at the ad_group level in Google Ads — all ads in the
-   * same ad_group share the same keyword set. The fetcher dedups by
-   * ad_group_id and attaches the same array reference to every ad in
-   * that group. UI shows a "shared with N ads" badge to make this
-   * inheritance visible.
-   *
-   * Meta variants + PMax variants + Display ads leave this undefined.
-   * Status filter is strict ENABLED by default (per ADR-015 §Decision 5).
-   */
-  keywords?: Array<UnifiedAdKeyword>;
-
-  /**
-   * Per-ad_group ACTUAL USER QUERIES that triggered the ad in the date
-   * range. Per ADR-018 (M9). Same per-ad_group sharing semantic as
-   * keywords — all ads in the same ad_group share the same searchTerms
-   * array.
-   *
-   * Meta variants + PMax variants leave this undefined. Search RSA ads
-   * carry it. Status filter is applied client-side per ADR-018 §Decision 3
-   * (ADDED + NONE default, "الكل" opt-in to include EXCLUDED/UNKNOWN).
-   */
-  searchTerms?: Array<UnifiedAdSearchTerm>;
+  // ADR-019 (M9.1) — keywords + searchTerms REMOVED from eager payload.
+  // Both are per-ad_group scoped (all ads in the same group share the
+  // same arrays in-memory) and JSON serialization duplicated them N
+  // times where N = ads sharing the group, causing 17 MB payloads on
+  // imaa. Now fetched lazily on modal open via /api/ads/keywords +
+  // /api/ads/search-terms (the latter takes ad_group_id + date_range
+  // and returns per-ad_group data). UnifiedAdKeyword +
+  // UnifiedAdSearchTerm types remain (used by those endpoints).
 
   provider: AdProvider;
 }
@@ -875,4 +858,20 @@ export interface AdProviderAdapter {
 
   // Get ads with creative + performance for a date range
   getAds(range: DateRangeInput): Promise<UnifiedAd[]>;
+
+  // ADR-019 (M9.1) — per-ad_group lazy fetches. Optional because only
+  // Google has ad_group-scoped search terms / keywords in the same
+  // sense; Meta surfaces different concepts (audiences, placements)
+  // that would warrant a separate per-platform endpoint if surfaced.
+  // Callers must guard with `if (adapter.getSearchTermsForAdGroup)`
+  // or narrow via `provider === "google"`.
+  getSearchTermsForAdGroup?(
+    adGroupId: string,
+    range: DateRangeInput
+  ): Promise<UnifiedAdSearchTerm[]>;
+
+  getKeywordsForAdGroup?(
+    adGroupId: string,
+    range: DateRangeInput
+  ): Promise<UnifiedAdKeyword[]>;
 }

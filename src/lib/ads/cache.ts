@@ -84,8 +84,19 @@ import type { Json } from "@/lib/supabase/database.types";
  *       Memory #28 verification protocol (6th cache-bump attempt;
  *       protocol caught M5/M8 GAQL bugs on v7→v8, passed clean on
  *       v8→v9, v9→v10, v10→v11 fixed buggy values).
+ * - v13: M9.1 perf hotfix — UnifiedAd LOSES keywords + searchTerms
+ *       fields. Both surfaces now lazy-fetched on modal open via
+ *       /api/ads/{search-terms,keywords} per ADR-019. Cached v12
+ *       rows carry the eager fields (17.5 MB payload on imaa); v13
+ *       payload is ~700 KB. Old v12 rows would still render
+ *       correctly because the modal lazy-hooks fire regardless,
+ *       but they waste cache space and bytes-on-wire until natural
+ *       eviction. Bumping invalidates immediately so all clients
+ *       jump to the lean payload + cache writes drop from 32s to
+ *       ~1-2s (~5× page-load speedup). Per Memory #28 protocol
+ *       7th iteration + new explicit perf-regression gate.
  */
-const CACHE_SCHEMA_VERSION = "v12";
+const CACHE_SCHEMA_VERSION = "v13";
 
 const CACHE_TTL_MINUTES = 15;
 
