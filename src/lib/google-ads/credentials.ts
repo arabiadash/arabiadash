@@ -14,7 +14,7 @@ import type { Database } from "@/lib/supabase/database.types";
 export async function getRefreshTokenForUser(
   adminClient: SupabaseClient<Database>,
   userId: string,
-  platform: "google" | "meta"
+  platform: "google" | "meta" | "tiktok"
 ): Promise<string | null> {
   const { data, error } = await adminClient
     .from("platform_credentials")

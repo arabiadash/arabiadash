@@ -385,6 +385,7 @@ export type AdType =
   | "IMAGE_AD"
   | "META_AD"
   | "PMAX_ASSET_GROUP"
+  | "TIKTOK_AD"
   | "UNKNOWN_GOOGLE";
 
 /**
@@ -653,6 +654,44 @@ export interface UnifiedAdUnknownGoogle extends UnifiedAdCommon {
 }
 
 /**
+ * TikTok ad variant — Phase 7 (ADR-020).
+ *
+ * TikTok creative is video-first. Per ADR-020 §Decision 11, v1 uses
+ * static poster + external "View on TikTok" link (NOT embedded iframe)
+ * — embed would couple our UI to TikTok player breaking changes.
+ *
+ * Per ADR-020 §Decision 12, v1 carries a single TikTok-native metric
+ * (`videoViews` — meaningfully different from impressions in TikTok's
+ * autoplay-by-default UX). Engagement metrics (2s/6s view rate,
+ * completion percentage, engaged_view) deferred to v2.
+ */
+export interface UnifiedAdTiktok extends UnifiedAdCommon {
+  ad_type: "TIKTOK_AD";
+  type_data: {
+    /** From /file/video/ad/info/ — poster image for the video card. */
+    posterUrl?: string;
+    /** TikTok-internal video_id; used for /file/video/ad/info/ lookups. */
+    videoId?: string;
+    /** Public share URL for "View on TikTok" external link. */
+    tiktokVideoUrl?: string;
+    /**
+     * TikTok ad objective_type (CONVERSIONS / TRAFFIC / VIDEO_VIEWS /
+     * ENGAGEMENT / REACH / APP_PROMOTION). Surfaced in modal for
+     * context — different objectives expect different success metrics.
+     */
+    objective_type: string;
+    /** Call-to-action label (SHOP_NOW / LEARN_MORE / DOWNLOAD / etc.). */
+    callToAction?: string;
+    /**
+     * TikTok-native total view count (autoplay views included).
+     * Differs from `impressions` (impressions = times rendered in
+     * feed; videoViews = times actually started playing).
+     */
+    videoViews?: number;
+  };
+}
+
+/**
  * Discriminated union — every `UnifiedAd` is exactly one of these variants.
  * Narrow via `ad.ad_type === "..."` to access variant-specific `type_data`.
  *
@@ -665,6 +704,7 @@ export type UnifiedAd =
   | UnifiedAdImageAd
   | UnifiedAdMeta
   | UnifiedAdPmaxAssetGroup
+  | UnifiedAdTiktok
   | UnifiedAdUnknownGoogle;
 
 // =================================================================

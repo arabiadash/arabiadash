@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createClient as createAdminClient } from "@supabase/supabase-js";
 import { MetaAdapter } from "./providers/meta";
 import { GoogleAdsAdapter } from "./providers/google";
+import { TiktokAdapter } from "./providers/tiktok";
 import type { AdProviderAdapter } from "./types";
 import type { AdProvider } from "./cache";
 import type { Database } from "@/lib/supabase/database.types";
@@ -150,9 +151,35 @@ export async function getAdapterForProvider(
       );
     }
 
-    // Future providers:
-    // case 'tiktok':
-    //   return new TikTokAdapter(...);
+    case "tiktok": {
+      // ADR-020 §Decision 1 + ADR-017 single-source-of-truth: refresh
+      // token lives in platform_credentials. Use service-role client
+      // because RLS blocks user-scoped reads of credential rows.
+      const adminClient = createAdminClient<Database>(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!,
+        { auth: { persistSession: false } }
+      );
+
+      const refreshToken = await getRefreshTokenForUser(
+        adminClient,
+        userId,
+        "tiktok"
+      );
+
+      if (!refreshToken) {
+        throw new Error(
+          `User ${userId} has an active TikTok connection (${connection.account_id}) ` +
+            `but no refresh_token in platform_credentials. Re-OAuth required.`
+        );
+      }
+
+      return new TiktokAdapter(refreshToken, connection.account_id, {
+        name: connection.account_name || "",
+        currency: metadata.currency,
+        timezone: metadata.timezone_name,
+      });
+    }
 
     default:
       return null;
@@ -160,10 +187,13 @@ export async function getAdapterForProvider(
 }
 
 /**
- * Providers where a user may have many active connections (Google, eventually
+ * Providers where a user may have many active connections (Google +
  * TikTok). Endpoints must require account_id from callers for these.
  */
-const MULTI_ACCOUNT_PROVIDERS: ReadonlySet<AdProvider> = new Set(["google"]);
+const MULTI_ACCOUNT_PROVIDERS: ReadonlySet<AdProvider> = new Set([
+  "google",
+  "tiktok",
+]);
 
 export function isMultiAccountProvider(provider: AdProvider): boolean {
   return MULTI_ACCOUNT_PROVIDERS.has(provider);
@@ -186,15 +216,25 @@ export async function getAllAdaptersForUser(
 
   if (error || !connections) return [];
 
-  const adapters = await Promise.all(
-    connections.map(async (c) => {
-      return getAdapterForProvider(
-        userId,
-        c.platform as AdProvider,
-        c.account_id
-      );
-    })
+  // ADR-020 §Decision 8: Promise.allSettled (not Promise.all) so a
+  // single provider's failure (e.g. TikTok mid-API-version-migration
+  // throwing on construction) doesn't kill the whole adapter list.
+  // Meta + Google continue working for the same user. Failed
+  // construction errors logged for Vercel debugging; not bubbled up.
+  const settled = await Promise.allSettled(
+    connections.map((c) =>
+      getAdapterForProvider(userId, c.platform as AdProvider, c.account_id)
+    )
   );
 
-  return adapters.filter((a): a is AdProviderAdapter => a !== null);
+  return settled
+    .map((r, i) => {
+      if (r.status === "fulfilled") return r.value;
+      console.error(
+        `[factory] adapter construction failed for ${connections[i]?.platform}/${connections[i]?.account_id}:`,
+        r.reason instanceof Error ? r.reason.message : "unknown"
+      );
+      return null;
+    })
+    .filter((a): a is AdProviderAdapter => a !== null);
 }
