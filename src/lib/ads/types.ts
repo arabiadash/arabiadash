@@ -199,6 +199,65 @@ export interface UnifiedAdKeyword {
 }
 
 // =================================================================
+// Search Terms (Google Search-only). Per ADR-018 (M9).
+// =================================================================
+/**
+ * Status of an actual user search query relative to the account's
+ * configured keyword list. Standard SearchTermStatusEnum mapping per
+ * recon Q1 2026-05-28 — no integer drift.
+ *
+ * - ADDED: term exactly matches an enabled positive keyword
+ * - NONE:  term triggered via broad/phrase expansion of a different
+ *          keyword — the "goldmine" for keyword optimization
+ * - EXCLUDED: term matched a negative keyword (didn't serve)
+ * - ADDED_EXCLUDED: rare edge state (both positive AND negative match)
+ * - UNKNOWN: enum 0/1 — defensive fallback for future SDK additions
+ */
+export type SearchTermStatus =
+  | "ADDED"
+  | "NONE"
+  | "EXCLUDED"
+  | "ADDED_EXCLUDED"
+  | "UNKNOWN";
+
+/**
+ * One actual user search query that triggered an ad in the date range.
+ * Per ADR-018 §Decision 1 — Path B (8th sibling of the ADR-011 merger
+ * family). Conversion attribution via fetchPurchaseSearchTermTotals
+ * with composite-key Map (${adGroupId}${searchTerm}) per
+ * recon Q4 (9% cross-ad_group collision rate on imaa).
+ */
+export interface UnifiedAdSearchTerm {
+  /** The actual user-typed query string. */
+  text: string;
+  /** Effective status relative to account's keyword configuration. */
+  status: SearchTermStatus;
+  /** Match type of the triggering keyword (the keyword the user's query expanded into). */
+  matchType: KeywordMatchType;
+  /** The triggering keyword text, when known (Google may not always populate). */
+  triggeredByKeywordText?: string;
+
+  // Performance metrics for the active date range (from search_term_view)
+  spend: number;
+  impressions: number;
+  clicks: number;
+  /** CTR as percentage (0-100), normalized from Google's 0-1 ratio. */
+  ctr: number;
+  /** Average CPC in account currency. */
+  cpc: number;
+
+  // Conversion attribution (ADR-018 §Decision 1) — populated via the
+  // ADR-011-family fetchPurchaseSearchTermTotals two-query merge.
+  // Same null/number semantics as UnifiedAdKeyword purchases/revenue.
+  purchases?: number | null;
+  revenue?: number | null;
+  /** revenue / spend when both defined and spend > 0. */
+  roas?: number | null;
+  /** Mirrors UnifiedAdCommon.hasConversionData. */
+  hasConversionData?: boolean;
+}
+
+// =================================================================
 // Asset Extensions (Google-only). Per ADR-012 + ADR-014 (images).
 // =================================================================
 /**
@@ -430,6 +489,18 @@ export interface UnifiedAdCommon {
    * Status filter is strict ENABLED by default (per ADR-015 §Decision 5).
    */
   keywords?: Array<UnifiedAdKeyword>;
+
+  /**
+   * Per-ad_group ACTUAL USER QUERIES that triggered the ad in the date
+   * range. Per ADR-018 (M9). Same per-ad_group sharing semantic as
+   * keywords — all ads in the same ad_group share the same searchTerms
+   * array.
+   *
+   * Meta variants + PMax variants leave this undefined. Search RSA ads
+   * carry it. Status filter is applied client-side per ADR-018 §Decision 3
+   * (ADDED + NONE default, "الكل" opt-in to include EXCLUDED/UNKNOWN).
+   */
+  searchTerms?: Array<UnifiedAdSearchTerm>;
 
   provider: AdProvider;
 }

@@ -75,8 +75,17 @@ import type { Json } from "@/lib/supabase/database.types";
  *       new sub-pattern. Pre-push verification protocol caught
  *       nothing here because the GAQL probe succeeded (bug was in
  *       JS Map keying), but cache served stale buggy data.
+ * - v12: M9 Search Terms — UnifiedAd gains
+ *       searchTerms?: Array<UnifiedAdSearchTerm>. Per-ad_group search
+ *       term arrays with full ADR-011 family conversion attribution
+ *       (8th merger sibling — fetchPurchaseSearchTermTotals). Cached
+ *       v11 rows lack this field; bump invalidates so all clients
+ *       fetch fresh data including search terms. Per ADR-018 +
+ *       Memory #28 verification protocol (6th cache-bump attempt;
+ *       protocol caught M5/M8 GAQL bugs on v7→v8, passed clean on
+ *       v8→v9, v9→v10, v10→v11 fixed buggy values).
  */
-const CACHE_SCHEMA_VERSION = "v11";
+const CACHE_SCHEMA_VERSION = "v12";
 
 const CACHE_TTL_MINUTES = 15;
 
