@@ -85,10 +85,6 @@ function isRateLimitError(err: unknown): boolean {
 }
 
 export async function GET(request: NextRequest) {
-  // [perf-recon-m9.1] Temporary wall-time log for M9.1 perf gate
-  // verification per ADR-019. Removed in cleanup commit after preview
-  // measurement confirms 5-8s on imaa (vs 40s pre-fix baseline).
-  const perfT0 = performance.now();
   try {
     const provider = (request.nextUrl.searchParams.get("provider") ||
       "meta") as AdProvider;
@@ -260,13 +256,7 @@ export async function GET(request: NextRequest) {
     // 5. Cache miss — fetch synchronously.
     try {
       const ads = await adapter.getAds(parsed);
-      const perfT_cacheStart = performance.now();
       await setCachedCreatives({ ...cacheParams, data: ads });
-      const perfT_end = performance.now();
-      // [perf-recon-m9.1] cache-miss wall time + payload + cache write breakdown.
-      console.log(
-        `[perf-recon-m9.1] cache-miss provider=${provider} TOTAL=${(perfT_end - perfT0).toFixed(0)}ms cache_write=${(perfT_end - perfT_cacheStart).toFixed(0)}ms ads_count=${ads.length} payload_bytes=${JSON.stringify(ads).length}`
-      );
       return NextResponse.json({
         data: ads,
         source: "fresh",
