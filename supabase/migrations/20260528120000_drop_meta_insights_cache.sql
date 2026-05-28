@@ -1,0 +1,21 @@
+-- Issue #29 — drop legacy meta_insights_cache table
+--
+-- The table was superseded on 2026-05-09 by the multi-platform
+-- insights_cache table (see 20260509150000_refactor_to_multi_platform.sql).
+-- That migration's §6 (line 72) commented "DROP TABLE IF EXISTS
+-- meta_insights_cache;" with a "wait until we confirm new code works"
+-- safety. The unified insights_cache has been load-bearing for 19+
+-- days across M1-M9.1 ship; meta_insights_cache has zero live readers
+-- or writers (verified pre-drop via grep src/ — only auto-generated
+-- database.types.ts shape references remain, which disappear on next
+-- `supabase gen types` run).
+--
+-- Manual application required via Supabase SQL Editor — Vercel does
+-- NOT apply migrations automatically. Per M-hardening-1 precedent.
+--
+-- DOWN (manual rollback reference — not run automatically):
+--   See 20260505180000_add_meta_insights_cache.sql for the full
+--   table + RLS + index definitions. Re-run that file to recreate.
+--   Cached data is NOT recoverable — would need to be re-fetched.
+
+DROP TABLE IF EXISTS public.meta_insights_cache;
