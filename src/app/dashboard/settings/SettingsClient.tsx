@@ -80,7 +80,14 @@ export default function SettingsClient({
       setPendingSetDefaultId(null);
       if ("error" in result) {
         setWorkspaceActionError(result.error);
+        return;
       }
+      // Issue #6: revalidatePath() server-side marks the route stale,
+      // but THIS client component reads from props passed at mount and
+      // doesn't re-render automatically. router.refresh() triggers a
+      // soft re-render with fresh server data — the "أرشفة" button
+      // re-evaluates per the new is_default state on each row.
+      router.refresh();
     });
   };
 
