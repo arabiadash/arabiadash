@@ -4038,24 +4038,29 @@ export default function ReportsClient({
             </div>
           )}
 
-          {/* No-Meta empty state */}
-          {noConnection ? (
+          {/* No-connections empty state — fires only when BOTH Meta and
+              Google are disconnected. Google-only users see the reports
+              (M9 per-platform tabs handle the inner structure; the auto-
+              tab-switch at line 3047 lands them on the Google tab).
+              Issue #32 fix: gate previously checked only Meta's
+              noConnection flag from useInsights. */}
+          {noConnection && googleAccountIds.length === 0 ? (
             <div className="bg-white border border-gray-100 rounded-xl p-6 sm:p-8 text-center">
               <div className="w-12 h-12 mx-auto bg-indigo-50 rounded-xl flex items-center justify-center mb-3">
                 <Link2 className="w-6 h-6 text-indigo-600" />
               </div>
               <h3 className="text-base sm:text-lg font-bold text-gray-900 mb-2">
-                اربط حساب Meta لعرض التقارير
+                اربط حساب Meta أو Google لعرض التقارير
               </h3>
               <p className="text-sm text-gray-600 mb-4">
-                ستظهر هنا بيانات حملات Meta الإعلانية بالتفصيل
+                ستظهر هنا بيانات حملاتك الإعلانية بالتفصيل
               </p>
               <Link
                 href="/dashboard/connections"
                 className="inline-flex items-center gap-2 bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-5 py-2.5 rounded-lg font-semibold hover:shadow-lg transition"
               >
                 <Link2 className="w-5 h-5" />
-                ربط Meta
+                ربط منصة إعلانية
               </Link>
             </div>
           ) : (
