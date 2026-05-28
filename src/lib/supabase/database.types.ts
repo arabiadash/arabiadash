@@ -303,44 +303,6 @@ export type Database = {
           },
         ]
       }
-      meta_insights_cache: {
-        Row: {
-          cache_key: string
-          connection_id: number
-          created_at: string | null
-          data: Json
-          expires_at: string
-          fetched_at: string
-          id: number
-        }
-        Insert: {
-          cache_key: string
-          connection_id: number
-          created_at?: string | null
-          data: Json
-          expires_at: string
-          fetched_at?: string
-          id?: number
-        }
-        Update: {
-          cache_key?: string
-          connection_id?: number
-          created_at?: string | null
-          data?: Json
-          expires_at?: string
-          fetched_at?: string
-          id?: number
-        }
-        Relationships: [
-          {
-            foreignKeyName: "meta_insights_cache_connection_id_fkey"
-            columns: ["connection_id"]
-            isOneToOne: false
-            referencedRelation: "connections"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       platform_credentials: {
         Row: {
           created_at: string
