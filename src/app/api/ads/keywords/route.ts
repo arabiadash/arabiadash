@@ -51,6 +51,15 @@ function parseRangeFromParams(
     if (since > until) {
       return { error: "invalid_date_range", status: 400 };
     }
+    // Issue #3 defense-in-depth: cap range at 37 months (matches the
+    // /api/ads/insights + /api/ads/creatives precedent). Prevents
+    // unbounded date-window queries from hitting Google's quota.
+    const days =
+      (new Date(until).getTime() - new Date(since).getTime()) /
+      (1000 * 60 * 60 * 24);
+    if (days / 30 > 37) {
+      return { error: "date_range_too_long", status: 400 };
+    }
     return { since, until };
   }
   const rangeParam = searchParams.get("range");

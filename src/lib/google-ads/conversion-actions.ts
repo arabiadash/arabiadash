@@ -129,15 +129,18 @@ export async function fetchConversionActions(
  * Upsert conversion_action rows into google_conversion_actions for a single
  * (user_id, customer_id) scope.
  *
- * - Uses service role to bypass RLS (must be called from a server route
- *   with the admin client, not from a user-scoped client)
+ * - Accepts either a service-role admin client (bypasses RLS — used by
+ *   the sync flow from sync-accounts-logic.ts) OR a user-scoped
+ *   authenticated client (RLS handles user_id scoping — used by future
+ *   per-user override flows). Both are valid; the parameter is named
+ *   `client` to reflect this (issue #27).
  * - Conflict resolution: ON CONFLICT (user_id, customer_id, conversion_action_id)
  *   DO UPDATE on name, category, status, primary_for_goal, counts_as_purchase,
  *   synced_at — preserves user_override (NEVER overwrite operator choices)
  * - Returns a summary including purchase detection count for logging
  */
 export async function upsertConversionActions(
-  admin: SupabaseClient<Database>,
+  client: SupabaseClient<Database>,
   userId: string,
   customerId: string,
   rows: ConversionActionRow[]
@@ -165,7 +168,7 @@ export async function upsertConversionActions(
     };
   });
 
-  const { error, count } = await admin
+  const { error, count } = await client
     .from("google_conversion_actions")
     .upsert(records, {
       onConflict: "user_id,customer_id,conversion_action_id",
@@ -206,7 +209,7 @@ export async function upsertConversionActions(
  * manager_customer_id).
  */
 export async function syncConversionActionsForCustomer(
-  admin: SupabaseClient<Database>,
+  client: SupabaseClient<Database>,
   userId: string,
   customerId: string,
   refreshToken: string,
@@ -227,7 +230,7 @@ export async function syncConversionActionsForCustomer(
 
     const rows = await fetchConversionActions(customer);
     const { upserted, purchases_detected } = await upsertConversionActions(
-      admin,
+      client,
       userId,
       customerId,
       rows
@@ -270,11 +273,11 @@ export async function syncConversionActionsForCustomer(
  * resync + purchases=null in the response; the latter is purchases=0.
  */
 export async function getPurchaseActionIds(
-  admin: SupabaseClient<Database>,
+  client: SupabaseClient<Database>,
   userId: string,
   customerId: string
 ): Promise<Set<string> | null> {
-  const { data, error } = await admin
+  const { data, error } = await client
     .from("google_conversion_actions")
     .select("conversion_action_id, counts_as_purchase, user_override")
     .eq("user_id", userId)

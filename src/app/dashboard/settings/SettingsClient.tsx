@@ -80,7 +80,14 @@ export default function SettingsClient({
       setPendingSetDefaultId(null);
       if ("error" in result) {
         setWorkspaceActionError(result.error);
+        return;
       }
+      // Issue #6: revalidatePath() server-side marks the route stale,
+      // but THIS client component reads from props passed at mount and
+      // doesn't re-render automatically. router.refresh() triggers a
+      // soft re-render with fresh server data — the "أرشفة" button
+      // re-evaluates per the new is_default state on each row.
+      router.refresh();
     });
   };
 
@@ -420,16 +427,20 @@ export default function SettingsClient({
               })}
             </ul>
 
-            {/* ADR-017 §Decision 5 — Issue #1 discoverability hint. Always-visible
-                per Refinement 3 cost evaluation: collapsible variant would need
-                ~15-20 LOC (state + transition + a11y). Always-visible is benign
-                for fully-connected users and clear for users missing accounts. */}
+            {/* Settings→Connections navigation bridge. Originally added in
+                ADR-017 §Decision 5 as a Google-specific hint pointing at
+                /dashboard/connections/google/select — that path had a
+                quiet bug (no workspace param → always landed on default
+                workspace). M-hardening-2 generalizes the copy to all
+                platforms (Meta/Google/TikTok/Snapchat/future) and
+                redirects to /dashboard/connections, where per-platform
+                cards interpolate the active workspace correctly. */}
             <div className="border-t border-gray-100 px-6 py-4 bg-gray-50">
               <p className="text-sm text-gray-600">
-                تحتاج تضيف حسابات Google إلى مساحات العمل؟{" "}
+                لربط منصات إعلانية أو إضافة حسابات إلى مساحة العمل؟{" "}
                 <Link
-                  href="/dashboard/connections/google/select"
-                  className="text-indigo-600 hover:text-indigo-700 font-semibold underline"
+                  href="/dashboard/connections"
+                  className="text-indigo-600 font-medium hover:underline"
                 >
                   اضغط هنا
                 </Link>
