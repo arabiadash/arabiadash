@@ -479,3 +479,79 @@ Hard-refresh `arabiadash.com/dashboard/reports` after merge. Cache v13 → v14 t
 - *(next on this branch, session 2)* — `feat(tiktok): session 2 — Reports integration + creatives + KPI strip`
 - *(next on this branch, session 3)* — `feat(tiktok): session 3 — pixel conversions + perf gate`
 - *(next on this branch, session 3 end)* — `chore(scripts): preserve TikTok 5 probe scripts (disposition-B)`
+
+## Empirical Amendment (2026-05-29 — post-probe verification)
+
+The Session 1 OAuth probe (`scripts/_tiktok-oauth-probe.mjs`) was re-run with the WARP-bypass-of-STC connectivity issue resolved and surfaced three findings that contradict the original ADR-020 assumptions. The architectural decisions below SUPERSEDE the original draft where indicated. Original decisions are preserved above for the audit trail.
+
+### §13b — Token model (SUPERSEDES Decision §10's `refresh_token_expires_at` premise + Decision §13's implicit 24h-token model + Alternative D)
+
+**Empirical finding** (probe 2026-05-29 against TikTok Marketing API v1.3 `/oauth2/access_token/`):
+
+Response shape returns ONLY:
+- `data.access_token` — 40-char long-lived token
+- `data.advertiser_ids` — array of advertiser_id strings (10 IDs returned for the test app)
+- `data.scope` — array of 37 integer scope IDs
+
+Response shape does NOT return:
+- `refresh_token` (verified ABSENT at 7 plausible nesting paths)
+- `access_token_expire_in` / `refresh_token_expire_in` / any expiry field (verified ABSENT at 9 variant names)
+
+This contradicts the original ADR-020 assumption of a `refresh_token + 24h access_token` rotation model. Web research confirms the empirical finding: TikTok Marketing API access_tokens are **long-lived and do not expire** unless explicitly invalidated via `/oauth2/revoke_token/` or user revocation in TikTok Business Center. The "24h+refresh" model documented elsewhere applies to TikTok Login Kit / Creator API, NOT to Marketing API.
+
+**Architectural impact** (executed in Session 2 Commit 1):
+
+- NO refresh logic anywhere in `src/lib/tiktok/`. The `refreshTiktokAccessToken()` function in `oauth.ts` is dead code — DELETE.
+- NO `getAccessTokenForUser()` helper. Session 2 plan §6.1 is OBSOLETE — the access_token IS the storage credential.
+- Store `access_token` directly in `platform_credentials.access_token` (NOT `refresh_token`). TikTok rows have `refresh_token = NULL`.
+- ADR-017's consolidation policy (`platform_credentials.access_token = NULL` because Google's token IS the refresh_token) is **provider-specific** — TikTok uses the column with its documented semantic.
+- Re-auth flow: `ReauthRequiredError` triggered ONLY on TikTok error codes 40105 / 40110 / 40115 (already wired in `errors.ts`).
+- Alternative D (track `refresh_token_expires_at`) was already rejected; this amendment confirms there's nothing to track.
+
+### §14b — Scope reality (SUPERSEDES Decision §13's 5-scope minimization premise)
+
+**Empirical finding**: TikTok consent UI does NOT enforce scope minimization at this app tier. Two probe runs showed:
+
+| Probe | Scope count | Notes |
+|-------|:-----------:|-------|
+| Run 1 (2026-05-29, original consent) | 34 | 25-item uncheck attempt incomplete |
+| Run 2 (2026-05-29, after re-uncheck) | **37** | Unchecks did NOT persist; count INCREASED |
+
+TikTok returns scope as **integer IDs**, not the string array (`["ad.read", ...]`) originally assumed in ADR-020 §13. Magnitude buckets observed in Run 2:
+
+- **14 small ints (<100)** — `[4, 5, 10, 12, 13, 14, 23, 24, 62, 64, 65, 67, 68, 69]` — likely documented named scopes (e.g. 4 ≈ ad.read, 5 ≈ report.read, 10 ≈ user.info.basic — int→name mapping is not publicly documented; not relied upon)
+- **9 medium ints (100-999)** — `[200, 210, 220, 600, 610, 630, 660, 800, 802]` — likely sub-permissions of the named scopes
+- **2 xlarge ints (~6.1M)** — `[6100000, 6110000]` — unclear; possibly Spark Ads or Business Center-tier permissions
+- **12 huge ints (>1B)** — values like `7280601645967278000` — almost certainly TikTok-internal asset/Pangle/auto-granted feature IDs
+
+**Resolution**: ABANDON consent-UI scope minimization. The over-grant is at the app-tier policy layer, not the consent flow.
+
+**Mitigation**: **code-level discipline**. ArabiaDash only CALLS endpoints within the 5 read scopes (ad.read, report.read, creative.read, pixel.read, user.info.basic). Over-granted scopes are dormant permissions — they do not expand actual access until our code exercises them. Documented as **accepted-but-unexercised risk** in the §Risk section of this amendment.
+
+### §15b — Discover call elimination (SUPERSEDES Decision §6's 3-call OAuth flow)
+
+**Empirical finding**: `/oauth2/access_token/` returns `advertiser_ids` inline in the same response that delivers the access_token. The test app returned 10 advertiser IDs without a separate `/oauth2/advertiser/get/` call.
+
+**Architectural impact**:
+
+OAuth flow collapses from 3 API calls to 2:
+
+| Step | Endpoint | Returns |
+|------|----------|---------|
+| 1 | `POST /oauth2/access_token/` | access_token + advertiser_ids[] |
+| 2 | `POST /oauth2/advertiser/info/` | per-advertiser metadata (name, currency, timezone) |
+
+`getAccessibleAdvertisers()` in `src/lib/tiktok/api.ts` is **dead code** — DELETE in Session 2 Commit 1. `getAdvertiserInfo()` remains (needed for per-advertiser display metadata in the selector UI).
+
+The `discover/route.ts` endpoint must be reworked to consume `advertiser_ids` carried over from the callback (via session cookie, state-encoded payload, or DB write at callback time), NOT by calling `/oauth2/advertiser/get/`.
+
+### Amendment §Risk additions
+
+- **Over-granted scope risk** — 37 numeric scope IDs granted vs the 5 intended. Dormant unless exercised; mitigated by code-level endpoint discipline. Worth a Vercel-log audit pre-Saudi-launch to confirm no accidental write-scope calls slipped through.
+- **No expiry signal** — TikTok provides no clock-based expiry hint. We can NOT proactively warn users "your TikTok connection expires in N days" because there is no N. Reauth is reactive-only via 40105/40110/40115. Acceptable.
+
+### Amendment commit traceability
+
+This amendment lands in:
+- `docs(adr): TikTok empirical findings — long-lived token + integer scopes (#43)` — this commit
+- `feat(tiktok): session 2 commit 1 — delete dead refresh layer` — code execution of the amendment (Session 2)

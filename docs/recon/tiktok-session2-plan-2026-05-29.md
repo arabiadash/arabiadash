@@ -133,9 +133,11 @@ Body:   { advertiser_id, video_ids: [...] }
 
 Returns `poster_url` for each video_id. The `TikTokCreativeCard` uses this for the static thumbnail. Per ADR-020 §Decision 11, NO iframe embed; just an external "View on TikTok" link.
 
-### 1.6 `/oauth2/refresh_token/` — token refresh
+### 1.6 ~~`/oauth2/refresh_token/` — token refresh~~ — OBSOLETE per ADR-020 §13b amendment
 
-Already implemented in `tiktok/oauth.ts` as `refreshTiktokAccessToken` but **never called** (see Code Review §CRITICAL #1). Session 2 wires it into a `getAccessTokenForUser()` helper that runs before every API call (since the refresh_token cannot be used directly on report/ad/campaign endpoints — those require the 24h access_token).
+**Empirical finding (probe 2026-05-29)**: TikTok Marketing API v1.3 access_tokens are long-lived and do NOT expire. The `/oauth2/refresh_token/` endpoint and `refreshTiktokAccessToken()` helper are both vestigial relative to the Marketing API surface (they belong to TikTok Login Kit / Creator API, which we do not consume).
+
+Session 2 Commit 1 DELETES `refreshTiktokAccessToken()` entirely. There is no `getAccessTokenForUser()` helper. The access_token stored at OAuth callback time IS the long-lived credential. Per-API-call pattern: `apiCall(accessToken)` where `accessToken` is read directly from `platform_credentials.access_token` (no refresh, no rotation).
 
 ---
 
@@ -261,44 +263,39 @@ LOC estimate revised honestly from ADR-020's original ~932. Including probes (wh
 
 ## 6. Cross-cutting Session 2 patterns to honor
 
-### 6.1 Per-API-call refresh pattern
+### 6.1 ~~Per-API-call refresh pattern~~ — REVISED per ADR-020 §13b amendment
 
-Per Code Review §CRITICAL #1 (this doc § 9 below), every API call in Session 2 must first refresh the access_token. Pattern:
+**Empirical finding (probe 2026-05-29)**: TikTok Marketing API access_tokens are long-lived (no expiry). The entire refresh layer is obsolete.
+
+**Session 2 Commit 1: Delete dead refresh logic**
+
+- Remove `refreshTiktokAccessToken()` from `src/lib/tiktok/oauth.ts`
+- Remove the import + scaffold of `getAccessTokenForUser()` (the helper this plan originally specified — premise is wrong; access_token IS the credential, no derivation needed)
+- Remove `getAccessibleAdvertisers()` from `src/lib/tiktok/api.ts` (per ADR-020 §15b — `advertiser_ids` come inline in the OAuth response)
+- Update `src/app/api/auth/tiktok/discover/route.ts` to consume `advertiser_ids` carried over from the callback (via session cookie, encoded state payload, or callback-time DB write) instead of calling `/oauth2/advertiser/get/`
+- Update `src/app/api/auth/tiktok/callback/route.ts` to store `access_token` (not `refresh_token`) in `platform_credentials.access_token`. TikTok rows have `refresh_token = NULL`
+- Wire `getAdvertiserInfo()` to read `accessToken` directly from `platform_credentials.access_token` — no refresh, no rotation, no derivation
+
+**Per-API-call pattern (revised)**:
 
 ```typescript
-// In src/lib/tiktok/api.ts
-export async function getAccessTokenForUser(
-  adminClient: SupabaseClient<Database>,
-  userId: string
-): Promise<string> {
-  const { data: cred } = await adminClient
-    .from("platform_credentials")
-    .select("refresh_token")
-    .eq("user_id", userId)
-    .eq("platform", "tiktok")
-    .maybeSingle();
-  if (!cred?.refresh_token) throw new Error("no_tiktok_refresh_token");
+// In src/lib/tiktok/api.ts — all helpers accept accessToken directly
+async function tiktokGet<T>(path: string, accessToken: string, params: ...): Promise<T> { ... }
 
-  const fresh = await refreshTiktokAccessToken(cred.refresh_token);
+// Caller reads the long-lived token once per request
+const { data: cred } = await adminClient
+  .from("platform_credentials")
+  .select("access_token")
+  .eq("user_id", userId)
+  .eq("platform", "tiktok")
+  .maybeSingle();
+if (!cred?.access_token) throw new Error("no_tiktok_access_token");
 
-  // CRITICAL: TikTok ROTATES refresh tokens — persist the new one back
-  // or future refreshes fail.
-  await adminClient
-    .from("platform_credentials")
-    .update({
-      refresh_token: fresh.refresh_token,
-      expires_at: new Date(
-        Date.now() + fresh.access_token_expire_in * 1000
-      ).toISOString(),
-    })
-    .eq("user_id", userId)
-    .eq("platform", "tiktok");
-
-  return fresh.access_token;
-}
+// Use it directly — no refresh step
+const ads = await getAds(cred.access_token, advertiserId, ...);
 ```
 
-Every helper in `api.ts` accepts `accessToken: string` (not refresh_token). Caller is responsible for calling `getAccessTokenForUser` once per request session.
+**Net diff estimate**: -120 LOC vs the original Session 2 plan. The "CRITICAL #1 bug" from the Session 1 code review (§9 finding #1) is no longer applicable — the entire refresh layer is being removed, not patched.
 
 ### 6.2 Perf-recon timing instrumentation (Session 3)
 
@@ -338,14 +335,14 @@ Only after probes verify the real API shapes do we write the fetchers. **No blin
 
 Per the parallel code review (surfaced separately in chat):
 
-| # | Finding | Severity | Session 2 dependency? |
-|---|---------|:--------:|:--------:|
-| 1 | refresh_token-vs-access_token confusion (discover + select-accounts pass refresh_token as Access-Token header) | CRITICAL | YES — fix in Session 2 commit 1 via the `getAccessTokenForUser` helper above. Session 1 won't work end-to-end until this is fixed. |
-| 2 | `refreshTiktokAccessToken` defined but never called | MODERATE | YES — gets called as part of fix #1 |
-| 3 | Rotating refresh_token not persisted back | MODERATE | YES — fix as part of #1 (the `update` step in `getAccessTokenForUser`) |
-| 4 | `getAccessibleAdvertisers` bypasses `tiktokGet` helper (inconsistent error handling) | MINOR | NICE-TO-HAVE — consolidate during Session 2 if cheap |
-| 5 | `oauth.ts` has hardcoded paths (`/oauth2/access_token/`, `/oauth2/refresh_token/`) outside api.ts | MINOR | NICE-TO-HAVE — defer to v1.4 migration if it surfaces |
-| 6 | `classifyTiktokError` doesn't surface as response to discover failures (discover returns generic 500 instead of 401 reauth) | MODERATE | YES — fix in Session 2 as part of error-handling unification |
+| # | Finding | Severity | Resolution |
+|---|---------|:--------:|------------|
+| 1 | refresh_token-vs-access_token confusion (discover + select-accounts pass refresh_token as Access-Token header) | ~~CRITICAL~~ → **OBSOLETE** | DISSOLVED by ADR-020 §13b amendment — TikTok issues long-lived access_token, no refresh cycle exists. Session 2 Commit 1 deletes the refresh layer entirely. Storage column flips to `platform_credentials.access_token`. |
+| 2 | `refreshTiktokAccessToken` defined but never called | ~~MODERATE~~ → **OBSOLETE** | Function DELETED in Session 2 Commit 1. |
+| 3 | Rotating refresh_token not persisted back | ~~MODERATE~~ → **OBSOLETE** | No rotation exists (no refresh_token returned by OAuth). DELETED concern. |
+| 4 | `getAccessibleAdvertisers` bypasses `tiktokGet` helper (inconsistent error handling) | ~~MINOR~~ → **OBSOLETE** | Function DELETED in Session 2 Commit 1 per ADR-020 §15b — `advertiser_ids` are inline in OAuth response. |
+| 5 | `oauth.ts` has hardcoded paths (`/oauth2/access_token/`, `/oauth2/refresh_token/`) outside api.ts | MINOR | `/oauth2/refresh_token/` reference DELETED with finding #2. `/oauth2/access_token/` path remains hardcoded — defer relocation to v1.4 migration if it surfaces. |
+| 6 | `classifyTiktokError` doesn't surface as response to discover failures (discover returns generic 500 instead of 401 reauth) | MODERATE | STILL VALID — fix in Session 2 as part of error-handling unification. Note: discover endpoint is also being reworked per finding #4 (consumes inline advertiser_ids); error-mapping work folds into that rewrite. |
 
 ---
 
@@ -363,46 +360,33 @@ Per ADR-020 §Open Items:
 
 ---
 
-## Code Review Findings (Session 1 post-implementation review)
+## Code Review Findings (Session 1 post-implementation review) — DISSOLVED by 2026-05-29 probe
 
-Session 1's OAuth flow has 1 CRITICAL + 3 MODERATE issues, all
-clustered around the access_token refresh pattern. These are Session 2's
-FIRST work item (before report fetchers).
+The Session 1 code review's CRITICAL #1 + MODERATE #2 + MODERATE #3 findings
+all premised on TikTok using a Google-like refresh_token rotation model with a
+24h access_token. The 2026-05-29 OAuth probe empirically disproved this premise:
 
-**CRITICAL #1: refresh_token incorrectly passed as access_token to
-discover/info endpoints.** TikTok requires a fresh 24h access_token from
-`/oauth2/refresh_token/` for all non-refresh endpoints. Current code will
-fail with error 40105 on first API call.
+- `/oauth2/access_token/` returns NO refresh_token (absent at all 7 nesting paths probed)
+- `/oauth2/access_token/` returns NO expiry field (absent at all 9 variant names probed)
+- TikTok Marketing API uses long-lived access_tokens (per TikTok docs + empirical confirmation)
+- `/oauth2/refresh_token/` belongs to TikTok Login Kit / Creator API, NOT Marketing API
 
-Root cause: `discover/route.ts:65` comment was incorrect speculation
-contradicting public docs ("the refresh token IS the long-lived
-credential, accepted by this endpoint"). This is exactly the
-"assumption vs empirical reality" anti-pattern that probes exist to
-catch.
+**Resolution**: Session 2 Commit 1 DELETES the entire refresh layer
+(`refreshTiktokAccessToken`, `getAccessTokenForUser`, `getAccessibleAdvertisers`)
+rather than patching it. See ADR-020 §13b + §15b amendments for the
+architectural impact. The §9 findings table above marks #1/#2/#3/#4 as OBSOLETE.
 
-Fix (Session 2 Task 1): Implement `getAccessTokenForUser(adminClient,
-userId)` in `tiktok/api.ts` that:
-  1. Calls `refreshTiktokAccessToken` with current refresh_token
-  2. Receives NEW access_token + NEW refresh_token (TikTok rotates
-     refresh_token on EVERY refresh — unlike Google's stable token)
-  3. Persists the rotated refresh_token back to `platform_credentials`
-     (CRITICAL — without this, user reauths every 24h)
-  4. Returns the fresh access_token for the API call
+**KEY LESSON** (UPDATED): the original "TikTok refresh_token ROTATION differs from
+Google" framing was wrong from the start — TikTok Marketing API doesn't ROTATE
+refresh_tokens because it doesn't ISSUE refresh_tokens. The Session 1 code
+review correctly identified that the original code was broken; it incorrectly
+prescribed the fix because it inherited the same wrong assumption. The probe
+caught BOTH the bug and the misdiagnosis. Memory-entry candidate: "Probes
+verify shape before fetcher code — AND before code-review prescriptions."
 
-This single helper resolves CRITICAL #1 + MODERATE #2 (dead code
-`refreshTiktokAccessToken` becomes used) + MODERATE #3 (rotated token
-persistence).
-
-**MODERATE #4:** `discover/route.ts` catch returns generic 500 instead of
-routing through `classifyTiktokError` → 401 `reauth_required`. Fix: wrap
-with `isReauthError`-aware branch (same as `/api/ads/insights` pattern).
-
-**MINOR #5, #6:** deferred (endpoint path localization, helper consistency).
-
-**KEY LESSON:** TikTok's refresh_token ROTATION differs from Google (stable)
-and Meta (60-day). The probe (`_tiktok-oauth-probe.mjs`) must verify the
-rotation behavior empirically before the helper ships. This is a
-memory-entry candidate post-verification.
+**MODERATE #6** ("discover endpoint returns 500 instead of 401 reauth") remains
+valid but folds into the discover/route.ts rewrite (which now consumes inline
+advertiser_ids instead of calling `/oauth2/advertiser/get/`).
 
 ## 11. Session 2 success criteria
 
