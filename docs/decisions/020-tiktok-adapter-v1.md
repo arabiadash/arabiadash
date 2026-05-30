@@ -578,3 +578,21 @@ This supersedes §15b's "delete" prescription and the "OAuth flow collapses 3→
 - Callback ([src/app/api/auth/tiktok/callback/route.ts](../../src/app/api/auth/tiktok/callback/route.ts)) writes `access_token` to `platform_credentials.access_token`. The inline `advertiser_ids` from the OAuth response may be `console.log`-ed for diagnostic parity but is NOT persisted in any cookie, column, or other store.
 
 **Net effect on Session 2 Commit 1**: drops the cookie/metadata carry-over design surface entirely. The commit becomes a straightforward credential-column flip (`refresh_token` → `access_token`) across callback / discover / select-accounts / factory, with zero divergence from the Google/Meta callback pattern.
+
+### §13c — Credential column REUSED, not added (corrects §13b storage prescription, 2026-05-30)
+
+§13b prescribed "store the `access_token` directly in `platform_credentials.access_token`". This assumed a dedicated `access_token` column was needed — an assumption driven by the column NAME (`refresh_token`) rather than its documented SEMANTIC. Recon of the existing Meta integration proved otherwise:
+
+1. `platform_credentials.refresh_token` is documented as a **generic credential slot**, not literally a refresh token. See the Meta callback comment ([src/app/api/auth/meta/callback/route.ts](../../src/app/api/auth/meta/callback/route.ts)): *"Meta's long-lived token is the 'refresh_token' equivalent for the platform — column reused as generic credential storage (ADR-010)"*.
+2. Meta — which (like TikTok) has NO refresh_token, only a long-lived access_token (~60d) — already stores that access_token in the `refresh_token` column, and has since the Meta integration shipped.
+3. TikTok's long-lived access_token fits the IDENTICAL pattern.
+
+**DECISION**: TikTok REUSES `platform_credentials.refresh_token` to store its long-lived access_token, exactly as Meta does. **NO new column. NO migration.** The column name is an accepted misnomer (generic credential slot); semantic clarified via callback + discover jsdoc.
+
+**Consequences**:
+
+- §13b's "column flip to `access_token`" prescription is VOID. There is no `access_token` column and none is needed.
+- The shared helper `getRefreshTokenForUser` ([src/lib/google-ads/credentials.ts](../../src/lib/google-ads/credentials.ts)) works UNCHANGED for TikTok (returns whatever lives in `refresh_token`, platform-agnostic). No new `getTiktokAccessToken` helper is needed.
+- Session 2 Commit 1 reduces to: (a) delete dead `refreshTiktokAccessToken`, (b) value-side bug fix in callback (`tokens.refresh_token` → `tokens.access_token`), (c) read-site variable-naming clarity (`const accessToken = credential.refresh_token`). ~−55 LOC, 5 files, zero new files, zero migration.
+
+This supersedes §13b's column-storage prescription. §13b's core finding (access_token is long-lived, no refresh cycle) REMAINS valid — only the storage-location prescription is corrected.
