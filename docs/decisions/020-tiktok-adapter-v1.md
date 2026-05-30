@@ -596,3 +596,125 @@ This supersedes §15b's "delete" prescription and the "OAuth flow collapses 3→
 - Session 2 Commit 1 reduces to: (a) delete dead `refreshTiktokAccessToken`, (b) value-side bug fix in callback (`tokens.refresh_token` → `tokens.access_token`), (c) read-site variable-naming clarity (`const accessToken = credential.refresh_token`). ~−55 LOC, 5 files, zero new files, zero migration.
 
 This supersedes §13b's column-storage prescription. §13b's core finding (access_token is long-lived, no refresh cycle) REMAINS valid — only the storage-location prescription is corrected.
+
+## Report-Shape Empirical Findings (2026-05-31)
+
+Probes `_tiktok-report-shape.mjs` + `_tiktok-report-q2b.mjs` + `_tiktok-report-active.mjs` + `_tiktok-video-metrics.mjs` ran against advertiser `7114520895124750337` (481k impressions / 1320 clicks / 1597.73 SAR over last 30 days). All findings below empirically verified against real Saudi TikTok ad activity.
+
+### 1. §Decision 12 CORRECTION — `video_play_actions` (not `video_views`)
+
+`video_views` is REJECTED with envelope code `40002 "Invalid metric fields: ['video_views']"` at BOTH `AUCTION_ADVERTISER` AND `AUCTION_AD` data_levels. The canonical v1.3 metric name is **`video_play_actions`** (maps internally to TikTok's `total_play` per the official SDK YAML at [github.com/tiktok/tiktok-business-api-sdk/blob/main/yml_files/smart_plus_material_report_overview.yml](https://github.com/tiktok/tiktok-business-api-sdk/blob/main/yml_files/smart_plus_material_report_overview.yml)).
+
+**`TIKTOK_AD.type_data.videoViews?: number`** field stays as defined in §Decision 12. The shape change is in the SOURCE metric name only:
+
+```typescript
+// Was (§Decision 12 original):
+videoViews?: number;  // ← metrics.video_views (parseInt)
+// Now (this amendment):
+videoViews?: number;  // ← metrics.video_play_actions (parseInt from string)
+```
+
+Real-data verification: an ad with 108.60 SAR spend had `video_play_actions = "123634"` (123,634 plays). normalize.ts maps `metrics.video_play_actions` → `UnifiedAdTiktok.type_data.videoViews` via `parseInt`.
+
+### 2. CTR scale (K2) — 0-100 percentage
+
+Empirically resolved against advertiser `7114520895124750337` real data:
+
+| Field | Returned value |
+|-------|----------------|
+| `metrics.ctr` | `"0.27"` |
+| clicks | 1320 |
+| impressions | 481114 |
+| (clicks / impressions) × 100 | 0.274363 |
+| \|ctr − ratio×100\| | 0.004363 (rounding to 2 dp) |
+| \|ctr − ratio×1\| | 0.267256 |
+
+**CTR is a 0-100 percentage** (Meta-style; NOT a 0-1 fraction like Google). `normalize.ts` requires NO scale conversion — pass `parseFloat(metrics.ctr)` through unchanged. The two-decimal format (`"0.00"` even for zero) is consistent with the percentage interpretation.
+
+### 3. Metric value types (K1) — all strings
+
+ALL metrics return as strings in `/report/integrated/get/` responses, regardless of underlying numeric kind:
+
+| Metric kind | Returned format | Parse via |
+|-------------|-----------------|-----------|
+| Counts (impressions, clicks, complete_payment, video_play_actions, likes, ...) | `"0"`, `"123634"` (integer-shaped string) | `parseInt` |
+| Money (spend, total_purchase_value) | `"0.00"`, `"1597.73"` (decimal-shaped string) | `parseFloat` |
+| Ratios (ctr, complete_payment_roas, average_video_play) | `"0.00"`, `"0.27"`, `"1.42"` (decimal-shaped string) | `parseFloat` |
+
+This matches the Meta precedent (Meta also returns strings). `normalize.ts` must coerce on every metric read. Direct number access (`row.metrics.spend + 5`) produces string concatenation bugs.
+
+### 4. Purchase metrics (K4) — §Decision 2 CONFIRMED + attribution-split deferred
+
+All three §Decision 2 metric names are valid at `AUCTION_ADVERTISER` data_level (empirically):
+
+| Metric | Status | Sample format |
+|--------|:------:|---------------|
+| `complete_payment` | ✓ valid | `"0"` (integer string — count) |
+| `total_purchase_value` | ✓ valid | `"0.00"` (decimal string — currency) |
+| `complete_payment_roas` | ✓ valid | `"0.00"` (decimal string — ratio) |
+
+**§Decision 2 KEEP — no change.** The original `complete_payment` → `UnifiedInsight.purchases` mapping is the v1.3-correct shape.
+
+TikTok ALSO offers attribution-split alternatives (`vta_purchase` for view-through, `cta_purchase` for click-through) — both empirically valid. **DECISION**: v1 uses the aggregate `complete_payment` family for UnifiedInsight to stay consistent with Meta/Google unified purchase semantics + enable cross-platform blending in `ReportsClient`. The vta/cta attribution split is deferred to a TikTok-specific surface in v2 (see §Open Items §1) — NOT in the unified layer.
+
+### 5. Empty-data shape (K8) — two distinct empties
+
+Two zero-activity cases must be handled by `normalize.ts`:
+
+| Case | Response shape |
+|------|----------------|
+| Advertiser with zero activity in window | `data.list = [{metrics: {spend: "0.00", impressions: "0", ...}, dimensions: {...}}]` — single row, zero-value strings |
+| Advertiser that returns code 0 but no row (e.g. inactive across the entire date range) | `data.list = []` — empty array |
+
+normalize.ts treats `parseFloat("0.00") === 0` and `parseInt("0") === 0` identically to a missing row. The empty-array case must short-circuit to "no data" UI state without crashing on `list[0]?.metrics`.
+
+### 6. Pagination shape (K6)
+
+```json
+"data": {
+  "page_info": {
+    "page": 1,
+    "page_size": 100,
+    "total_page": 1,
+    "total_number": 1
+  },
+  "list": [...]
+}
+```
+
+All four `page_info` fields are integers (despite metrics-as-strings convention — `page_info` numeric values are NOT stringified). Standard page-based pagination; `page=1` indexed, `page_size` accepts 1-1000.
+
+### 7. v2 ENGAGEMENT SURFACE (deferred, §Open Items addition)
+
+The following AUCTION_AD-level metrics all validated empirically (envelope code 0, real non-zero values on active ads). They are candidates for a TikTok-specific creative detail surface in a future milestone — explicitly **NOT in v1**:
+
+| Metric | v1.3 valid | Real-data sample value |
+|--------|:----------:|------------------------|
+| `video_watched_2s` | ✓ | `"21675"` (early hook) |
+| `video_watched_6s` | ✓ | `"10835"` (engaged hook) |
+| `engaged_view` | ✓ | `"10805"` |
+| `engaged_view_15s` | ✓ | `"5358"` |
+| `average_video_play` | ✓ | `"5.78"` (replays-per-impression) |
+| `average_video_play_per_user` | ✓ | `"7.11"` (replays-per-user) |
+| `video_views_p25` | ✓ | `"6491"` (25% completion) |
+| `video_views_p50` | ✓ | `"2955"` (50% completion) |
+| `video_views_p75` | ✓ | `"1684"` (75% completion) |
+| `video_views_p100` | ✓ | `"1263"` (full completion) |
+| `likes` | ✓ | `"278"` |
+| `shares` | ✓ | `"32"` |
+| `comments` | ✓ | `"3"` |
+| `follows` | ✓ | `"47"` |
+| `profile_visits` | ✓ | `"31"` |
+
+These give v2 a rich engagement story (early-hook rate, completion quartiles, replay rate, social engagement). All confirmed valid at `AUCTION_AD` data_level. Adds approximately 15 fields to `TIKTOK_AD.type_data` when v2 ships.
+
+### 8. data_level note
+
+`/report/integrated/get/` v1 uses TWO data_levels — both empirically working:
+
+| data_level | Use case | Dimensions |
+|------------|----------|------------|
+| `AUCTION_ADVERTISER` | Account-level KPI strip totals (spend, impressions, clicks, ctr, purchases, revenue, roas) | `["advertiser_id"]` |
+| `AUCTION_AD` | Per-ad rows for TikTokCreativeCard grid + AdDetailModal | `["ad_id"]` |
+
+Note the **`AUCTION_*` prefix** is the v1.3 convention — NOT `AUC_*` as session2-plan §1.1 originally documented. The session2-plan abbreviation was wrong; verified via TikTok SDK source code + empirical probe.
