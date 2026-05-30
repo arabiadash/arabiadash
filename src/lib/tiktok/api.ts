@@ -104,18 +104,33 @@ export async function getAccessibleAdvertisers(
   appId: string,
   secret: string
 ): Promise<TiktokAccessibleAdvertiser[]> {
-  // /oauth2/advertiser/get/ requires app_id + secret as query params
-  // (unlike other endpoints which auth via Access-Token header only).
-  // This is TikTok's documented quirk for the advertiser discovery
-  // endpoint specifically.
+  // Wire shape per official TikTok SDK (authoritative source — empirically
+  // confirmed 2026-05-30 via _tiktok-shape-test.mjs probe):
+  //   GET /open_api/v1.3/oauth2/advertiser/get/?app_id=X&secret=Y
+  //   Header: Access-Token: <access_token>
+  //
+  // app_id + secret are query params; access_token goes in the
+  // Access-Token header. The sibling /oauth2/access_token/ and
+  // /oauth2/refresh_token/ endpoints are POST+body, but this one
+  // breaks the namespace pattern.
+  //
+  // Source: github.com/tiktok/tiktok-business-api-sdk
+  //   python_sdk/business_api_client/api/authentication_api.py
+  //
+  // Latent bug from Session 1 — the original query-param shape
+  // (access_token=... in URL) returned envelope code 40104
+  // "The access_token is empty." and never actually worked. Caught
+  // by the first live probe run after Session 2 Commit 1.
   const url = new URL(`${TIKTOK_BASE_URL}/oauth2/advertiser/get/`);
   url.searchParams.set("app_id", appId);
   url.searchParams.set("secret", secret);
-  url.searchParams.set("access_token", accessToken);
 
   const response = await fetch(url.toString(), {
     method: "GET",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Access-Token": accessToken,
+      "Content-Type": "application/json",
+    },
   });
 
   if (!response.ok) {
