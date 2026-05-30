@@ -555,3 +555,26 @@ The `discover/route.ts` endpoint must be reworked to consume `advertiser_ids` ca
 This amendment lands in:
 - `docs(adr): TikTok empirical findings — long-lived token + integer scopes (#43)` — this commit
 - `feat(tiktok): session 2 commit 1 — delete dead refresh layer` — code execution of the amendment (Session 2)
+
+### §15c — Discover call REINSTATED (corrects §15b, 2026-05-30)
+
+§15b prescribed deleting `getAccessibleAdvertisers` based on the observation that `advertiser_ids` appear inline in the OAuth token-exchange response. Subsequent recon proved this was an OPTIMIZATION mistaken for a capability gap:
+
+1. The `/oauth2/advertiser/get/` endpoint EXISTS and remains functional.
+2. It accepts the long-lived access_token (no `advertiser_ids` input required) and returns `{ list: [{ advertiser_id, advertiser_name }] }`.
+3. This is the exact semantic of Google's `listAccessibleCustomers` and Meta's `/me/adaccounts` — a live "what can this token access?" call.
+
+The function `getAccessibleAdvertisers` ([src/lib/tiktok/api.ts](../../src/lib/tiktok/api.ts)) appeared broken only because the discover route passed `credential.refresh_token` (NULL post-§13b) instead of `access_token`. The function was correct; the call site was wrong.
+
+**DECISION**: KEEP `getAccessibleAdvertisers`. Match the established Google/Meta pattern exactly — callback writes token only; the discover route re-fetches the advertiser list LIVE on selector-page load. **NO cookie carry-over, NO metadata column, NO persisted advertiser_ids.** The inline `advertiser_ids` in the OAuth response is retained as a diagnostic-only signal (optionally logged to assert parity with discover's result) but is NOT persisted.
+
+This supersedes §15b's "delete" prescription and the "OAuth flow collapses 3→2 calls" optimization (irrelevant since discovery happens on selector load, not during the OAuth dance).
+
+**Architectural impact** (revises Session 2 Commit 1):
+
+- KEEP `getAccessibleAdvertisers` in `src/lib/tiktok/api.ts` (do NOT delete)
+- Discover route ([src/app/api/auth/tiktok/discover/route.ts](../../src/app/api/auth/tiktok/discover/route.ts)) reads `access_token` from `platform_credentials.access_token` and passes it to `getAccessibleAdvertisers` + `getAdvertiserInfo` — same live-re-fetch shape as Google's `/api/google-ads/discover` and Meta's `/api/auth/meta/discover`
+- Select-accounts route ([src/app/api/auth/tiktok/select-accounts/route.ts](../../src/app/api/auth/tiktok/select-accounts/route.ts)) similarly reads `access_token` (not `refresh_token`) for the `getAdvertiserInfo` enrichment call
+- Callback ([src/app/api/auth/tiktok/callback/route.ts](../../src/app/api/auth/tiktok/callback/route.ts)) writes `access_token` to `platform_credentials.access_token`. The inline `advertiser_ids` from the OAuth response may be `console.log`-ed for diagnostic parity but is NOT persisted in any cookie, column, or other store.
+
+**Net effect on Session 2 Commit 1**: drops the cookie/metadata carry-over design surface entirely. The commit becomes a straightforward credential-column flip (`refresh_token` → `access_token`) across callback / discover / select-accounts / factory, with zero divergence from the Google/Meta callback pattern.
