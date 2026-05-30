@@ -22,15 +22,18 @@ interface DiscoverableTiktokAdvertiser {
 /**
  * Discover available TikTok advertiser_ids for the authenticated user.
  *
- * Reads the user's stored refresh_token from platform_credentials
- * (per ADR-017 single source of truth), exchanges for a fresh
- * access_token if needed, then calls /oauth2/advertiser/get/ for the
- * list of authorized advertisers + /advertiser/info/ for enrichment.
+ * Reads the user's stored access_token from platform_credentials
+ * (column is the generic credential slot per ADR-020 §13c — same
+ * pattern as Meta), calls /oauth2/advertiser/get/ live for the list
+ * of authorized advertisers + /advertiser/info/ for enrichment.
+ *
+ * Mirrors Google + Meta exactly — callback persists token only; this
+ * route re-fetches the advertiser list LIVE on every selector page
+ * load. No cookie carry-over, no persisted advertiser_ids
+ * (per ADR-020 §15c).
  *
  * Returns the unified discoverable shape the selector UI consumes.
  * Marks already-connected advertisers for pre-selection.
- *
- * Mirrors /api/google-ads/discover from ADR-010.
  */
 export async function GET() {
   try {
@@ -62,10 +65,11 @@ export async function GET() {
       );
     }
 
-    // TikTok's /oauth2/advertiser/get/ accepts the REFRESH token directly
-    // as the access_token param (TikTok-specific quirk — the refresh
-    // token IS the long-lived credential, and this discovery endpoint
-    // accepts it). For other endpoints we'd refresh first.
+    // Per ADR-020 §13c, the platform_credentials.refresh_token column
+    // holds TikTok's long-lived access_token (generic credential slot,
+    // same pattern as Meta). Rename locally for call-site clarity.
+    const accessToken = credential.refresh_token;
+
     const appId = process.env.TIKTOK_APP_ID;
     const secret = process.env.TIKTOK_SECRET;
     if (!appId || !secret) {
@@ -75,11 +79,7 @@ export async function GET() {
 
     let accessible;
     try {
-      accessible = await getAccessibleAdvertisers(
-        credential.refresh_token,
-        appId,
-        secret
-      );
+      accessible = await getAccessibleAdvertisers(accessToken, appId, secret);
     } catch (err) {
       console.error(
         "[tiktok/discover] getAccessibleAdvertisers failed:",
@@ -92,10 +92,7 @@ export async function GET() {
     const advertiserIds = accessible.map((a) => a.advertiser_id);
     let infoList: Awaited<ReturnType<typeof getAdvertiserInfo>> = [];
     try {
-      infoList = await getAdvertiserInfo(
-        credential.refresh_token,
-        advertiserIds
-      );
+      infoList = await getAdvertiserInfo(accessToken, advertiserIds);
     } catch (err) {
       // Enrichment failure is non-fatal — fall back to bare list.
       console.warn(

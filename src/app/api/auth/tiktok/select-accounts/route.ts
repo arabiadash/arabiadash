@@ -17,8 +17,9 @@ interface SelectAccountsBody {
  * Persist the user's TikTok advertiser selection from the selector UI.
  *
  * Mirrors /api/google-ads/select-accounts. Per ADR-019/ADR-020:
- * - access_token column is NULL for TikTok rows (refresh_token lives
- *   in platform_credentials per ADR-017 single source of truth)
+ * - connections.access_token is NULL for TikTok rows; TikTok's
+ *   long-lived access_token lives in platform_credentials.refresh_token
+ *   (the generic credential slot, same pattern as Meta — ADR-020 §13c)
  * - advertiser_id stored bare per ADR-020 §Decision 10 (no prefix)
  * - TikTok-specific fields (currency, timezone, advertiser_name,
  *   country, status) go in connections.metadata jsonb per Decision §10
@@ -93,7 +94,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Read refresh_token to enrich metadata at upsert time.
+    // Read the stored credential to enrich metadata at upsert time.
+    // Per ADR-020 §13c, the refresh_token column is a generic credential
+    // slot — for TikTok it holds the long-lived access_token (same
+    // pattern as Meta). Rename locally for call-site clarity.
     const { data: credential } = await adminClient
       .from("platform_credentials")
       .select("refresh_token")
@@ -108,6 +112,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const accessToken = credential.refresh_token;
+
     // Enrich each selected advertiser_id with currency/timezone/etc.
     // Non-fatal: failure surfaces as missing metadata; the connection
     // row still gets written and adapter construction throws-loudly
@@ -115,7 +121,7 @@ export async function POST(request: NextRequest) {
     let advertiserInfo: Awaited<ReturnType<typeof getAdvertiserInfo>> = [];
     try {
       advertiserInfo = await getAdvertiserInfo(
-        credential.refresh_token,
+        accessToken,
         body.advertiser_ids
       );
     } catch (err) {

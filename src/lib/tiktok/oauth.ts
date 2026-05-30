@@ -7,13 +7,12 @@
  * v1.3 endpoint details live in this file + tiktok/api.ts. When v1.4
  * ships, these two files change; everything else stays stable.
  *
- * Token lifetimes (per TikTok docs):
- *   access_token  — 24 hours (refresh daily)
- *   refresh_token — 1 year (re-OAuth required after that)
- *
- * Per ADR-020 §Decision 11 (Q1 sub-issue resolution): we do NOT track
- * refresh_token expiry pre-emptively. ReauthRequiredError handles
- * expiry reactively when TikTok rejects the call.
+ * Token model (per ADR-020 §13b — empirically confirmed 2026-05-29):
+ *   TikTok Marketing API issues a single long-lived access_token. No
+ *   refresh cycle exists in this API surface. /oauth2/refresh_token/
+ *   belongs to TikTok Login Kit / Creator API, which we do not consume.
+ *   Re-auth is reactive only — triggered via ReauthRequiredError on
+ *   error codes 40105 / 40110 / 40115.
  */
 
 import { TIKTOK_AUTH_BASE_URL, TIKTOK_BASE_URL } from "./api";
@@ -49,14 +48,14 @@ function requireEnv(key: string): string {
 export interface TiktokTokenResponse {
   // TikTok wraps responses in { code, message, data, request_id }
   // We expose the inner `data` shape after api.ts unwraps.
+  //
+  // Empirically verified shape (probe 2026-05-29, ADR-020 §13b):
+  // /oauth2/access_token/ returns ONLY access_token + advertiser_ids +
+  // scope. No refresh_token, no expiry fields. Per §14b the scope array
+  // is numeric IDs (not the string array the original ADR-020 assumed).
   access_token: string;
-  refresh_token: string;
-  access_token_expire_in: number; // seconds until access_token expires (~86400)
-  refresh_token_expire_in: number; // seconds until refresh_token expires (~31536000)
-  scope: string[];
+  scope: number[];
   advertiser_ids?: string[];
-  open_id?: string;
-  token_type?: string;
 }
 
 /**
@@ -130,53 +129,3 @@ export async function exchangeAuthCodeForTokens(
   return json.data;
 }
 
-/**
- * Refresh an access_token using the stored refresh_token. TikTok's
- * refresh endpoint returns a NEW refresh_token + access_token pair
- * (rotating refresh tokens — different from Google's static refresh).
- * Caller must persist the new refresh_token back to
- * platform_credentials.
- */
-export async function refreshTiktokAccessToken(
-  refreshToken: string
-): Promise<TiktokTokenResponse> {
-  const appId = requireEnv("TIKTOK_APP_ID");
-  const secret = requireEnv("TIKTOK_SECRET");
-
-  const body = {
-    app_id: appId,
-    secret,
-    refresh_token: refreshToken,
-  };
-
-  const response = await fetch(
-    `${TIKTOK_BASE_URL}/oauth2/refresh_token/`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }
-  );
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(
-      `TikTok token refresh HTTP ${response.status}: ${text}`
-    );
-  }
-
-  const json = (await response.json()) as {
-    code: number;
-    message: string;
-    data: TiktokTokenResponse;
-    request_id?: string;
-  };
-
-  if (json.code !== 0) {
-    throw new Error(
-      `TikTok API error ${json.code}: ${json.message ?? "token refresh failed"}`
-    );
-  }
-
-  return json.data;
-}
