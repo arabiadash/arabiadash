@@ -169,7 +169,13 @@ export function normalizeReportRowToInsight(
 
   const spend = extractNumber(m, "spend");
   const purchases = extractInt(m, "complete_payment");
-  const revenue = extractNumber(m, "total_purchase_value");
+  // Revenue source = total_complete_payment_rate per ADR-020 §2b
+  // (website attribution). The original total_purchase_value belongs
+  // to the active_pay (app-attribution) family and returns 0 for
+  // website pixel stores. See api.ts INSIGHTS_METRICS_ACCOUNT for the
+  // ⚠️ NAMING TRAP note explaining the _rate-suffix-but-actually-value
+  // quirk.
+  const revenue = extractNumber(m, "total_complete_payment_rate");
 
   const roas = spend > 0 ? revenue / spend : null;
   const costPerPurchase = purchases > 0 ? spend / purchases : null;

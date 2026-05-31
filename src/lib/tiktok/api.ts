@@ -300,16 +300,28 @@ export interface TiktokReportResponse {
 
 /**
  * Account-level metric set (AUCTION_ADVERTISER + AUCTION_CAMPAIGN).
- * All 11 names empirically verified valid in v1.3 via Session 2 probes
+ * All 10 names empirically verified valid in v1.3 via Session 2 probes
  * (_tiktok-report-shape.mjs, _tiktok-report-q2b.mjs,
- * _tiktok-report-active.mjs, _tiktok-metric-validity.mjs).
+ * _tiktok-report-active.mjs, _tiktok-metric-validity.mjs,
+ * _tiktok-revenue-metric.mts).
  *
  * `complete_payment` family is the v1 purchase-attribution choice
- * per ADR-020 §Decision 2 + Report-Shape Findings §4. vta_purchase /
- * cta_purchase split deferred to a v2 TikTok-specific surface.
+ * per ADR-020 §Decision 2 + Report-Shape Findings §4 + §2b correction.
+ * vta_purchase / cta_purchase split deferred to a v2 TikTok-specific
+ * surface.
  *
  * CTR is 0-100 percentage scale (K2 verified). normalize.ts passes
  * through with parseFloat — no scale conversion.
+ *
+ * REMOVED per ADR-020 §2b (2026-05-31 live-data correction):
+ *   - `total_purchase_value` — app-attribution (active_pay family);
+ *     returns 0 for website pixel stores. Replaced by
+ *     total_complete_payment_rate.
+ *   - `complete_payment_roas` — metric is valid (returns the website
+ *     ROAS, contrary to the original app-attribution hypothesis), but
+ *     not requested because we compute roas = revenue/spend client-
+ *     side for null-safety per the UnifiedInsight contract. Kept as a
+ *     diagnostic reference in normalize.ts comments.
  */
 const INSIGHTS_METRICS_ACCOUNT: readonly string[] = [
   "spend",
@@ -321,8 +333,16 @@ const INSIGHTS_METRICS_ACCOUNT: readonly string[] = [
   "reach",
   "frequency",
   "complete_payment",
-  "total_purchase_value",
-  "complete_payment_roas",
+  // ⚠️ NAMING TRAP per ADR-020 §2b: despite the `_rate` suffix this is
+  // the aggregate VALUE in account currency, NOT a rate/percentage.
+  // TikTok's internal ID is `time_attr_total_shopping_value` (per the
+  // SDK YAML `smart_plus_material_report_overview.yml`), confirming
+  // it's a SUM-of-values. The API key name appears to be a TikTok SDK
+  // naming inconsistency. Live-verified 456,410 SAR on IMAA (advertiser
+  // 7327982125339328514, May 2-31) — matches platform UI "Purchase
+  // value (website)" within 0.00%. Do NOT "fix" the apparent rate-vs-
+  // value mismatch.
+  "total_complete_payment_rate",
 ] as const;
 
 /**
