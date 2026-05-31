@@ -185,6 +185,14 @@ export interface TiktokAdvertiserInfo {
   timezone: string;
   country?: string;
   status: string;
+  /**
+   * Unix epoch seconds — account inception per /advertiser/info/.
+   * Optional because TikTok occasionally omits the field; consumers
+   * must handle absence (the chunked-lifetime path falls back to a
+   * 365-day single-chunk window when this is missing per ADR-020
+   * §Lifetime).
+   */
+  create_time?: number;
 }
 
 interface AdvertiserInfoResponse {
@@ -470,6 +478,221 @@ export async function getAdInsights(
     INSIGHTS_METRICS_AD,
     range
   );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Lifetime chunked-fetch — pure helpers per ADR-020 §Lifetime
+// (2026-05-31). Composed by the *Lifetime wrappers in Commit B.
+//
+// TikTok caps /report/integrated/get/ at 365 days per request
+// (probe-confirmed 365/366 boundary in
+// scripts/_tiktok-lifetime-paused-probe.mts, 2026-05-31). For true
+// lifetime semantics we chunk [account_create_time, today] into
+// ≤365-day windows, fetch in parallel, merge client-side.
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Sanity ceiling for the lifetime lower bound. ~3 years is the
+ * empirical history retention observed in
+ * scripts/_tiktok-history-chunked-probe.mts (chunks beyond ~2.4
+ * years returned zero rows for IMAA, consistent with TikTok's
+ * documented retention). Prevents wasted API calls for accounts with
+ * a stale or pre-retention `create_time`.
+ */
+const MAX_LIFETIME_RETENTION_DAYS = 1095;
+
+/**
+ * Metric names that are RATIOS, not additives. NEVER summed across
+ * chunks — summing percentages or per-unit values produces garbage.
+ *
+ * `ctr` / `cpc` / `cpm` / `frequency` are RECOMPUTED from summed
+ * components inside `mergeChunkedReports` (per ADR-020 §Lifetime
+ * merge-rules table, "Ratios — recomputed in the MERGE layer" row).
+ *
+ * `complete_payment_roas` is listed for a different reason — NOT
+ * because the metric is wrong. Per §2b's live-data evidence, the
+ * metric IS valid and IS correct: it equals the platform UI's
+ * "Payment completion ROAS (website)" exactly (per-campaign
+ * 4.79 / 3.89 / 5.59 in the §2b table match TikTok's UI verbatim).
+ * We simply don't request it today because the normalizer recomputes
+ * `roas` client-side from `spend` + `revenue` per §2b's null-safe
+ * contract — one source-of-truth, fewer moving parts. If a future
+ * change re-adds it to the metric set, this set prevents the
+ * mechanical mistake of summing it across chunks (a ratio summed
+ * across chunks is mathematically wrong); the right path on re-add
+ * is to either drop it from the merged row and rely on the
+ * normalizer's recompute, or recompute it explicitly from summed
+ * `total_complete_payment_rate` / `spend` like the other ratios above.
+ */
+const RATIO_METRICS: ReadonlySet<string> = new Set([
+  "ctr",
+  "cpc",
+  "cpm",
+  "frequency",
+  "complete_payment_roas",
+]);
+
+/**
+ * Split `[lower_bound, today]` into ≤365-day chunks for lifetime
+ * fetch per ADR-020 §Lifetime.
+ *
+ *   lower_bound = max(create_time, today − MAX_LIFETIME_RETENTION_DAYS)
+ *   chunk_size  = 365 days
+ *   chunks are returned in ascending date order
+ *
+ * Inclusive `since/until` per chunk with `+1d` step to the next
+ * chunk's start (no double-counting the boundary day). Mirrors Meta's
+ * `chunkDateRange` pattern at src/lib/meta/api.ts:243-270, sized for
+ * TikTok's 365-day cap instead of Meta's 30-day daily-breakdown cap.
+ *
+ * Edge cases:
+ *   - createTime undefined / 0 / future → fall back to a single
+ *     365-day chunk (matches the pre-§Lifetime clamp behavior;
+ *     callers should treat this as a degraded "best effort" lifetime).
+ *   - createTime < today by less than 365 days → returns a single
+ *     chunk [createTime → today].
+ *   - createTime older than retention cap → lower_bound clamped at
+ *     today − MAX_LIFETIME_RETENTION_DAYS; ~3 chunks for IMAA's
+ *     2.4-year history, up to 3 chunks for any account.
+ *
+ * @param createTime Unix epoch SECONDS from /advertiser/info/ (matches
+ *   TikTok's wire format — NOT milliseconds; the *1000 happens here).
+ */
+export function chunkLifetimeRange(
+  createTime: number | undefined
+): Array<{ since: string; until: string }> {
+  const todayMs = Date.now();
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  // Lower bound resolution. The defensive defaults match the
+  // pre-§Lifetime single-request 365d clamp when createTime is unusable.
+  let lowerMs: number;
+  const validCreateTime =
+    typeof createTime === "number" &&
+    Number.isFinite(createTime) &&
+    createTime > 0 &&
+    createTime * 1000 < todayMs;
+
+  if (validCreateTime) {
+    const fromCreateMs = createTime! * 1000;
+    const fromCapMs = todayMs - MAX_LIFETIME_RETENTION_DAYS * DAY_MS;
+    lowerMs = Math.max(fromCreateMs, fromCapMs);
+  } else {
+    lowerMs = todayMs - 365 * DAY_MS;
+  }
+
+  const chunks: Array<{ since: string; until: string }> = [];
+  let cursorMs = lowerMs;
+
+  while (cursorMs <= todayMs) {
+    // Each chunk covers up to 365 days inclusive of `cursor`. The
+    // `365 - 1` accounts for inclusive endpoint counting (since-until
+    // span of 364 = 365 days inclusive). Probe-verified: this lands
+    // EXACTLY on the 365-day cap TikTok accepts (the 366d probe
+    // returned code:40002).
+    const chunkEndMs = Math.min(cursorMs + (365 - 1) * DAY_MS, todayMs);
+    chunks.push({
+      since: toYmd(new Date(cursorMs)),
+      until: toYmd(new Date(chunkEndMs)),
+    });
+    // Next chunk starts the day after this chunk's until.
+    cursorMs = chunkEndMs + DAY_MS;
+  }
+
+  return chunks;
+}
+
+/**
+ * Merge multiple chunked /report/integrated/get/ results into a
+ * single set of synthesized rows per dimension key, per ADR-020
+ * §Lifetime merge rules.
+ *
+ * THREE-PASS SHAPE:
+ *
+ *   PASS 1 — sum additive metrics by JSON-serialized dimension key
+ *     across all chunks. Ratio metrics (RATIO_METRICS) are SKIPPED
+ *     — they'd produce garbage if summed. Missing metric values
+ *     contribute 0 (no entry pollution).
+ *
+ *   PASS 2 — recompute the ratio metrics from the summed components:
+ *     ctr       = clicks / impressions * 100   (K2: 0-100 percentage)
+ *     cpc       = spend / clicks
+ *     cpm       = spend / impressions * 1000
+ *     frequency = impressions / reach
+ *     Each guards against /0 by checking the denominator.
+ *
+ *   PASS 3 — convert numeric metrics back to strings (TikTok's wire
+ *     format) so the result is drop-in for the existing
+ *     normalizeReportRowToInsight downstream.
+ *
+ * The normalizer recomputes `roas` + `costPerPurchase` from the
+ * merged components (per §2b's null-safe contract). The merge does
+ * NOT touch those — they're handled correctly downstream.
+ *
+ * Grouping by JSON-serialized `dimensions` keeps multi-dim queries
+ * correct (e.g. {campaign_id, stat_time_day} groups by both keys).
+ * Our v1 single-dim queries (advertiser_id | campaign_id | ad_id) get
+ * effective grouping by that single key.
+ *
+ * Entity-present-in-some-chunks behavior: an entity (e.g. a 2024
+ * paused campaign in chunk 1 but not chunk 0) gets a single-entry
+ * group whose summed metrics equal that one chunk's values. This is
+ * exactly the path surfacing §Lifetime's paused-with-historical-spend
+ * coverage gap.
+ */
+export function mergeChunkedReports(
+  chunkResults: ReadonlyArray<ReadonlyArray<TiktokReportRow>>
+): TiktokReportRow[] {
+  interface MergedEntry {
+    dimensions: Record<string, string>;
+    metrics: Record<string, number>;
+  }
+  const byDimKey = new Map<string, MergedEntry>();
+
+  // PASS 1 — sum additives by dimension key. Ratios SKIPPED here.
+  for (const chunk of chunkResults) {
+    for (const row of chunk) {
+      const key = JSON.stringify(row.dimensions);
+      let entry = byDimKey.get(key);
+      if (!entry) {
+        entry = { dimensions: { ...row.dimensions }, metrics: {} };
+        byDimKey.set(key, entry);
+      }
+      for (const [metricName, valueStr] of Object.entries(row.metrics ?? {})) {
+        if (RATIO_METRICS.has(metricName)) continue;
+        const n = parseFloat(valueStr);
+        if (!Number.isFinite(n)) continue;
+        entry.metrics[metricName] = (entry.metrics[metricName] ?? 0) + n;
+      }
+    }
+  }
+
+  // PASS 2 — recompute ratios from summed components. The normalizer
+  // reads these as passthrough so they must be correct here. roas +
+  // costPerPurchase are NOT computed here — the normalizer handles
+  // them from the summed revenue/spend/purchases.
+  for (const entry of byDimKey.values()) {
+    const spend = entry.metrics.spend ?? 0;
+    const impressions = entry.metrics.impressions ?? 0;
+    const clicks = entry.metrics.clicks ?? 0;
+    const reach = entry.metrics.reach ?? 0;
+    entry.metrics.ctr =
+      impressions > 0 ? (clicks / impressions) * 100 : 0;
+    entry.metrics.cpc = clicks > 0 ? spend / clicks : 0;
+    entry.metrics.cpm =
+      impressions > 0 ? (spend / impressions) * 1000 : 0;
+    entry.metrics.frequency = reach > 0 ? impressions / reach : 0;
+  }
+
+  // PASS 3 — stringify metrics back to TikTok's wire format. The
+  // normalizer's extractNumber/extractInt re-parse them; round-trip
+  // is lossless for the integer + float values we sum here.
+  return Array.from(byDimKey.values()).map((entry) => ({
+    dimensions: entry.dimensions,
+    metrics: Object.fromEntries(
+      Object.entries(entry.metrics).map(([k, v]) => [k, String(v)])
+    ),
+  }));
 }
 
 // ═══════════════════════════════════════════════════════════════════
