@@ -1085,3 +1085,170 @@ export async function getIdentityVideoInfo(
   );
   return response.video_detail ?? null;
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// /oembed — path D resolver per ADR-020 §DCO-Identity.
+//
+// Public TikTok oEmbed endpoint at www.tiktok.com (NOT business-api).
+// No auth. Used when path A (direct video) and path B (Spark Ad)
+// identity resolution both fail but tiktok_item_id is populated —
+// the DCO / Smart-Performance-Campaign pattern where TikTok strips
+// identity_type/identity_id from /ad/get/ responses.
+//
+// Recovers BOTH the static poster (thumbnail_url) AND creator info
+// (author_name / author_unique_id / author_url) in one HTTP call.
+// Production-verified 2026-05-31 via Vercel iad1: HTTP 200, 179ms,
+// hasThumbnail=true, author populated.
+//
+// URL shape: https://www.tiktok.com/oembed?url=https://www.tiktok.com/@_/video/<item_id>
+// The placeholder username "@_" is accepted; TikTok resolves the
+// item_id alone. This matches the empirically-verified probe shape
+// in scripts/_tiktok-oembed-probe.mts — DO NOT rewrite with the URL
+// constructor's automatic percent-encoding, which has not been
+// tested against this endpoint.
+//
+// User-Agent string is the exact one used in both the local probe
+// (scripts/_tiktok-oembed-probe.mts) and the Vercel-side probe
+// (deleted commit 958441e) — preserved verbatim so production
+// matches the verified-working request shape.
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Raw TikTok oEmbed JSON response shape — empirically verified
+ * 2026-05-31 against 3 different item_ids on the IMAA account.
+ * All six fields below are populated for public TikTok videos;
+ * thumbnail_url is signed (~24h TTL via `x-expires`).
+ */
+interface TiktokOembedResponse {
+  thumbnail_url: string;
+  thumbnail_width: number;
+  thumbnail_height: number;
+  author_name: string;
+  author_unique_id: string;
+  author_url: string;
+  // (other fields present but unused: version, type, title, html, ...)
+}
+
+/**
+ * Parsed + camelCase'd subset of TiktokOembedResponse for C3 consumption.
+ * The mapping to TikTokCreativeUrls is done in the resolve route (C3) —
+ * this helper stays single-responsibility (one HTTP call, one parse).
+ */
+export interface TiktokOembedResolved {
+  thumbnailUrl: string;
+  thumbnailWidth: number;
+  thumbnailHeight: number;
+  authorName: string;
+  authorHandle: string;
+  authorUrl: string;
+  expiresAt: Date; // parsed from thumbnail_url's x-expires query param
+}
+
+const OEMBED_USER_AGENT = "Mozilla/5.0 (compatible; ArabiaDashOEmbedProbe/1.0)";
+const OEMBED_TIMEOUT_MS = 10_000;
+
+/**
+ * Concurrency cap for path-D oEmbed batches in the resolve route.
+ * Mirrors PATH_B_CONCURRENCY at route.ts:106 — same rationale
+ * (TikTok's documented 600 req/min ÷ ~250ms per-call latency ≈
+ *  generous headroom at 4 concurrent). See ADR-020 §ResolveConcurrency
+ * for the original cap derivation; this constant exists so C3's
+ * chunk-loop can import it without duplicating the math.
+ */
+export const OEMBED_CONCURRENCY = 4;
+
+/**
+ * Resolve a TikTok item_id to a public oEmbed payload (thumbnail +
+ * creator info). See module comment above for the URL shape + UA
+ * rationale.
+ *
+ * Two-tier error handling per ADR-020 §DCO-Identity Risks #2 + #4:
+ *
+ *   - PER-ITEM NULL (graceful) for 4xx/5xx/missing-thumbnail/timeout.
+ *     A single dead item_id (private, deleted, geo-restricted, transient
+ *     5xx) must not abort the whole batch — caller falls back to STATE 3
+ *     placeholder + modal iframe.
+ *
+ *   - BUBBLE (throw) ONLY on HTTP 429. Rate-limit is an explicit signal
+ *     that we're fanning out too aggressively; aborting the batch lets
+ *     the resolve route's outer chunk-loop bubble to the caller, exactly
+ *     like path-B's existing rate-limit pattern. Message includes
+ *     "rate limit" so the existing isTiktokRateLimitError detector
+ *     (errors.ts:118 — `msg.toLowerCase().includes("rate limit")`)
+ *     matches it without modification.
+ */
+export async function resolveOembed(
+  itemId: string
+): Promise<TiktokOembedResolved | null> {
+  const url = `https://www.tiktok.com/oembed?url=https://www.tiktok.com/@_/video/${itemId}`;
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: {
+        "User-Agent": OEMBED_USER_AGENT,
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(OEMBED_TIMEOUT_MS),
+    });
+  } catch {
+    // Network failure / AbortError → per-item null. Don't bubble.
+    return null;
+  }
+
+  if (response.status === 429) {
+    throw new Error(
+      `TikTok oEmbed rate limit (HTTP 429) for item_id ${itemId}`
+    );
+  }
+  if (!response.ok) {
+    // 4xx (item private/deleted/geo-restricted) or 5xx (TikTok-side
+    // transient) → per-item null. Caller falls back to STATE 3.
+    //
+    // v1 accepted limitation: a TikTok-wide 5xx outage means the whole
+    // batch returns nulls instead of bubbling early; bounded by cap=4
+    // so worst case is ~4 futile in-flight calls before the rest of
+    // the batch starts. A future "N consecutive 5xx → bubble" guard is
+    // out of scope here.
+    return null;
+  }
+
+  let json: TiktokOembedResponse;
+  try {
+    json = (await response.json()) as TiktokOembedResponse;
+  } catch {
+    return null;
+  }
+
+  if (!json.thumbnail_url || typeof json.thumbnail_url !== "string") {
+    return null;
+  }
+
+  // Parse expiresAt from the signed thumbnail URL's x-expires query
+  // param (epoch seconds). Mirrors normalize.ts:parseExpiresFromXExpiresQueryParam
+  // — kept inline to avoid a circular import (api.ts ← normalize.ts).
+  // Defensive default: now + 1h on parse failure (URL still works
+  // within that envelope for most observed cases).
+  let expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+  try {
+    const xExp = new URL(json.thumbnail_url).searchParams.get("x-expires");
+    if (xExp) {
+      const epoch = parseInt(xExp, 10);
+      if (Number.isFinite(epoch) && epoch > 0) {
+        expiresAt = new Date(epoch * 1000);
+      }
+    }
+  } catch {
+    // URL parse threw — fall through with the defensive default
+  }
+
+  return {
+    thumbnailUrl: json.thumbnail_url,
+    thumbnailWidth: json.thumbnail_width,
+    thumbnailHeight: json.thumbnail_height,
+    authorName: json.author_name,
+    authorHandle: json.author_unique_id,
+    authorUrl: json.author_url,
+    expiresAt,
+  };
+}
