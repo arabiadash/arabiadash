@@ -226,8 +226,12 @@ function toYmd(d: Date): string {
  * "lifetime" → 2-year lookback (TikTok has no date_preset=maximum
  * equivalent; pick a wide window that's well beyond typical campaign
  * histories on this customer profile).
+ *
+ * Exported per Session 2 Commit 2b-3 plan so the adapter can thread
+ * the same resolved (since, until) into normalize.ts opts without
+ * duplicating the helper. Single source of truth for date resolution.
  */
-function resolveRangeToDates(
+export function resolveRangeToDates(
   range: DateRangeInput
 ): { since: string; until: string } {
   if (isCustomRange(range)) {

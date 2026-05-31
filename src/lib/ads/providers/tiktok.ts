@@ -4,44 +4,107 @@ import {
   type UnifiedInsight,
   type UnifiedAccount,
   type UnifiedAd,
+  type UnifiedAdTiktok,
   type DateRangeInput,
   type TimeIncrement,
 } from "../types";
+import {
+  getAccountInsights as fetchTiktokAccountInsights,
+  getCampaignInsights as fetchTiktokCampaignInsights,
+  getAdInsights as fetchTiktokAdInsights,
+  getAds as fetchTiktokAds,
+  getCampaigns as fetchTiktokCampaigns,
+  resolveRangeToDates,
+  type TiktokCampaignRow,
+  type TiktokReportRow,
+} from "@/lib/tiktok/api";
+import {
+  collapseTiktokStatus,
+  extractCampaignIdFromRow,
+  normalizeReportRowToInsight,
+  normalizeTiktokAdToUnified,
+} from "@/lib/tiktok/normalize";
 import { classifyTiktokError } from "@/lib/tiktok/errors";
 
 /**
- * TikTok adapter — Phase 7 Session 1 SCAFFOLD per ADR-020.
+ * TikTok adapter — Phase 7 Session 2 Commit 2b-3 wiring.
  *
- * This scaffold establishes the adapter shape + factory.ts integration
- * point. Session 2 wires the actual /report/integrated/get/ and
- * /ad/get/ fetchers via api.ts + normalize.ts. Session 3 adds pixel
- * conversion attribution + the perf gate.
- *
- * Per ADR-020 §Decision 6 (thin-boundary 3-layer):
- *   - src/lib/tiktok/api.ts        → HTTP layer (TIKTOK_API_VERSION pin)
- *   - src/lib/tiktok/normalize.ts  → TikTok-shape → UnifiedAd (Session 2)
- *   - src/lib/ads/providers/tiktok.ts → this file (adapter)
+ * Wires api.ts fetchers + normalize.ts mappers into the
+ * AdProviderAdapter interface. Per ADR-020 §Decision 6 (thin-boundary
+ * 3-layer): this file is the consumer of api.ts (HTTP) + normalize.ts
+ * (shape-mapping). It contains NO endpoint URLs, NO shape literals,
+ * NO metric-name knowledge — only orchestration (parallel fetch +
+ * Map joins + map + filter).
  *
  * Per ADR-020 §Decision 9: errors classified at the wrap boundary
  * (withReauthMapping) and converted to ReauthRequiredError when they
  * match TikTok's auth-class error codes. Non-auth errors re-throw
  * for upstream handling (route → 500 → client retry).
+ *
+ * Per ADR-005: currency flows from /advertiser/info/ (probe-time) →
+ * connections.metadata.currency → factory → accountInfo.currency →
+ * every mapper call. JST USD canary path verified end-to-end.
  */
+
+// ═══════════════════════════════════════════════════════════════════
+// File-private join helpers — used by getCampaignInsights + getAds.
+// Pure functions; no `this` dependency. Defensive against the
+// silently-dropped-mode-3 edge (TiktokAdRow.campaign_id may be
+// undefined; we skip those rows in the lookup).
+// ═══════════════════════════════════════════════════════════════════
+
+interface CampaignLookupEntry {
+  name: string;
+  objectiveType: string;
+  status: UnifiedCampaign["status"];
+}
+
+function buildCampaignLookup(
+  campaigns: TiktokCampaignRow[]
+): Map<string, CampaignLookupEntry> {
+  const lookup = new Map<string, CampaignLookupEntry>();
+  for (const c of campaigns) {
+    if (!c.campaign_id) continue;
+    lookup.set(c.campaign_id, {
+      name: c.campaign_name?.trim() ?? "",
+      objectiveType: c.objective_type ?? "",
+      status: collapseTiktokStatus(c.operation_status, c.secondary_status),
+    });
+  }
+  return lookup;
+}
+
+function buildInsightLookup(
+  insights: TiktokReportRow[],
+  dimensionKey: "ad_id" | "campaign_id"
+): Map<string, TiktokReportRow> {
+  const lookup = new Map<string, TiktokReportRow>();
+  for (const row of insights) {
+    const id = row.dimensions?.[dimensionKey];
+    if (id) lookup.set(id, row);
+  }
+  return lookup;
+}
+
 export class TiktokAdapter implements AdProviderAdapter {
   readonly provider = "tiktok" as const;
 
   /**
-   * @param refreshToken Long-lived OAuth refresh token from
-   *   platform_credentials. TikTok's refresh_token has a 1-year
-   *   lifetime; the adapter exchanges for a fresh access_token
-   *   internally per call (or batches per session — Session 2 design).
+   * @param accessToken Long-lived TikTok access_token per ADR-020 §13b
+   *   (no refresh cycle in Marketing API v1.3). Stored in
+   *   platform_credentials.refresh_token per §13c (generic credential
+   *   slot — same pattern Meta uses). The factory reads it via the
+   *   shared getRefreshTokenForUser helper.
    * @param advertiserId Bare numeric advertiser_id (NO prefix per
    *   ADR-020 §Decision 10).
    * @param accountInfo name + currency + timezone from
-   *   connections.metadata, plumbed at factory.ts time.
+   *   connections.metadata. currency is per-account (verified 4 SAR + 1
+   *   USD across 5 active advertisers on the test apparatus —
+   *   2026-05-31 probe). The JST USD account is the empirical canary
+   *   against any hardcoded-SAR regression per ADR-005.
    */
   constructor(
-    private refreshToken: string,
+    private accessToken: string,
     private advertiserId: string,
     private accountInfo: {
       name: string;
@@ -78,62 +141,135 @@ export class TiktokAdapter implements AdProviderAdapter {
     };
   }
 
-  // -----------------------------------------------------------------
-  // Session 2 stubs — return empty arrays for now. The route handlers
-  // can already wire to this adapter without breaking (empty data
-  // renders empty UI), and Session 2 fills these in with real fetchers.
-  // -----------------------------------------------------------------
+  /**
+   * Map /campaign/get/ rows → UnifiedCampaign[]. createdTime +
+   * updatedTime default to "" (CAMPAIGN_FIELDS doesn't fetch
+   * create_time/modify_time — same precedent as the Google adapter,
+   * which also defaults these; no UI consumer renders them today).
+   */
+  private normalizeCampaign = (c: TiktokCampaignRow): UnifiedCampaign => ({
+    id: c.campaign_id ?? "",
+    provider: "tiktok",
+    name: c.campaign_name?.trim() ?? "",
+    status: collapseTiktokStatus(c.operation_status, c.secondary_status),
+    objective: c.objective_type ?? "",
+    // dailyBudget / lifetimeBudget / startTime / stopTime — deferred
+    // (CAMPAIGN_FIELDS minimal set; add when a UI consumer needs them).
+    createdTime: "", // Google-adapter precedent (providers/google.ts:575-576)
+    updatedTime: "",
+  });
 
   async getCampaigns(): Promise<UnifiedCampaign[]> {
     return this.withReauthMapping(async () => {
-      // TODO Session 2: GET /campaign/get/ via tiktok/api.ts
-      console.warn(
-        "[tiktok-adapter] getCampaigns not yet implemented — Session 2 wires the fetcher"
+      const rows = await fetchTiktokCampaigns(
+        this.accessToken,
+        this.advertiserId
       );
-      return [];
+      return rows.map(this.normalizeCampaign);
     });
   }
 
   async getAccountInsights(
-    _range: DateRangeInput,
-    _timeIncrement?: TimeIncrement
+    range: DateRangeInput,
+    timeIncrement?: TimeIncrement
   ): Promise<UnifiedInsight[]> {
     return this.withReauthMapping(async () => {
-      void _range;
-      void _timeIncrement;
-      // TODO Session 2: POST /report/integrated/get/ with data_level=AUC_ADVERTISER
-      console.warn(
-        "[tiktok-adapter] getAccountInsights not yet implemented — Session 2 wires the fetcher"
+      // Daily-breakdown (time_increment) deferred to v2 enhancement —
+      // TikTok api.ts 2a single-call shape doesn't currently support it.
+      void timeIncrement;
+
+      const rows = await fetchTiktokAccountInsights(
+        this.accessToken,
+        this.advertiserId,
+        range
       );
-      return [];
+      const { since, until } = resolveRangeToDates(range);
+      return rows.map((row) =>
+        normalizeReportRowToInsight(row, {
+          currency: this.accountInfo.currency,
+          dateStart: since,
+          dateStop: until,
+          level: "account",
+        })
+      );
     });
   }
 
   async getCampaignInsights(
-    _range: DateRangeInput,
-    _timeIncrement?: TimeIncrement
+    range: DateRangeInput,
+    timeIncrement?: TimeIncrement
   ): Promise<UnifiedInsight[]> {
     return this.withReauthMapping(async () => {
-      void _range;
-      void _timeIncrement;
-      // TODO Session 2: POST /report/integrated/get/ with data_level=AUC_CAMPAIGN
-      console.warn(
-        "[tiktok-adapter] getCampaignInsights not yet implemented — Session 2 wires the fetcher"
-      );
-      return [];
+      void timeIncrement;
+
+      // Parallel fetch — campaigns lookup is independent of insights.
+      const [insightRows, campaigns] = await Promise.all([
+        fetchTiktokCampaignInsights(
+          this.accessToken,
+          this.advertiserId,
+          range
+        ),
+        fetchTiktokCampaigns(this.accessToken, this.advertiserId),
+      ]);
+
+      const campaignLookup = buildCampaignLookup(campaigns);
+      const { since, until } = resolveRangeToDates(range);
+
+      return insightRows.map((row) => {
+        const campaignId = extractCampaignIdFromRow(row);
+        const info = campaignId ? campaignLookup.get(campaignId) : undefined;
+        return normalizeReportRowToInsight(row, {
+          currency: this.accountInfo.currency,
+          dateStart: since,
+          dateStop: until,
+          level: "campaign",
+          campaignName: info?.name,
+          status: info?.status,
+        });
+      });
     });
   }
 
-  async getAds(_range: DateRangeInput): Promise<UnifiedAd[]> {
+  async getAds(range: DateRangeInput): Promise<UnifiedAd[]> {
     return this.withReauthMapping(async () => {
-      void _range;
-      // TODO Session 2: GET /ad/get/ + POST /report/integrated/get/ at AUC_AD level,
-      // then normalize via tiktok/normalize.ts. Session 3 adds pixel
-      // conversion attribution (complete_payment + total_purchase_value).
-      console.warn(
-        "[tiktok-adapter] getAds not yet implemented — Session 2 wires the fetcher"
+      // Three parallel fetches — /ad/get/ + AUCTION_AD report + /campaign/get/.
+      // Campaigns feed the per-ad objectiveType + campaignName via the
+      // campaign_id join (TikTok /ad/get/ doesn't expose objective at
+      // the ad row level).
+      const [adRows, insightRows, campaigns] = await Promise.all([
+        fetchTiktokAds(this.accessToken, this.advertiserId, range),
+        fetchTiktokAdInsights(this.accessToken, this.advertiserId, range),
+        fetchTiktokCampaigns(this.accessToken, this.advertiserId),
+      ]);
+
+      const insightLookup = buildInsightLookup(insightRows, "ad_id");
+      const campaignLookup = buildCampaignLookup(campaigns);
+
+      const unifiedAds: UnifiedAdTiktok[] = [];
+      for (const adRow of adRows) {
+        const insightRow = adRow.ad_id
+          ? insightLookup.get(adRow.ad_id)
+          : undefined;
+        const campaignInfo = adRow.campaign_id
+          ? campaignLookup.get(adRow.campaign_id)
+          : undefined;
+        unifiedAds.push(
+          normalizeTiktokAdToUnified(adRow, insightRow, {
+            currency: this.accountInfo.currency,
+            campaignName: campaignInfo?.name,
+            objectiveType: campaignInfo?.objectiveType ?? "",
+          })
+        );
+      }
+
+      // Filter to ads with activity in window — mirrors Meta's
+      // unifiedAds.filter(spend > 0 || impressions > 0) pattern. Keeps
+      // cache lean (IMAA's 201 ads → ~21 with activity per page-1 probe
+      // scan). Dormant ads still exist on the platform but don't
+      // surface in the dashboard's per-period view.
+      return unifiedAds.filter(
+        (ad) => ad.spend > 0 || ad.impressions > 0
       );
-      return [];
     });
   }
 }
