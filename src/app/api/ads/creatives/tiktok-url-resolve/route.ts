@@ -86,6 +86,26 @@ const VALID_KINDS: ReadonlySet<CreativeKind> = new Set<CreativeKind>([
 ]);
 
 /**
+ * Path-B concurrency cap per ADR-020 §ResolveConcurrency (2026-06-01).
+ *
+ * TikTok's /identity/video/info/ doesn't expose a batch form (one
+ * item_id per call), so N path-B ads cost N API calls. The original
+ * §12c §3 design used unbounded `Promise.all` which empirically tripped
+ * TikTok's 40100 rate-limit at the lifetime scale (~110 simultaneous
+ * Spark Ad lookups on IMAA — confirmed via browser DevTools 2026-06-01).
+ *
+ * Cap value math:
+ *   - TikTok documented global cap: 600 req/min = 10 req/s averaged
+ *   - Per-call latency observed ~200-500ms (smoke probe + adapter test)
+ *   - 4 concurrent × 1/0.5s latency ≈ 8 req/s sustained = 480/min
+ *   - 80% utilization of documented cap, 10× lower than the burst that
+ *     triggered 40100 today
+ *   - Combined with the React-layer pagination (visibleCount slice),
+ *     default first page resolves in ~1.5s without hitting the limit
+ */
+const PATH_B_CONCURRENCY = 4;
+
+/**
  * Validate an AdResolveRequest's kind ↔ field consistency.
  * Returns an error reason string if invalid, null if OK.
  * Per-ad-id validation: a bad request entry in batch mode gets
@@ -208,60 +228,78 @@ async function resolveAds(
     }
   }
 
-  // Path B — Promise.all of N /identity/video/info/ calls. TikTok
-  // doesn't expose a batch form for identity-video lookups, so each
-  // Spark Ad costs one API call. Concurrency cap deferred — IMAA's
-  // 17 path-B ads in one grid is well under TikTok's 600 req/min cap.
+  // Path B — chunked /identity/video/info/ calls per ADR-020
+  // §ResolveConcurrency (2026-06-01). TikTok doesn't expose a batch
+  // form for identity-video lookups (one item_id per call), so we
+  // chunk the N path-B ads into windows of PATH_B_CONCURRENCY and
+  // await each window sequentially. At any moment, ≤ PATH_B_CONCURRENCY
+  // calls are in flight, keeping sustained rate ~8 req/s ≈ 480/min
+  // (80% of TikTok's 600/min documented cap, 10× under the burst that
+  // empirically tripped 40100 at lifetime scale).
+  //
+  // Fail-fast on batch-wide errors per §ResolveConcurrency: after each
+  // chunk, if any per-ad result tagged a bubble (rate-limit / reauth),
+  // throw immediately BEFORE starting the next chunk. Continuing to
+  // fire chunks after a 40100 would generate more rate-limited calls
+  // within the same sliding window — same lost time, more wasted quota.
   if (pathBads.length > 0) {
     type PathBResult = {
       ad: AdResolveRequest;
       urls: TikTokCreativeUrls | null;
       error?: string;
       // Tagged when the error must bubble to the outer handler (auth /
-      // rate-limit). The Promise.all return swallows these; we re-throw
-      // after collecting via the throwOnBatchWide tag.
+      // rate-limit). The chunk's Promise.all return swallows these;
+      // we re-throw immediately after each chunk to fail-fast.
       bubble?: unknown;
     };
-    const results: PathBResult[] = await Promise.all(
-      pathBads.map(async (ad): Promise<PathBResult> => {
-        try {
-          const detail = await getIdentityVideoInfo(
-            accessToken,
-            advertiserId,
-            ad.identity_type!,
-            ad.identity_id!,
-            ad.item_id!
-          );
-          if (detail) {
-            return {
-              ad,
-              urls: normalizeIdentityVideoInfoToCreative(detail),
-            };
+    const results: PathBResult[] = [];
+    for (let i = 0; i < pathBads.length; i += PATH_B_CONCURRENCY) {
+      const chunk = pathBads.slice(i, i + PATH_B_CONCURRENCY);
+      const chunkResults: PathBResult[] = await Promise.all(
+        chunk.map(async (ad): Promise<PathBResult> => {
+          try {
+            const detail = await getIdentityVideoInfo(
+              accessToken,
+              advertiserId,
+              ad.identity_type!,
+              ad.identity_id!,
+              ad.item_id!
+            );
+            if (detail) {
+              return {
+                ad,
+                urls: normalizeIdentityVideoInfoToCreative(detail),
+              };
+            }
+            return { ad, urls: null, error: "video_not_found" };
+          } catch (err) {
+            // Tag batch-wide errors for re-throw; mark individual errors
+            // as resolve_failed without killing siblings within the chunk.
+            if (isTiktokRateLimitError(err) || classifyTiktokError(err)) {
+              return { ad, urls: null, bubble: err };
+            }
+            console.warn(
+              `[tiktok-url-resolve] path B fail ad ${ad.ad_id}:`,
+              err instanceof Error ? err.message : "unknown"
+            );
+            return { ad, urls: null, error: "resolve_failed" };
           }
-          return { ad, urls: null, error: "video_not_found" };
-        } catch (err) {
-          // Tag batch-wide errors for re-throw; mark individual errors
-          // as resolve_failed without killing siblings.
-          if (isTiktokRateLimitError(err) || classifyTiktokError(err)) {
-            return { ad, urls: null, bubble: err };
-          }
-          console.warn(
-            `[tiktok-url-resolve] path B fail ad ${ad.ad_id}:`,
-            err instanceof Error ? err.message : "unknown"
-          );
-          return { ad, urls: null, error: "resolve_failed" };
-        }
-      })
-    );
-    // Re-throw the first batch-wide error encountered (rate-limit /
-    // reauth) — these affect the whole TikTok API, not just one ad.
-    const bubbled = results.find((r) => r.bubble);
-    if (bubbled) {
-      if (isTiktokRateLimitError(bubbled.bubble)) throw bubbled.bubble;
-      const reauth = classifyTiktokError(bubbled.bubble);
-      if (reauth) throw reauth;
-      // Defensive: shouldn't happen since the inner try only tags these
-      throw bubbled.bubble;
+        })
+      );
+      results.push(...chunkResults);
+
+      // Fail-fast: throw on the FIRST chunk that bubbles a batch-wide
+      // error. Subsequent chunks are NOT fired — see §ResolveConcurrency
+      // rationale. Per-ad logical failures (video_not_found,
+      // resolve_failed) stay isolated and don't trigger this branch.
+      const bubbled = chunkResults.find((r) => r.bubble);
+      if (bubbled) {
+        if (isTiktokRateLimitError(bubbled.bubble)) throw bubbled.bubble;
+        const reauth = classifyTiktokError(bubbled.bubble);
+        if (reauth) throw reauth;
+        // Defensive: shouldn't happen since the inner try only tags these
+        throw bubbled.bubble;
+      }
     }
     for (const r of results) {
       resolved[r.ad.ad_id] = { kind: r.ad.kind, urls: r.urls };

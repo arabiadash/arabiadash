@@ -2820,7 +2820,27 @@ function CreativesGrid({
   const [selectedAd, setSelectedAd] = useState<UnifiedAd | null>(null);
   const [visibleCount, setVisibleCount] = useState(CREATIVES_PAGE_SIZE);
 
-  // ── Phase 7 / ADR-020 §12c — TikTok URL batch + campaign-ROAS Map ──
+  const filteredAds = useMemo(() => {
+    let result = [...ads];
+    if (statusFilter !== "all") {
+      result = result.filter((ad) => ad.status === statusFilter);
+    }
+    result.sort((a, b) => {
+      const aVal = (a[sortBy] as number) ?? 0;
+      const bVal = (b[sortBy] as number) ?? 0;
+      return bVal - aVal;
+    });
+    return result;
+  }, [ads, statusFilter, sortBy]);
+
+  // Reset pagination when the filtered list identity changes (status filter,
+  // sort change, or upstream ads refresh). Without this, switching from a
+  // long list to a short one could leave visibleCount > filteredAds.length.
+  useEffect(() => {
+    setVisibleCount(CREATIVES_PAGE_SIZE);
+  }, [filteredAds]);
+
+  // ── Phase 7 / ADR-020 §12c + §ResolveConcurrency — TikTok URL batch + campaign-ROAS Map ──
   //
   // CreativesGrid is SHARED across Meta/Google/TikTok tabs. The two
   // hooks below fire on every render (Rules of Hooks — can't be
@@ -2837,20 +2857,35 @@ function CreativesGrid({
   //   + :254-262) — useEffect skip + doFetch early-return + synthetic
   //   noConnection return when accountIds is empty.
   //
-  // Derived from RAW `ads` (not `filteredAds`) so the URL set is stable
-  // across status-filter / sort changes — refetches fire only when
-  // the underlying ad inventory changes.
+  // ⚠️ ORDERING: this block MUST stay AFTER `filteredAds` + the
+  // visibleCount-reset useEffect (the tiktokAds memo depends on both).
+  // Moving it earlier reintroduces the TDZ error caught during the 2f
+  // → §ResolveConcurrency reorder.
+  //
+  // §ResolveConcurrency slice-derive: tiktokAds is derived from the
+  // VISIBLE SLICE of filteredAds, not raw `ads`. This cuts the typical
+  // batch ~10× (20 visible default vs ~194 lifetime total) and combines
+  // with the route's per-chunk concurrency cap = 4 to keep first-page
+  // resolve well under TikTok's 600 req/min cap. "Load more" grows
+  // visibleCount → tiktokAds slice grows → adsKey changes in the hook
+  // → new POST for the bigger slice. REPLACE semantics on each fetch
+  // (the previously-resolved URLs re-fetch) — accepted per ADR;
+  // ~1h URL TTL means re-fetch is harmless for freshness, the
+  // concurrency cap bounds the cost, and abort handling cleanly
+  // cancels mid-resolve when pagination/filter changes happen.
   const tiktokAds = useMemo(
     () =>
-      ads.filter(
-        (a): a is UnifiedAdTiktok => a.ad_type === "TIKTOK_AD"
-      ),
-    [ads]
+      filteredAds
+        .slice(0, visibleCount)
+        .filter((a): a is UnifiedAdTiktok => a.ad_type === "TIKTOK_AD"),
+    [filteredAds, visibleCount]
   );
   // The adapter's getAds normalizer + useProviderAds stamping guarantee
   // accountId is set on every ad row; first ad's accountId is the
   // implicit primary for the single-account v1 constraint (the multi-
-  // account amber warning already lives at the tab level).
+  // account amber warning already lives at the tab level). On the
+  // TikTok tab specifically, ALL ads are TikTok — so the slice always
+  // contains TikTok ads with accountId stamped, no edge case.
   const tiktokAccountId = tiktokAds[0]?.accountId ?? "";
   const hasTiktokAds = tiktokAds.length > 0 && !!tiktokAccountId;
 
@@ -2882,26 +2917,6 @@ function CreativesGrid({
     }
     return m;
   }, [tiktokCampaigns.insights]);
-
-  const filteredAds = useMemo(() => {
-    let result = [...ads];
-    if (statusFilter !== "all") {
-      result = result.filter((ad) => ad.status === statusFilter);
-    }
-    result.sort((a, b) => {
-      const aVal = (a[sortBy] as number) ?? 0;
-      const bVal = (b[sortBy] as number) ?? 0;
-      return bVal - aVal;
-    });
-    return result;
-  }, [ads, statusFilter, sortBy]);
-
-  // Reset pagination when the filtered list identity changes (status filter,
-  // sort change, or upstream ads refresh). Without this, switching from a
-  // long list to a short one could leave visibleCount > filteredAds.length.
-  useEffect(() => {
-    setVisibleCount(CREATIVES_PAGE_SIZE);
-  }, [filteredAds]);
 
   if (loading) {
     return (

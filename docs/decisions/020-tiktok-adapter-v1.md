@@ -1447,3 +1447,255 @@ This §StatusCollapse **PRESERVES** unchanged:
 - The §Lifetime chunked-fetch path (status is computed after the chunked merge, on the merged rows fed through `normalizeReportRowToInsight`)
 - Memory #28's cache-bump pre-push protocol (still applies — no schema change here, but the combined DELETE is the deploy-day action)
 - The `pausedReason` metadata-field escape hatch is documented as an option but explicitly NOT in scope (TikTok-specific paused-reason precision can be added later without touching the status union)
+
+## §ResolveConcurrency — Lazy pagination + bounded concurrency for path-B URL resolution (2026-06-01, supersedes the unbounded-Promise.all design assumption in §12c §3 path-B resolver + the resolve route's deferred-cap comment)
+
+The §12c URL-resolve route ([route.ts:213-214](../../src/app/api/ads/creatives/tiktok-url-resolve/route.ts#L213-L214)) deliberately deferred concurrency capping with the comment:
+
+> Concurrency cap deferred — IMAA's 17 path-B ads in one grid is well under TikTok's 600 req/min cap.
+
+This held for the 30d view (~29 ads, ~17 path-B) used during 2c verification. Live testing on the lifetime view (~194 ads, ~110-115 path-B Spark Ads) violated the assumption: ~110 simultaneous `/identity/video/info/` calls trip TikTok's QPS protection, returning `code: 40100` on some calls, which the route's tagged-bubble path re-throws as a batch-wide 429 → empty urls map → all TikTok cards rendered as STATE 3/4 placeholders instead of real posters.
+
+This amendment moves the resolve path to **defense in depth** — pagination at the React layer (resolve only visible cards) + a bounded concurrency cap at the route layer (protect against any large batch regardless of UI behavior).
+
+### Live evidence (the 429)
+
+Browser DevTools on the user's preview retest at 2026-06-01:
+
+```
+POST /api/ads/creatives/tiktok-url-resolve
+→ HTTP 429
+Body: { error: "rate_limited", message: "تم تجاوز الحد المسموح للاستفسارات من TikTok..." }
+```
+
+Combined with the existing `_tiktok-adapter-test.mts` probe and the §StatusCollapse bucket-probe outputs:
+
+| Window | Total ads | Path B (Spark Ads → parallel `/identity/video/info/` calls) | Route outcome |
+|--------|-----------|--------------------------------------------------------------|---------------|
+| 30d (2c verification + smoke-resolve) | 29 | ~17 | ✓ all URLs resolve cleanly |
+| **lifetime (2f live)** | ~194 | **~110-115** | ✗ batch-wide 429, all cards placeholder |
+
+The 6.5× increase in simultaneous calls crossed TikTok's burst tolerance.
+
+### TikTok rate-limit reality (web-research-verified)
+
+| Surface | Documented value | Source |
+|---------|------------------|--------|
+| Marketing API global default | **600 requests / minute** (= **10 req/s** averaged) | TikTok official docs cited across multiple third-party sources |
+| Rate-limit error shape | HTTP 200 + body `code: 40100` (NOT HTTP 429 from TikTok) | TikTok docs + Airbyte source connector PR #46676 |
+| Calculation window | 1-minute sliding window | TikTok docs |
+| Per-endpoint specifics for v1.3 | NOT publicly enumerated | Searched; tucked behind portal auth |
+
+Our route maps the upstream `code: 40100` to HTTP 429 + `error: "rate_limited"` via `mapErrorToResponse` ([route.ts:383-391](../../src/app/api/ads/creatives/tiktok-url-resolve/route.ts#L383-L391)). The 429 the browser sees is OUR mapping, not what TikTok emits.
+
+### Why 110 simultaneous calls trip 600/min
+
+The naive arithmetic says 110 calls < 600/min so it should be fine. Two factors break that intuition:
+
+1. **600/min is a SUSTAINED average over a 1-minute sliding window.** 110 calls firing in the same ~500ms burst is 220 req/s — wildly above the documented 10 req/s average, regardless of what happens in the rest of the minute. TikTok's QPS protection kicks in on the burst, not the minute-rolling average.
+2. **TikTok's actual burst threshold is NOT documented publicly.** Empirically, the burst that 110 simultaneous calls produced was rejected. The per-endpoint limit for `/identity/video/info/` could be tighter than the global 600/min (their docs hide per-endpoint details behind login).
+
+So the safe design is: cap our concurrent calls such that even worst-case-fast TikTok responses can't push us above ~5 req/s average. That gives 10× headroom against the published global limit and respects whatever undocumented burst threshold exists.
+
+### Decision
+
+**Layer 1 — Lazy pagination at the React layer (CreativesGrid):**
+
+The batch hook's `ads` input changes from `tiktokAds` (all TikTok ads in the grid, e.g. 194) to `tiktokAds.slice(0, visibleCount)` (the visible page, e.g. 20). When the user clicks "Load more" → `visibleCount` grows → `tiktokAds` slice grows → `adsKey` in the hook changes → new POST fires for the bigger ad set.
+
+This matches the user's actual viewing pattern: they see and interact with the first page of cards before scrolling/paginating. Resolving URLs for cards they never see is wasteful — both API quota and our own infrastructure.
+
+**Layer 2 — Bounded concurrency at the route layer (`resolveAds` path-B):**
+
+Replace the unbounded `Promise.all(pathBads.map(...))` with a chunked / `p-limit`-style loop that caps in-flight `/identity/video/info/` calls at **4 simultaneous**. Implementation can be a simple manual loop (no new dependency) — chunks of 4, awaited sequentially.
+
+Numerical justification:
+- Per-call latency observed ~200-500ms (`_tiktok-resolve-smoke.mts` verification + IMAA adapter test)
+- 4 concurrent × 1/0.5s latency ≈ **8 req/s sustained** = 480/min
+- Comfortably under the documented 600/min global cap (80% utilization)
+- 10× lower than the burst that triggered 40100 today
+- Even at 0.2s per-call (best case) → 20 req/s burst — still well under TikTok's empirical break point of 100+ simultaneous
+
+**Why both — neither alone is sufficient:**
+
+| Layer | What it solves alone | What it doesn't solve |
+|-------|---------------------|----------------------|
+| (A) Concurrency cap alone | Protects against ANY large batch (1000-ad customer, future feature spike, anything) | Lifetime view still resolves 110 URLs upfront → ~14s perceived latency for cards loading |
+| (B) Pagination alone | Cuts the typical batch ~10× (20 visible instead of 194) | Route still fragile — bigger `visibleCount` default OR a future feature passing more ads re-breaks it |
+| **(A) + (B) together** | First page loads fast (20 ads / 4 concurrent ≈ 3s); rest paginate incrementally; route bounded regardless of input size | — |
+
+This is **design-for-thousands** (Memory #29 echo). A future customer with a 1000-ad lifetime won't break the route — `(A)` bounds the cost; `(B)` keeps the first-page experience fast.
+
+### Hook behavior on pagination — REPLACE not MERGE
+
+The batch hook ([use-tiktok-creative-urls.ts:250-254](../../src/lib/hooks/use-tiktok-creative-urls.ts#L250-L254)) currently does:
+
+```typescript
+const nextUrls: Record<string, TikTokCreativeUrls | null> = {};
+for (const [adId, entry] of Object.entries(body.resolved ?? {})) {
+  nextUrls[adId] = entry?.urls ?? null;
+}
+setUrls(nextUrls);   // ← REPLACES entire map
+```
+
+When pagination grows `visibleCount` from 20 → 40 → 60, the hook fires three times:
+
+- Fetch 1: 20 ads, resolves 20 URLs, `urls = {ad1: ..., ..., ad20: ...}`
+- Fetch 2: 40 ads (20 newly added + 20 previously resolved), resolves 40 URLs, `urls = {ad1: ..., ..., ad40: ...}` (the previous 20 are RE-FETCHED)
+- Fetch 3: 60 ads, all 60 re-fetched
+
+This is wasteful — the previously-resolved URLs are re-resolved on each "Load more" click.
+
+**Decision: accept the re-fetch.** Reasons:
+- URLs have a ~1 hour TTL — the previously-resolved ones may have started decaying anyway; re-resolving them is harmless for freshness
+- Layer (A)'s concurrency cap keeps the cost bounded: 40 ads / 4 concurrent = 10 sequential batches × ~0.5s = ~5s per "Load more"; not great but acceptable
+- Implementing merge-vs-replace at the hook layer adds complexity (tracking previously-resolved keys, partial updates, abort handling for incremental fetches) for what's effectively a paginated UI that users click ~1-3 times max per session
+- The cleaner long-term answer is incremental fetch (only request the new URLs), but that requires hook + route + UI changes that exceed this amendment's scope
+
+If telemetry later shows the "Load more" friction matters, a future amendment can introduce incremental fetch via a separate `adIds: string[]` URL hook variant. For v1, REPLACE is honest and bounded.
+
+### Client-side abort — verified working; server-side keep-running flagged as known limitation
+
+Client-side cancellation is in place ([use-tiktok-creative-urls.ts:223-226 + 237 + 258-260 + 278-280](../../src/lib/hooks/use-tiktok-creative-urls.ts#L223-L280)). When `adsKey` changes mid-resolve (e.g. the user clicks "Load more" or changes a filter during a long-running batch), the hook aborts the previous controller, cancels the in-flight HTTP request, and the request-token guard prevents stale writes if the cancelled request somehow completes. The browser stops waiting on the old response.
+
+**Known limitation (acceptable for v1)**: client-side abort cancels the HTTP request but the SERVER-SIDE route invocation continues running until it returns. The route doesn't wire `request.signal` into its chunked loop, so cancelled requests keep consuming TikTok API quota on the server. If a user rapidly spams "Load more" N times during a long resolve, you could have N overlapping route invocations each chewing through their chunks → up to `N × PATH_B_CONCURRENCY` simultaneous TikTok calls. Realistic user behavior doesn't spam Load-More repeatedly (each click grows the count by 20), and the per-route cap bounds the cost even when overlap occurs. Wiring `request.signal` through the chunked loop is a clean future enhancement; flagged for a follow-up amendment if production telemetry shows this matters.
+
+### Concurrency cap implementation shape (route-side)
+
+Replace this block in `resolveAds` (path-B handler):
+
+```typescript
+// CURRENT (unbounded):
+const results: PathBResult[] = await Promise.all(
+  pathBads.map(async (ad): Promise<PathBResult> => { ... })
+);
+// ... after-loop bubble check ...
+```
+
+With (sketch):
+
+```typescript
+// NEW: chunked sequential batches, 4 concurrent per batch, FAIL-FAST
+const PATH_B_CONCURRENCY = 4;
+const results: PathBResult[] = [];
+for (let i = 0; i < pathBads.length; i += PATH_B_CONCURRENCY) {
+  const chunk = pathBads.slice(i, i + PATH_B_CONCURRENCY);
+  const chunkResults = await Promise.all(
+    chunk.map(async (ad): Promise<PathBResult> => { ... existing per-ad logic unchanged ... })
+  );
+  results.push(...chunkResults);
+
+  // Fail-fast: if any per-ad result in THIS chunk bubbled a batch-wide
+  // error (rate-limit 40100 / reauth), throw immediately BEFORE
+  // starting the next chunk. Subsequent chunks are NOT fired.
+  const bubbled = chunkResults.find((r) => r.bubble);
+  if (bubbled) {
+    if (isTiktokRateLimitError(bubbled.bubble)) throw bubbled.bubble;
+    const reauth = classifyTiktokError(bubbled.bubble);
+    if (reauth) throw reauth;
+    throw bubbled.bubble;
+  }
+}
+```
+
+No new dependency — simple chunk loop. The per-ad try/catch + bubble-tag pattern is preserved unchanged inside the inner map.
+
+**Fail-fast decision (in-loop bubble check, NOT after-loop):**
+
+When TikTok returns `code: 40100` on a chunk, the route MUST stop firing subsequent chunks immediately. Reasons:
+
+- **The original unbounded design IS the bug.** Preserving "matches current semantics" (after-loop check) would let the route fire chunks 2-N after chunk 1 rate-limited — generating 100+ more rate-limited calls in the same sliding window for no benefit (TikTok's already throttling us; more calls won't get through).
+- **Rate-limit signals are global to the user-session, not per-chunk.** A 40100 on chunk 1 means subsequent chunks will also 40100. Continuing to call wastes API quota that's already tight, and may extend the rate-limit window (some platforms penalize repeated rate-limit-hits).
+- **Wasted-quota math at lifetime scale**: if chunk 1 of 28 rate-limits, after-loop check fires 27 more chunks × 4 calls = 108 more rate-limited calls. In-loop check fires 0 more. Pure win, no downside.
+
+The defensive `throw bubbled.bubble` "shouldn't happen" branch is preserved at the same priority (after rate-limit + reauth checks).
+
+### Pagination implementation shape (CreativesGrid)
+
+Replace:
+
+```typescript
+// CURRENT (resolves all):
+const tiktokAds = useMemo(
+  () => ads.filter((a): a is UnifiedAdTiktok => a.ad_type === "TIKTOK_AD"),
+  [ads]
+);
+```
+
+With:
+
+```typescript
+// NEW: resolves only the visible slice
+const tiktokAds = useMemo(
+  () =>
+    filteredAds
+      .slice(0, visibleCount)
+      .filter((a): a is UnifiedAdTiktok => a.ad_type === "TIKTOK_AD"),
+  [filteredAds, visibleCount]
+);
+```
+
+The dep change (`ads` → `filteredAds`, `visibleCount`) means:
+- Filter / sort changes RE-RESOLVE (acceptable — `filteredAds` identity changed and the visible set is genuinely different)
+- "Load more" RE-RESOLVES (the REPLACE behavior documented above)
+
+The hook's existing `adsKey` (sorted comma-join of ad ids) correctly captures these changes — it'll re-fire only when the actual set of visible TikTok ads changes, not on incidental re-renders.
+
+### Performance budget after this amendment
+
+| Scenario | Path-B ads in batch | Sequential batches @ 4 concurrent | Per-call latency 0.5s avg | Total resolve time |
+|----------|---------------------|-----------------------------------|---------------------------|---------------------|
+| IMAA 30d (default visible 20, ~12 path-B) | 12 | 3 | 0.5s | **~1.5s** |
+| IMAA lifetime, default page (20 visible, ~12 path-B) | 12 | 3 | 0.5s | **~1.5s** |
+| IMAA lifetime, "Load all 194" clicked (~110 path-B) | 110 | 28 | 0.5s | **~14s** |
+| Hypothetical 1000-ad lifetime customer (~600 path-B) | 600 | 150 | 0.5s | ~75s |
+
+The "load all" worst case becomes a visible loading state for ~14 seconds rather than a 429 + permanent placeholders. The 1000-ad customer scenario is a real future concern — they'd want either virtualized rendering or a "this view is too large, narrow your filter" hint. **Out of scope for this amendment**; flagged for a future Memory-#29-style design pass.
+
+### Implementation scope (files that change vs files that don't)
+
+**Files that change:**
+
+| File | Change | LOC est. |
+|------|--------|----------|
+| `src/app/api/ads/creatives/tiktok-url-resolve/route.ts` | Replace path-B `Promise.all` with chunked-batches loop at `PATH_B_CONCURRENCY = 4`. Update the deferred-cap comment at line 213-214. | ~10 |
+| `src/app/dashboard/reports/ReportsClient.tsx` | Change `tiktokAds` memo to derive from `filteredAds.slice(0, visibleCount)`. Update the jsdoc explaining the lazy-resolve trade-off. | ~5 |
+| `docs/decisions/020-tiktok-adapter-v1.md` | This amendment | — |
+
+**Files that explicitly do NOT change:**
+
+| File | Why |
+|------|-----|
+| `src/lib/hooks/use-tiktok-creative-urls.ts` | Hook stays REPLACE — incremental fetch is a separate future amendment if telemetry shows pagination friction. Abort handling already correct + complete (3 layers, verified). |
+| `src/lib/tiktok/api.ts` | Per-call API surface unchanged |
+| `src/lib/tiktok/normalize.ts` | URL parsing unchanged |
+| `src/components/creatives/TikTokCreativeCard.tsx` | 4-state dispatch unchanged |
+| `src/components/creatives/TikTokAdDetailModal.tsx` | Modal's single-fetch path (useTiktokCreativeUrl, not -Batch) unchanged |
+
+### What the user sees after this lands
+
+| Before | After |
+|--------|-------|
+| Lifetime view: 429 → all cards placeholder | Lifetime view default page (20 visible): first 20 cards resolve in ~1.5s → real posters; rest paginate-then-resolve incrementally |
+| 30d view: works | 30d view: unchanged behavior, slightly bounded route (no perceptible difference) |
+| Modal still works (uses single-fetch, not batch) | Modal still works (single-fetch unchanged) |
+| Any TikTok customer with >50 path-B ads → broken | Any TikTok customer up to 1000+ path-B ads → bounded, works (slower for large batches) |
+
+### Supersession + preservation
+
+This §ResolveConcurrency amendment **SUPERSEDES**:
+
+- §12c §3's unbounded `Promise.all` design for path-B URL resolution. Path A's batched single call stays correct (TikTok's `/file/video/ad/info/` natively accepts a `video_ids[]` array; no concurrency change needed for path A).
+- The deferred-cap comment at [route.ts:213-214](../../src/app/api/ads/creatives/tiktok-url-resolve/route.ts#L213-L214). Concurrency is now bounded with an explicit comment justifying the cap value.
+- The 2f decision to feed ALL TikTok ads into the batch hook (the `tiktokAds` memo currently derives from raw `ads`). The new memo derives from the `filteredAds.slice(0, visibleCount)` view.
+
+This §ResolveConcurrency **PRESERVES** unchanged:
+
+- §12c §3's per-kind grouping in `resolveAds` (A / B / C / UNKNOWN dispatch)
+- §12c §3's tagged-bubble pattern for batch-wide errors (rate-limit, reauth) — works identically with chunked batches; the first chunk to encounter a 40100 still bubbles correctly
+- The hook's REPLACE-on-fetch behavior — flagged as a known trade-off but accepted for v1 scope
+- The hook's `adsKey` derived dep (sorted comma-join of ad.ids) — already correctly handles slice changes
+- The hook's 3-layer abort handling (abort-before-start + signal-wired fetch + request-token guard) — verified complete + correct, no change needed
+- The route's auth + ownership guards (`authorizeAndGetCreds`) — unchanged
+- The §2b revenue metric correction + §StatusCollapse status fix — orthogonal concerns, not touched
+- The modal's single-ad fetch path (`useTiktokCreativeUrl`, not -Batch) — single call, no concurrency issue, no change needed
