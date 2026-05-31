@@ -718,3 +718,197 @@ These give v2 a rich engagement story (early-hook rate, completion quartiles, re
 | `AUCTION_AD` | Per-ad rows for TikTokCreativeCard grid + AdDetailModal | `["ad_id"]` |
 
 Note the **`AUCTION_*` prefix** is the v1.3 convention — NOT `AUC_*` as session2-plan §1.1 originally documented. The session2-plan abbreviation was wrong; verified via TikTok SDK source code + empirical probe.
+
+## §12c — Creative-card architecture, three paths + URL expiry (SUPERSEDES §Decision 12 static-URL + single-path assumptions, 2026-05-31)
+
+§Decision 12 assumed a single creative path (one `/file/video/ad/info/` call yielding a stable poster URL), modeled on the M-PMax YouTube external-link precedent. Empirical creative probes against IMAA (advertiser `7327982125339328514`, 201 ads) proved the real surface is materially more complex. This amendment rewrites the creative architecture to match v1.3 reality. Source: [docs/recon/tiktok-creative-findings-2026-05-31.md](../recon/tiktok-creative-findings-2026-05-31.md).
+
+### 1. THREE creative paths, discriminated by `identity_type`
+
+The ad's `identity_type` field is the canonical discriminator. `normalize.ts` MUST route on it.
+
+| Path | Detection rule | State | Visual source endpoint |
+|------|----------------|:-----:|------------------------|
+| **A — Direct video upload** | `video_id` populated AND `identity_type=BC_AUTH_TT` (UUID identity_id) | ✓ FULLY RESOLVED | `/file/video/ad/info/` → `data.list[].video_cover_url` (poster JPG) + `data.list[].preview_url` (playable MP4) |
+| **B — Spark Ad** (boosted organic post) | `tiktok_item_id` populated AND `video_id=null` AND `identity_type=AUTH_CODE` (numeric identity_id) | ✓ FULLY RESOLVED | `/identity/video/info/` → `data.video_detail.video_info.poster_url` (poster) + `data.video_detail.video_info.url` (playable) |
+| **C — Pure image ad** | `image_ids` populated AND `video_id=null` AND `tiktok_item_id=null` | ⚠️ DEFERRED to v2 follow-up | `/file/image/ad/info/` exists + accepts JSON-array `image_ids` query (multi format rejected with code 40002). Response shape UNVERIFIED — IMAA has zero pure-image ads; the only image_id probed (a video poster from a path-A ad) returned code 40001 "Insufficient permissions for some images" — different ACL surface for video-cover vs creative images. |
+
+**Empirical share** (IMAA, 201 ads scanned across 5 pages): path A and path B both common; path C did not appear. Saudi ecommerce TikTok activity is overwhelmingly video. Paths A + B are first-class for v1; path C is rare-but-possible and handled defensively (see §3 below).
+
+`identity_type` values observed in v1.3 on Saudi accounts:
+- `AUTH_CODE` — Spark Ad authorization (numeric `identity_id`, `tiktok_item_id` populated)
+- `BC_AUTH_TT` — Business Center authorized TikTok account (UUID `identity_id`, `video_id` populated)
+- Other documented values not yet observed (`TT_USER`, `CUSTOMIZED_USER`) — `normalize.ts` handles defensively (defaults to path C placeholder when unrecognized + video_id is also null)
+
+### 2. URL EXPIRY — critical architecture correction (SUPERSEDES §Decision 12's static-URL assumption)
+
+**Both** video endpoints (path A + path B) return **signed URLs that expire in hours**:
+
+| Field | Expiry signal | Observed TTL |
+|-------|---------------|--------------|
+| Path A `data.list[].preview_url` | Explicit `preview_url_expire_time` field (datetime string) + `vvpl=1&l=<request_id>` URL params | ~hours from issuance |
+| Path A `data.list[].video_cover_url` | URL query params `x-expires=<epoch>&x-signature=<hmac>` | ~hours from issuance |
+| Path B `data.video_detail.video_info.url` | URL query params (same signed-CDN pattern) | ~hours from issuance |
+| Path B `data.video_detail.video_info.poster_url` | URL query params `x-expires=<epoch>&x-signature=<hmac>` | ~hours from issuance |
+
+§Decision 12's `posterUrl` + `tiktokVideoUrl` design assumed cacheable static URLs. **That's wrong.** Storing signed URLs in `creatives_cache` (30-min fresh / 24-hr stale per the SWR convention) means cached URLs will 403 well before the cache row goes stale.
+
+**Corrected architecture** (storage):
+
+- `creatives_cache` stores ONLY the resolution inputs (IDs + identity tuple), never the URLs:
+  - Path A row: `{ ad_id, video_id, identity_type: "BC_AUTH_TT", ...metrics, ...metadata }`
+  - Path B row: `{ ad_id, tiktok_item_id, identity_type: "AUTH_CODE", identity_id, ...metrics, ...metadata }`
+  - Path C row: `{ ad_id, image_ids[], ...metrics, ...metadata }`
+
+**Corrected architecture** (URL resolution at render time):
+
+The TikTokCreativeCard renders trigger a SECOND server call to resolve fresh URLs:
+
+```
+TikTokCreativeCard mount
+  → GET /api/ads/creatives/tiktok-url-resolve?ad_id=X
+       → server reads creatives_cache row for ad_id=X
+       → routes by identity_type:
+            BC_AUTH_TT → /file/video/ad/info/ with video_id
+            AUTH_CODE  → /identity/video/info/ with (identity_type, identity_id, item_id)
+       → returns fresh posterUrl + playableUrl
+  → card renders the poster image
+```
+
+Adds **1 extra API call per card render** — accepted tradeoff to eliminate the signed-URL-expiry footgun. Matches the established Google/Meta thin-proxy precedent (Meta's discover already follows this "re-fetch live, don't cache transient state" pattern per ADR-017's Meta callback comment block).
+
+Lazy-load coupling: the per-card URL resolve fits cleanly into the ADR-019 (M9.1) lazy-load architecture — URL resolution happens only when the card actually mounts (visible in viewport / detail modal open), not eagerly across the whole grid. Implementation guidance: the resolver route SHOULD support a batch parameter so the eager grid view can resolve N URLs in one round-trip; the detail modal uses the single-ad form.
+
+### 3. TWO `normalize.ts` mappers — one per video endpoint
+
+`src/lib/tiktok/normalize.ts` must implement TWO video-info mapping functions. Different read paths, same output shape (`UnifiedAdTiktok.type_data`):
+
+```typescript
+// Path A — direct video upload
+function normalizeFileVideoAdInfoToCreative(
+  row: FileVideoAdInfoRow  // from /file/video/ad/info/ data.list[]
+): TikTokCreativeUrls {
+  return {
+    posterUrl: row.video_cover_url,
+    playableUrl: row.preview_url,
+    expiresAt: new Date(row.preview_url_expire_time),
+    duration: row.duration,
+    width: row.width,
+    height: row.height,
+  };
+}
+
+// Path B — Spark Ad
+function normalizeIdentityVideoInfoToCreative(
+  detail: IdentityVideoDetail  // from /identity/video/info/ data.video_detail
+): TikTokCreativeUrls {
+  return {
+    posterUrl: detail.video_info.poster_url,
+    playableUrl: detail.video_info.url,
+    expiresAt: parseExpiresFromXExpiresQueryParam(detail.video_info.url),
+    duration: detail.video_info.duration,
+    width: detail.video_info.width,
+    height: detail.video_info.height,
+    caption: detail.text,                     // bonus, path B only — full post caption
+    itemType: detail.item_type,                // "VIDEO" | "CAROUSEL"
+    authStatus: detail.auth_info?.ad_auth_status,
+  };
+}
+```
+
+The `TiktokAdapter` (`src/lib/ads/providers/tiktok.ts`) routes each ad's resolve request to the correct mapper based on the cached `identity_type` value.
+
+`UnifiedAdTiktok.type_data.videoViews` (the field defined in §Decision 12) remains as defined — sourced from `metrics.video_play_actions` per the report-shape findings amendment §1, not from any creative endpoint. The two changes are orthogonal: report-shape findings fixed the metric name; this amendment fixes the URL resolution model.
+
+### 4. Defensive field handling — `/ad/get/` has THREE failure modes per field
+
+Empirical probes surfaced three distinct ways `/ad/get/` handles fields:
+
+| Mode | Example | Behavior |
+|------|---------|----------|
+| Valid + returned | `ad_id`, `ad_name`, `video_id`, `image_ids` | Field name accepted, value present in response (may be `null` or `[]` when no value applies) |
+| 40002 hard reject | `status` (renamed in v1.3), `creative_material` (does not exist) | Whole request fails with envelope code `40002` + error message naming the invalid field |
+| Silently dropped | `ad_format`, `call_to_action`, `call_to_action_id`, `creative_type`, `image_mode` on Spark Ads | Field name in TikTok's official allowed-fields list, accepted without error, but key is ABSENT from the response (no `undefined` / `null` — literally not in the response object) |
+
+Mode 3 is the dangerous one — code assuming "the field is in the allowed list, so it'll be there" produces silent undefined-bugs. **`normalize.ts` MUST treat all `/ad/get/` fields as optional/defensive — every read uses `?.` + nullish-coalesce fallbacks. Never assume presence.**
+
+Pattern:
+
+```typescript
+// CORRECT — defensive
+const adFormat = ad?.ad_format ?? null;
+const callToAction = ad?.call_to_action ?? null;
+
+// WRONG — assumes presence
+const adFormat: string = ad.ad_format;  // type-safe but RUNTIME UNDEFINED on Spark Ads
+```
+
+This applies to `/ad/get/` specifically. `/file/video/ad/info/` + `/identity/video/info/` are stricter — when they return code 0, the documented fields are present.
+
+### 5. Defensive fallback for path C (deferred image-ad support)
+
+When `normalize.ts` detects an ad matching path C (image_ids populated, no video, no tiktok_item_id, identity_type doesn't match A/B routing), the TikTokCreativeCard renders:
+
+1. **Image placeholder block** (neutral background + camera icon) instead of a real preview
+2. Standard metric footer (spend / impressions / clicks / CTR / purchases / revenue / ROAS)
+3. Ad metadata header (ad_name, ad_text, landing_page_url)
+4. Arabic footer note: `"صورة الإعلان غير متوفرة في المعاينة"` ("Ad image not available in preview")
+5. NO "View on TikTok" external link — image ads don't have a tiktok.com public URL (item_id is null)
+6. Vercel log signal: `[tiktok-creative] path C ad encountered, image rendering deferred: ${ad_id}` — drives the v2 promotion timing
+
+Promotion to first-class when a real path C ad appears:
+- Vercel logs surface the `[tiktok-creative]` signal
+- Run a one-shot probe against that customer's `image_ids` (a TRUE direct-uploaded image, not a video cover — different ACL)
+- Probe should return code 0 with the response shape (likely `data.list[].image_url` + signed-URL pattern)
+- Add a third `normalize.ts` mapper + third TikTokCreativeCard render branch + ADR-020 amendment at that time
+
+### 6. "View on TikTok" link — path B only
+
+| Path | "View on TikTok" link | Source |
+|------|----------------------|--------|
+| A | NO | Direct uploads have no `tiktok_item_id` → no public tiktok.com URL exists |
+| B | YES | `https://www.tiktok.com/player/v1/<tiktok_item_id>` — embed-player URL pattern, no username lookup needed, always works for any valid item_id |
+| C | NO | Same as A — no item_id |
+
+The embed player URL replaces the original §Decision 11 "share_url" plan (none of the explored endpoints actually return a `share_url` field; the constructed embed URL is the only deterministic option without resolving the source creator's `@username` via `/identity/get/`).
+
+### 7. Supersession scope + items preserved
+
+This §12c **SUPERSEDES**:
+
+- §Decision 11's "external link via share_url" — no `share_url` is returned by any endpoint; the embed-player URL replaces it (path B only)
+- §Decision 12's single-path video model — three paths now required (A + B + deferred C)
+- §Decision 12's static-URL caching assumption — URLs are signed/expiring; IDs-only caching with per-render resolution required
+- §Decision 12's `creative_material` nested-object assumption (already nominally superseded by Empirical Amendment §15c findings, restated here for the discriminator-routing context)
+
+This §12c **PRESERVES** unchanged:
+
+- §Decision 12's `UnifiedAdTiktok.type_data` shape — `videoViews?: number` field remains (sourced from `metrics.video_play_actions` per the report-shape amendment §1)
+- §Decision 12's 9:16 vertical aspect ratio for video preview (empirically confirmed: width=1080, height=1920 in both path A and path B responses)
+- §Decision 12's "no iframe embed" stance for the EMBEDDED video player on path A. (Path B's embed-iframe via `tiktok.com/player/v1/<item_id>` is the "View on TikTok" link target opened in new tab, NOT an in-card iframe — distinct concern.)
+
+### 8. Implementation impact on Session 2 Commit 2
+
+This amendment expands Session 2 Commit 2's scope vs the original session2-plan §5:
+
+| New surface | What |
+|-------------|------|
+| `src/lib/tiktok/api.ts` | Add `getIdentityVideoInfo({advertiser_id, identity_type, identity_id, item_id})` — the path B endpoint helper. Plus `getFileImageAdInfo` placeholder returning a "deferred" sentinel (path C handler). |
+| `src/lib/tiktok/normalize.ts` | TWO video mappers (`normalizeFileVideoAdInfoToCreative` + `normalizeIdentityVideoInfoToCreative`) — different input types, same output shape. Plus a `routeCreativeByIdentityType` dispatcher consumed by the URL-resolve route. |
+| `src/app/api/ads/creatives/tiktok-url-resolve/route.ts` | NEW thin route — reads creatives_cache row, routes by identity_type, calls the matching video endpoint, returns fresh URLs. Single-ad + batch forms. |
+| `src/components/creatives/TikTokCreativeCard.tsx` | THREE render branches: A (with playable + poster + no "View on TikTok"), B (with playable + poster + embed-iframe "View on TikTok"), C (placeholder + Arabic message + log signal). |
+| `src/app/dashboard/reports/ReportsClient.tsx` | TikTok tab wires the URL-resolve route into the lazy-load layer (per ADR-019) — resolve happens on card mount, not eager grid load. |
+
+Cache schema bump (`creatives_cache` v13 → v14) covers the storage shape change: rows now carry `{ identity_type, identity_id, tiktok_item_id }` triple for path B routing. Per Memory #28 pre-push protocol — verify all 3 providers (Meta + Google + TikTok) fetch clean post-bump before push.
+
+Net LOC estimate revision (vs session2-plan §5's ~1,920): the URL-resolve route + path-routing dispatcher + 3-branch TikTokCreativeCard add roughly +300 LOC to the original estimate. New total estimate: ~2,200 LOC for Commit 2.
+
+### 9. Source-of-truth references
+
+This amendment's findings derive from these probe runs (preserved in `scripts/` per ADR-020 §18 disposition-B):
+
+- `_tiktok-spark-creative.mjs` — identity_type discrimination + video_id hunt
+- `_tiktok-final-shapes.mjs` — `/identity/video/info/` shape (path B) + `/file/image/ad/info/` request-shape-only (path C deferred)
+- `_tiktok-creative-probe.mjs` — `/file/video/ad/info/` shape (path A) + `/ad/get/` field behavior (three failure modes)
+
+Full raw response evidence catalogued in [docs/recon/tiktok-creative-findings-2026-05-31.md](../recon/tiktok-creative-findings-2026-05-31.md) — that recon doc is canonical for the verbatim JSON shapes; this amendment is the architectural-decision distillation.
