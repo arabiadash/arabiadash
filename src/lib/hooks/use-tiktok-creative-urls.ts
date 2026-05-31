@@ -1,0 +1,393 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { UnifiedAdTiktok } from "@/lib/ads/types";
+import type { TikTokCreativeUrls } from "@/lib/tiktok/normalize";
+import {
+  buildAdResolveRequest,
+  type AdResolveRequest,
+} from "@/lib/tiktok/url-resolve";
+
+/**
+ * useTiktokCreativeUrls hooks per ADR-020 §12c §2.
+ *
+ * Resolves SHORT-LIVED signed CDN URLs for TikTok creatives on demand.
+ * URLs expire in ~1 hour (live-verified 2026-05-31 smoke test), so this
+ * hook is the FIRST on-mount async URL-resolution pattern in the
+ * dashboard — Meta/Google use eager-fetched URLs from their creatives
+ * payload, but TikTok's signed URLs would 403 within an hour of cache
+ * write, so we resolve on every render cycle (tab mount + modal open).
+ *
+ * Architecture (per ADR-020 §12c §2 + 2c route):
+ *   - creatives_cache stores ONLY discriminators (videoId, tiktok_item_id,
+ *     identity_type, identity_id)
+ *   - These hooks call /api/ads/creatives/tiktok-url-resolve at render
+ *     time, the route fetches fresh signed URLs from TikTok, returns
+ *     them to the client which uses them immediately
+ *   - Resolved URLs are kept in component state, used immediately, then
+ *     discarded on unmount (no hook-layer cache; the 1-hour TTL doesn't
+ *     justify cross-mount memoization)
+ *
+ * Snapchat (Phase 8) reuse note:
+ *   This is the first instance of the on-mount URL-resolution pattern.
+ *   Snapchat will likely face the same signed-URL TTL issue (most ad
+ *   platforms use signed CDNs for creative media). When Phase 8 lands,
+ *   evaluate extracting a generic
+ *   `useExpiringUrlResolver<TPayload, TResult>` factory — but DON'T
+ *   pre-generalize now (Memory #27 long-term-fit principle: one
+ *   instance isn't enough to know the abstraction shape; wait for the
+ *   second platform to clarify it).
+ *
+ * AbortController + request-token guard mirror useSearchTerms /
+ * useKeywords per ADR-019 §6 (the unmount-race gate). AbortError is
+ * silently handled — expected outcome of unmount-or-refresh
+ * cancellation. The token guard prevents stale resolutions from
+ * writing state when a more recent request has been kicked off.
+ *
+ * Two hooks (clean separation by use case):
+ *   - useTiktokCreativeUrlsBatch: grid view — one POST batch for N ads
+ *   - useTiktokCreativeUrl:       detail modal — single GET, always fresh
+ */
+
+// ═══════════════════════════════════════════════════════════════════
+// Shared error union — matches /api/ads/creatives/tiktok-url-resolve
+// status codes (per route's mapErrorToResponse).
+// ═══════════════════════════════════════════════════════════════════
+
+export type CreativeUrlError =
+  | "fetch_failed"
+  | "reauth_required"
+  | "rate_limited";
+
+// ═══════════════════════════════════════════════════════════════════
+// Internal — wire shapes returned by the route
+// ═══════════════════════════════════════════════════════════════════
+
+interface BatchResponseBody {
+  resolved: Record<
+    string,
+    { kind: string; urls: TikTokCreativeUrls | null }
+  >;
+  errors: Record<string, string>;
+}
+
+interface SingleResponseBody {
+  ad_id: string;
+  kind: string;
+  urls: TikTokCreativeUrls | null;
+  error?: string;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Internal — helpers
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Build the query string for the GET form. The route accepts the same
+ * fields the AdResolveRequest interface defines; optional fields are
+ * elided when absent.
+ */
+function buildSingleGetUrl(
+  accountId: string,
+  payload: AdResolveRequest
+): string {
+  const params = new URLSearchParams({
+    account_id: accountId,
+    ad_id: payload.ad_id,
+    kind: payload.kind,
+  });
+  if (payload.video_id) params.set("video_id", payload.video_id);
+  if (payload.item_id) params.set("item_id", payload.item_id);
+  if (payload.identity_type) params.set("identity_type", payload.identity_type);
+  if (payload.identity_id) params.set("identity_id", payload.identity_id);
+  return `/api/ads/creatives/tiktok-url-resolve?${params.toString()}`;
+}
+
+/**
+ * Classify an HTTP response into the CreativeUrlError union. Returns
+ * null when ok=true (caller proceeds to read body). Distinguishes
+ * 401 reauth (specific error body) from generic 401, and surfaces
+ * 429 separately so the UI can show a rate-limit message.
+ */
+async function classifyResponseError(
+  res: Response
+): Promise<CreativeUrlError | null> {
+  if (res.ok) return null;
+  if (res.status === 401) {
+    try {
+      const body = await res.clone().json();
+      if (body?.error === "reauth_required") return "reauth_required";
+    } catch {
+      // body wasn't JSON or didn't carry our reauth shape — fall through
+    }
+    return "fetch_failed";
+  }
+  if (res.status === 429) return "rate_limited";
+  return "fetch_failed";
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// useTiktokCreativeUrlsBatch — grid view (one POST resolves N ads)
+// ═══════════════════════════════════════════════════════════════════
+
+export interface UseTiktokCreativeUrlsBatchOptions {
+  /** TikTok advertiser_id (bare numeric). Must be owned by the auth'd user. */
+  accountId: string;
+  /**
+   * TikTok ads to resolve URLs for. The hook builds the request payload
+   * internally via buildAdResolveRequest (preserves the kind↔IDs
+   * invariant from normalize.ts's routeCreativeByIdentityType).
+   */
+  ads: UnifiedAdTiktok[];
+  /**
+   * Skip the fetch entirely when false. Default true. Useful for
+   * conditionally mounting the consuming component without firing
+   * a request (e.g. before the user opens the TikTok tab).
+   */
+  enabled?: boolean;
+}
+
+export interface UseTiktokCreativeUrlsBatchReturn {
+  /**
+   * ad_id → resolved URLs OR null. Null means: route returned null
+   * (path C/UNKNOWN, or path-A/B endpoint returned no data).
+   * Absent keys mean: fetch hasn't completed yet (loading=true) OR
+   * the ad wasn't in the input set.
+   */
+  urls: Record<string, TikTokCreativeUrls | null>;
+  /**
+   * ad_id → per-ad error reason (the route's `errors` map). Per-ad
+   * failures are isolated — don't kill the batch. Use to render
+   * placeholder UI for the specific ad.
+   */
+  errors: Record<string, string>;
+  loading: boolean;
+  /**
+   * Batch-wide error (auth / rate limit / network). Distinct from
+   * per-ad `errors` map — when set, NO ad resolved (the whole batch
+   * failed at the route/auth layer).
+   */
+  error: CreativeUrlError | null;
+  /** Refetch all URLs (e.g. when user dismisses an expired-URL state). */
+  refresh: () => Promise<void>;
+}
+
+export function useTiktokCreativeUrlsBatch(
+  options: UseTiktokCreativeUrlsBatchOptions
+): UseTiktokCreativeUrlsBatchReturn {
+  const { accountId, ads, enabled = true } = options;
+
+  const [urls, setUrls] = useState<Record<string, TikTokCreativeUrls | null>>(
+    {}
+  );
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<CreativeUrlError | null>(null);
+
+  // Request-token guard per ADR-019 §6 — increments on every doFetch;
+  // only the latest token's resolution writes state. Prevents stale
+  // resolutions from racing past a newer request.
+  const reqTokenRef = useRef(0);
+  // AbortController for in-flight cancellation on unmount or before
+  // refresh — same pattern as useSearchTerms.
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Derived dep key — sorted comma-join of ad ids. Stable across parent
+  // re-renders that don't change the ad set; only re-fires the effect
+  // when the underlying ads change. Avoids the "ads array identity
+  // changes every render" issue without forcing the parent to memoize.
+  const adsKey = useMemo(
+    () => ads.map((a) => a.id).sort().join(","),
+    [ads]
+  );
+
+  // Orchestration (token guard + abort + try/catch + AbortError silent)
+  // mirrors useTiktokCreativeUrl's doFetch below. Intentional inline
+  // duplication per 2d-1 — no premature shared-helper abstraction
+  // until Snapchat (Phase 8) gives a 2nd case to clarify the right
+  // generic shape. If you change token/abort handling here, mirror
+  // it in the sibling hook.
+  const doFetch = useCallback(
+    async (forceRefresh: boolean): Promise<void> => {
+      void forceRefresh; // route doesn't expose a ?refresh param; kept for API symmetry with refresh()
+
+      if (!enabled || !accountId || ads.length === 0) {
+        // Clean defaults — empty maps, no loading, no error.
+        setUrls({});
+        setErrors({});
+        setError(null);
+        setLoading(false);
+        return;
+      }
+
+      // Cancel any in-flight before starting a new one.
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const token = ++reqTokenRef.current;
+      setLoading(true);
+      setError(null);
+
+      try {
+        const payload = ads.map(buildAdResolveRequest);
+        const res = await fetch("/api/ads/creatives/tiktok-url-resolve", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ account_id: accountId, ads: payload }),
+          signal: controller.signal,
+        });
+        if (token !== reqTokenRef.current) return;
+
+        const errKind = await classifyResponseError(res);
+        if (errKind) {
+          setError(errKind);
+          return;
+        }
+
+        const body = (await res.json()) as BatchResponseBody;
+        if (token !== reqTokenRef.current) return;
+
+        const nextUrls: Record<string, TikTokCreativeUrls | null> = {};
+        for (const [adId, entry] of Object.entries(body.resolved ?? {})) {
+          nextUrls[adId] = entry?.urls ?? null;
+        }
+        setUrls(nextUrls);
+        setErrors(body.errors ?? {});
+      } catch (err) {
+        if (token !== reqTokenRef.current) return;
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return; // expected — unmount / new-refresh cancellation
+        }
+        console.error("[useTiktokCreativeUrlsBatch] Unexpected:", err);
+        setError("fetch_failed");
+      } finally {
+        if (token === reqTokenRef.current) setLoading(false);
+      }
+    },
+    // adsKey is the stable derivation of `ads`; depending on it instead
+    // of `ads` directly prevents re-fires on parent re-renders that
+    // produce a new array identity with the same id set.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [enabled, accountId, adsKey]
+  );
+
+  useEffect(() => {
+    if (!enabled) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void doFetch(false);
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, [doFetch, enabled]);
+
+  const refresh = useCallback(() => doFetch(true), [doFetch]);
+
+  return { urls, errors, loading, error, refresh };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// useTiktokCreativeUrl — modal single-fetch (always fresh GET)
+// ═══════════════════════════════════════════════════════════════════
+
+export interface UseTiktokCreativeUrlOptions {
+  accountId: string;
+  ad: UnifiedAdTiktok;
+  /** Default true — modal sets true when opened, false when closed. */
+  enabled?: boolean;
+}
+
+export interface UseTiktokCreativeUrlReturn {
+  urls: TikTokCreativeUrls | null;
+  loading: boolean;
+  error: CreativeUrlError | null;
+  refresh: () => Promise<void>;
+}
+
+export function useTiktokCreativeUrl(
+  options: UseTiktokCreativeUrlOptions
+): UseTiktokCreativeUrlReturn {
+  const { accountId, ad, enabled = true } = options;
+
+  const [urls, setUrls] = useState<TikTokCreativeUrls | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<CreativeUrlError | null>(null);
+
+  const reqTokenRef = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Build the payload once per ad change. JSON-key serializes the full
+  // routing-affecting payload (kind + IDs) so any discriminator change
+  // re-fires the effect — defensive against an ad mutating identity_*
+  // after initial creatives load (rare but possible across re-fetches).
+  const adPayload = useMemo(() => buildAdResolveRequest(ad), [ad]);
+  const adKey = useMemo(() => JSON.stringify(adPayload), [adPayload]);
+
+  // Orchestration (token guard + abort + try/catch + AbortError silent)
+  // mirrors useTiktokCreativeUrlsBatch's doFetch above. Intentional
+  // inline duplication per 2d-1 — no premature shared-helper
+  // abstraction until Snapchat (Phase 8) gives a 2nd case to clarify
+  // the right generic shape. If you change token/abort handling here,
+  // mirror it in the sibling hook.
+  const doFetch = useCallback(
+    async (forceRefresh: boolean): Promise<void> => {
+      void forceRefresh;
+
+      if (!enabled || !accountId) {
+        setUrls(null);
+        setError(null);
+        setLoading(false);
+        return;
+      }
+
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      const token = ++reqTokenRef.current;
+      setLoading(true);
+      setError(null);
+
+      try {
+        const url = buildSingleGetUrl(accountId, adPayload);
+        const res = await fetch(url, { signal: controller.signal });
+        if (token !== reqTokenRef.current) return;
+
+        const errKind = await classifyResponseError(res);
+        if (errKind) {
+          setError(errKind);
+          return;
+        }
+
+        const body = (await res.json()) as SingleResponseBody;
+        if (token !== reqTokenRef.current) return;
+        setUrls(body.urls ?? null);
+      } catch (err) {
+        if (token !== reqTokenRef.current) return;
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        console.error("[useTiktokCreativeUrl] Unexpected:", err);
+        setError("fetch_failed");
+      } finally {
+        if (token === reqTokenRef.current) setLoading(false);
+      }
+    },
+    // adKey carries the full routing payload; adPayload is captured
+    // from closure (used inside the body). Depending on adKey ensures
+    // any identity-* change triggers re-fetch; depending on adPayload
+    // separately would cause an extra re-render cycle since useMemo
+    // identity changes alongside adKey.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [enabled, accountId, adKey]
+  );
+
+  useEffect(() => {
+    if (!enabled) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void doFetch(false);
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, [doFetch, enabled]);
+
+  const refresh = useCallback(() => doFetch(true), [doFetch]);
+
+  return { urls, loading, error, refresh };
+}

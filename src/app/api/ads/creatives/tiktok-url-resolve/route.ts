@@ -17,6 +17,10 @@ import {
   classifyTiktokError,
   isTiktokRateLimitError,
 } from "@/lib/tiktok/errors";
+import {
+  type AdResolveRequest,
+  type CreativeKind,
+} from "@/lib/tiktok/url-resolve";
 
 /**
  * TikTok URL-resolve route per ADR-020 §12c §2.
@@ -54,23 +58,11 @@ import {
 export const dynamic = "force-dynamic";
 
 // ═══════════════════════════════════════════════════════════════════
-// Types
+// Types — AdResolveRequest + CreativeKind imported from
+// @/lib/tiktok/url-resolve (shared with the React hooks per
+// 2d-1 single-source-of-truth refactor). Local types below are
+// route-only.
 // ═══════════════════════════════════════════════════════════════════
-
-type CreativeKind =
-  | "A_DIRECT_VIDEO"
-  | "B_SPARK_AD"
-  | "C_PURE_IMAGE_DEFERRED"
-  | "UNKNOWN";
-
-interface AdResolveRequest {
-  ad_id: string;
-  kind: CreativeKind;
-  video_id?: string;
-  item_id?: string;
-  identity_type?: string;
-  identity_id?: string;
-}
 
 interface ResolvedAd {
   kind: CreativeKind;
