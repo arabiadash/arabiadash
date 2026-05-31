@@ -695,6 +695,65 @@ export function mergeChunkedReports(
   }));
 }
 
+/**
+ * Shared lifetime-fetch orchestrator per ADR-020 §Lifetime.
+ *
+ * Fetches `create_time` from /advertiser/info/, computes ≤365-day
+ * chunks via chunkLifetimeRange, dispatches N parallel per-chunk
+ * fetches through the provided `baseFetcher`, then merges via
+ * mergeChunkedReports. The three level-specific lifetime paths
+ * (account / campaign / ad) compose this with the appropriate
+ * baseFetcher (`getAccountInsights` / `getCampaignInsights` /
+ * `getAdInsights`).
+ *
+ * Per-chunk fetches pass a CustomDateRange to the baseFetcher —
+ * resolveRangeToDates routes that through `isCustomRange` and uses
+ * the dates as-is, bypassing its own lifetime branch's 365d
+ * fallback clamp. The clamp remains defensive against any future
+ * caller bypassing this wrapper.
+ *
+ * Reauth-across-chunks contract: Promise.all is fail-fast. A single
+ * chunk's `code:40105/40110/40115` from tiktokGet throws → Promise.all
+ * rejects → the adapter's `withReauthMapping` (caller-side) classifies
+ * via classifyTiktokError's regex-on-message → throws
+ * ReauthRequiredError. NEVER returns a partial merge — that would
+ * silently render misleading lifetime data.
+ *
+ * `getAdvertiserInfo` returns the parsed API response without field
+ * filtering (line 207's `.list ?? []`), so create_time is present
+ * at runtime when TikTok returns it. The `?.create_time` defensive
+ * read falls back to `undefined` when missing, and
+ * chunkLifetimeRange handles undefined with a single 365d chunk —
+ * degrades to today's behavior, never errors.
+ */
+export async function fetchInsightsLifetime(
+  accessToken: string,
+  advertiserId: string,
+  baseFetcher: (
+    accessToken: string,
+    advertiserId: string,
+    range: DateRangeInput
+  ) => Promise<TiktokReportRow[]>
+): Promise<TiktokReportRow[]> {
+  const info = await getAdvertiserInfo(accessToken, [advertiserId]);
+  const createTime = info[0]?.create_time;
+  const chunks = chunkLifetimeRange(createTime);
+
+  // Promise.all (fail-fast) — one chunk's reauth/error kills the
+  // whole lifetime fetch. Partial-merge would silently render
+  // incomplete data; the user must see the reauth banner instead.
+  const chunkResults = await Promise.all(
+    chunks.map((c) =>
+      baseFetcher(accessToken, advertiserId, {
+        since: c.since,
+        until: c.until,
+      })
+    )
+  );
+
+  return mergeChunkedReports(chunkResults);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // /ad/get/ — ad metadata + creative-routing discriminators.
 //

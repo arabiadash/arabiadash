@@ -14,6 +14,7 @@ import {
   getAdInsights as fetchTiktokAdInsights,
   getAds as fetchTiktokAds,
   getCampaigns as fetchTiktokCampaigns,
+  fetchInsightsLifetime,
   resolveRangeToDates,
   type TiktokCampaignRow,
   type TiktokReportRow,
@@ -178,11 +179,23 @@ export class TiktokAdapter implements AdProviderAdapter {
       // TikTok api.ts 2a single-call shape doesn't currently support it.
       void timeIncrement;
 
-      const rows = await fetchTiktokAccountInsights(
-        this.accessToken,
-        this.advertiserId,
-        range
-      );
+      // Lifetime dispatch per ADR-020 §Lifetime: TikTok's 365-day
+      // per-request cap forces a chunked-fetch + client-side merge to
+      // get true lifetime semantics. Non-lifetime ranges keep the
+      // existing single-call path byte-for-byte.
+      const rows =
+        range === "lifetime"
+          ? await fetchInsightsLifetime(
+              this.accessToken,
+              this.advertiserId,
+              fetchTiktokAccountInsights
+            )
+          : await fetchTiktokAccountInsights(
+              this.accessToken,
+              this.advertiserId,
+              range
+            );
+
       const { since, until } = resolveRangeToDates(range);
       return rows.map((row) =>
         normalizeReportRowToInsight(row, {
@@ -203,12 +216,22 @@ export class TiktokAdapter implements AdProviderAdapter {
       void timeIncrement;
 
       // Parallel fetch — campaigns lookup is independent of insights.
+      // Lifetime dispatch per ADR-020 §Lifetime applies ONLY to the
+      // insight-fetcher element; fetchTiktokCampaigns ignores `range`
+      // entirely (returns full inventory) so it stays on its single
+      // path regardless of preset.
       const [insightRows, campaigns] = await Promise.all([
-        fetchTiktokCampaignInsights(
-          this.accessToken,
-          this.advertiserId,
-          range
-        ),
+        range === "lifetime"
+          ? fetchInsightsLifetime(
+              this.accessToken,
+              this.advertiserId,
+              fetchTiktokCampaignInsights
+            )
+          : fetchTiktokCampaignInsights(
+              this.accessToken,
+              this.advertiserId,
+              range
+            ),
         fetchTiktokCampaigns(this.accessToken, this.advertiserId),
       ]);
 
@@ -236,9 +259,20 @@ export class TiktokAdapter implements AdProviderAdapter {
       // Campaigns feed the per-ad objectiveType + campaignName via the
       // campaign_id join (TikTok /ad/get/ doesn't expose objective at
       // the ad row level).
+      //
+      // Lifetime dispatch per ADR-020 §Lifetime applies ONLY to the
+      // insight-fetcher element; fetchTiktokAds and fetchTiktokCampaigns
+      // both ignore `range` (full inventory) so they stay on their
+      // single path regardless of preset.
       const [adRows, insightRows, campaigns] = await Promise.all([
         fetchTiktokAds(this.accessToken, this.advertiserId, range),
-        fetchTiktokAdInsights(this.accessToken, this.advertiserId, range),
+        range === "lifetime"
+          ? fetchInsightsLifetime(
+              this.accessToken,
+              this.advertiserId,
+              fetchTiktokAdInsights
+            )
+          : fetchTiktokAdInsights(this.accessToken, this.advertiserId, range),
         fetchTiktokCampaigns(this.accessToken, this.advertiserId),
       ]);
 
