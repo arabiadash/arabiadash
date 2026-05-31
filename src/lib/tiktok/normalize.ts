@@ -56,24 +56,108 @@ function extractInt(metrics: Record<string, string>, key: string): number {
 // Status collapse — TikTok's operation_status + secondary_status →
 // UnifiedCampaign.status ("ACTIVE" | "PAUSED" | "DELETED" | "ARCHIVED").
 //
-// Empirical mapping observed in 2b-1 kickoff probe (2026-05-31):
-//   operation_status="ENABLE"   secondary_status="CAMPAIGN_STATUS_ENABLE"   → ACTIVE
-//   operation_status="DISABLE"  secondary_status="CAMPAIGN_STATUS_DISABLE"  → PAUSED
+// Restructured per ADR-020 §StatusCollapse (2026-05-31) — the
+// previous version returned "ACTIVE" unconditionally on
+// operation_status === "ENABLE", which silently mislabeled 71/100
+// ENABLE IMAA ads whose parent campaigns were paused (69 visible
+// after the spend filter; 70% of "active" badges were wrong).
 //
-// DELETED + ARCHIVED collapse logic is best-guess (substring-match
-// on secondary_status) — refined as we encounter real deleted/archived
-// campaigns in integration testing. Matches Meta's "unrecognized →
-// PAUSED" conservative default per src/lib/meta/api.ts:metaAdToUnified.
+// Signal hierarchy:
+//   1. operation_status — authoritative top-level signal (exact match)
+//   2. secondary_status — delivery-state nuance for ENABLE ads
+//      (NON_DELIVERY_SECONDARY: campaign/adgroup paused)
+//   3. defensive regex fallback — forward-compat against TikTok
+//      introducing new operation_status values in v1.4+
+//
+// Failure-mode asymmetry guiding the rule set:
+//   - Exact-match (===) branches are SAFE even when unverified — if
+//     TikTok doesn't use the value, the branch never fires.
+//   - Regex/substring branches are RISKY when unverified — they can
+//     accidentally match a delivering-state string and mislabel an
+//     actually-active ad as PAUSED (hiding customer ads = trust
+//     collapse, worse than the original over-counting bug).
 // ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Secondary-status patterns indicating an ENABLE ad is NOT actually
+ * delivering — parent campaign or adgroup is paused, ad is inactive
+ * by hierarchy even though its own operation_status === "ENABLE".
+ *
+ * Per ADR-020 §StatusCollapse conservative-pattern decision
+ * (2026-05-31):
+ *
+ *   `CAMPAIGN_DISABLE`  — direct evidence: 71 IMAA ads exhibit
+ *                         secondary_status = "AD_STATUS_CAMPAIGN_DISABLE"
+ *                         (live-probed scripts/_tiktok-secondary-enum-
+ *                         probe.mts). The user-flagged "98 active
+ *                         doesn't feel right" → reality 29 active
+ *                         was driven by the 69 visible ones.
+ *
+ *   `ADGROUP_DISABLE`   — included by structural symmetry: TikTok's
+ *                         parent hierarchy is campaign → adgroup → ad
+ *                         (Meta-precedent), and the naming convention
+ *                         for parent-disable is identical. Not in
+ *                         IMAA but high-confidence for the symmetric
+ *                         case.
+ *
+ * ⚠️ MAINTENANCE RULE — NEVER add a guess to this regex.
+ *
+ * The risk asymmetry is steep: a regex pattern matching a
+ * delivering-state string by accident would mislabel a truly-active
+ * ad as PAUSED, HIDING it from the customer's grid. This is worse
+ * than the original over-counting bug (which only mislabels the
+ * BADGE — spend/revenue/roas numbers stay correct).
+ *
+ * Adding more patterns (REJECT / AUDIT / TIME_DONE / NO_BUDGET /
+ * etc.) requires either:
+ *   (a) a live probe identifying the exact string from a real
+ *       customer account, OR
+ *   (b) explicit TikTok docs confirming the value verbatim
+ *
+ * Accounts with rejected / under-review / time-expired / budget-
+ * exhausted ads will continue to over-count those as ACTIVE in v1
+ * — documented coverage gap. Add patterns when evidence arrives,
+ * not before.
+ */
+const NON_DELIVERY_SECONDARY = /CAMPAIGN_DISABLE|ADGROUP_DISABLE/i;
 
 export function collapseTiktokStatus(
   operationStatus: string | undefined,
   secondaryStatus: string | undefined
 ): UnifiedCampaign["status"] {
-  if (operationStatus === "ENABLE") return "ACTIVE";
+  // Primary path — operation_status is the authoritative top-level
+  // signal. Exact-match (===) branches are safe even when unverified
+  // for IMAA: if TikTok doesn't use these values for op_status, the
+  // branches never fire and execution falls through to the defensive
+  // regex fallback at the bottom. ZERO false-PAUSED risk.
+  if (operationStatus === "DELETE") return "DELETED";
+  if (operationStatus === "ARCHIVE") return "ARCHIVED";
+
+  if (operationStatus === "ENABLE") {
+    // ENABLE ads still need a secondary_status check for parent-pause
+    // cases (per §StatusCollapse). The probe-supported
+    // NON_DELIVERY_SECONDARY pattern catches campaign/adgroup-paused
+    // while staying conservative against false-PAUSED of truly-active
+    // ads.
+    if (secondaryStatus && NON_DELIVERY_SECONDARY.test(secondaryStatus)) {
+      return "PAUSED";
+    }
+    return "ACTIVE";
+  }
+
+  if (operationStatus === "DISABLE") return "PAUSED";
+
+  // Defensive fallback — for operation_status values we don't
+  // recognize (TikTok may introduce new states in v1.4+), parse the
+  // secondary_status regex as the last-resort signal. Live probe
+  // 2026-05-31 confirmed these regexes don't false-match any IMAA-
+  // observed value (AD_STATUS_DELIVERY_OK, AD_STATUS_CAMPAIGN_DISABLE,
+  // CAMPAIGN_STATUS_ENABLE, CAMPAIGN_STATUS_DISABLE — none contain
+  // "DELETE" or "ARCHIVE" substrings). Belt-and-suspenders, zero
+  // cost, forward-compat.
   if (secondaryStatus && /DELETE/i.test(secondaryStatus)) return "DELETED";
   if (secondaryStatus && /ARCHIVE/i.test(secondaryStatus)) return "ARCHIVED";
-  return "PAUSED";
+  return "PAUSED"; // conservative default — Meta-precedent
 }
 
 // ═══════════════════════════════════════════════════════════════════
