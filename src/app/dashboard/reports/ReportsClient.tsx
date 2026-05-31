@@ -3326,6 +3326,34 @@ export default function ReportsClient({
     ...dateRangeValueToOptions(dateRange),
   });
 
+  // Per-provider cooldown for TikTok — Meta's `lastRefreshAt` rationale
+  // ("avoid hammering Meta") doesn't apply to TikTok's separate rate
+  // limit. Independent state per provider; no cross-platform spillover
+  // when the user clicks Meta's button + then wants to refresh TikTok.
+  // Reuses REFRESH_COOLDOWN_MS + the existing `now` clock tick — no
+  // duplicate effect / interval.
+  //
+  // Note: useProviderAds doesn't expose a `revalidating` flag (unlike
+  // useAds for Meta), so refreshDisabledTiktok gates only on the
+  // hook's `loading` + the per-provider cooldown. The Meta-style
+  // timestamp + "stale revalidating" + "rate-limited" banners are
+  // deferred — they'd require extending useProviderAds to expose
+  // those fields, which would touch the Google adapter path too and
+  // is out of scope for this commit.
+  const [lastRefreshAtTiktok, setLastRefreshAtTiktok] = useState<number>(0);
+  const refreshCooldownRemainingTiktok = Math.max(
+    0,
+    Math.ceil((lastRefreshAtTiktok + REFRESH_COOLDOWN_MS - now) / 1000)
+  );
+  const refreshDisabledTiktok =
+    tiktokAdsLoading || refreshCooldownRemainingTiktok > 0;
+
+  const handleRefreshTiktokAds = async () => {
+    if (refreshDisabledTiktok) return;
+    setLastRefreshAtTiktok(Date.now());
+    await refreshTiktokAds();
+  };
+
   // Phase 4.8 M4 Commit 2 — filter, status filter, sort pipeline
   const processedGoogleCampaigns = useMemo(() => {
     let result = googleCampaigns.insights.filter((r) => r.spend > 0);
@@ -5596,9 +5624,30 @@ export default function ReportsClient({
                           </div>
                         ) : (
                           <>
-                            <h4 className="text-sm font-bold text-gray-900 mb-3">
-                              تفاصيل الإعلانات
-                            </h4>
+                            <div className="flex items-center justify-between mb-3">
+                              <h4 className="text-sm font-bold text-gray-900">
+                                تفاصيل الإعلانات
+                              </h4>
+                              <button
+                                onClick={handleRefreshTiktokAds}
+                                disabled={refreshDisabledTiktok}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                                title={
+                                  refreshCooldownRemainingTiktok > 0
+                                    ? `انتظر ${refreshCooldownRemainingTiktok} ثانية`
+                                    : "تحديث البيانات"
+                                }
+                              >
+                                <RefreshCw
+                                  className={`w-3.5 h-3.5 ${
+                                    tiktokAdsLoading ? "animate-spin" : ""
+                                  }`}
+                                />
+                                {refreshCooldownRemainingTiktok > 0
+                                  ? `تحديث (${refreshCooldownRemainingTiktok}ث)`
+                                  : "تحديث"}
+                              </button>
+                            </div>
                             <CreativesGrid
                               ads={tiktokAds}
                               loading={tiktokAdsLoading}
