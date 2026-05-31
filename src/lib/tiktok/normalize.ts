@@ -502,6 +502,12 @@ export interface TikTokCreativeUrls {
   itemType?: string;
   /** Spark Ad authorization status — path B only ("AUTHORIZED" etc.). */
   authStatus?: string;
+  /** Creator display name — path D (oEmbed) only. See ADR-020 §DCO-Identity. */
+  creatorName?: string;
+  /** Creator @handle (TikTok unique_id) — path D (oEmbed) only. */
+  creatorHandle?: string;
+  /** Creator profile URL on tiktok.com — path D (oEmbed) only. */
+  creatorUrl?: string;
 }
 
 /**
