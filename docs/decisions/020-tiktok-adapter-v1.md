@@ -1369,6 +1369,29 @@ Final order during the implementation step:
 2. If allowed → run the two DELETEs at the route.
 3. If denied → add a one-time admin route that uses the server-side `supabase` client (which works for cache writes, so should work for deletes) → invoke once → remove.
 
+#### Empirical result of step 1 (2026-05-31) + deployment-scope decision
+
+The DELETE permission test was run via zero-match curl probes (`?provider=eq.__nonexistent_sentinel__` — a filter that matches zero rows; permission-granted returns `204 No Content`, permission-blocked returns `403 / code:42501`):
+
+| Table | PostgREST DELETE (service_role JWT) | Result |
+|-------|------------------------------------|--------|
+| `insights_cache` | `403 Forbidden / code:42501 / "permission denied"` | **BLOCKED** |
+| `creatives_cache` | `403 Forbidden / code:42501 / "permission denied"` | **BLOCKED** |
+
+Both tables match the Issue #30 grant-misalignment pattern. The error hint explicitly names `GRANT SELECT, DELETE ON public.<table> TO service_role` as the missing privilege set — same surface as the earlier SELECT denial on the same tables.
+
+**Deployment-scope decision**: the cache-invalidation question is materially different for the two deployment targets:
+
+- **Preview branch (`phase-7-tiktok-v1`)**: the only consumer is the test account (single user). 24h of stale-status data on a test environment is acceptable. Additionally, `?refresh=true` on the Reports page URL bypasses cache for a single fetch and triggers the corrected normalizer immediately — zero-code, zero-wait alternative to a real DELETE. **Decision: no cache invalidation on preview.** Test with `?refresh=true`; let TTL expire silently.
+
+- **Production (`main`, when Phase 7 merges)**: real customers, multi-user surface, "stale on a feature shipping the fix = self-defeating" reasoning from the §Lifetime DELETE applies fully. The DELETE must run on deploy. Since the PostgREST path is blocked by Issue #30's missing GRANT, the production-deploy DELETE has **Issue #30 as a hard prerequisite**: either #30's audit resolution adds `SELECT, DELETE` to `service_role` on both cache tables (likely outcome — the audit will probably tighten anon-role grants and selectively expand service_role grants to match its intended bypass role), OR the admin-route fallback (per the table above) ships alongside the Phase 7 merge as a one-time deploy action.
+
+**Deferred production-deploy action** (carry-forward to Phase 7 merge planning):
+
+> When Phase 7 merges to production, the combined targeted DELETE must run before real customers hit the lifetime view. Pre-requisite: Issue #30's GRANT audit must resolve the service_role's `SELECT, DELETE` denial on `insights_cache` + `creatives_cache`, OR the admin-route fallback must be built + invoked once + removed. The §Lifetime amendment's stale-cache rationale (rejection of TTL-reliance for a launching-correctness fix) applies the same way to §StatusCollapse production-merge. Tracked as the launch-day cleanup task that supersedes the §Lifetime-only `%:lifetime:%` DELETE per the combined-DELETE design above.
+
+On preview, the user retests with `?refresh=true`. On production, the deploy runs the combined DELETE via whichever path #30 unblocks.
+
 **Memory #28 protocol**: still NOT a schema bump. No `CACHE_SCHEMA_VERSION` change. No cross-platform cache wipe. Meta + Google cache untouched. Same risk-avoidance posture as the §Lifetime DELETE.
 
 ### Implementation scope (files that change vs files that don't)
