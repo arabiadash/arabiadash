@@ -1699,3 +1699,161 @@ This §ResolveConcurrency **PRESERVES** unchanged:
 - The route's auth + ownership guards (`authorizeAndGetCreds`) — unchanged
 - The §2b revenue metric correction + §StatusCollapse status fix — orthogonal concerns, not touched
 - The modal's single-ad fetch path (`useTiktokCreativeUrl`, not -Batch) — single call, no concurrency issue, no change needed
+
+## §DCO-Identity — Marketing API cannot resolve Dynamic-Creative identity; recover via public TikTok oEmbed (2026-06-01, supersedes §12c §4 Mode 3's "accept embed-only" UX framing for the Card surface)
+
+Smart-Performance-Campaign (`SMART_PLUS`) ads with `creative_material_mode = DYNAMIC` silently return `identity_type=null` and `identity_id=null` from `/ad/get/`, even though `tiktok_item_id` is populated. The same ads also return zero identity fields at the parent `/adgroup/get/` level. At scale this is not a marginal case: on IMAA, 12 of 17 placeholder-rendering ads (70 %) share this signature, all 12 owned by a single adgroup. §12c §4 Mode 3's "accept STATE 3 embed-only" UX response was tolerable when DCO was described as "rare"; at 70 % of a category surface, it dominates and the Card surface needs a real poster + creator. This amendment documents the three Marketing-API resolution paths as exhausted, adds **Path D — public oEmbed lookup** as the resolver of record for these ads, and confirms the path is production-viable by direct measurement from a Vercel iad1 serverless function.
+
+### Trigger
+
+Live-test triage Obs 2 on the IMAA TikTok surface: 17 of 53 ads (32 %) render with the generic STATE 3 placeholder. User flagged the pattern after spotting that 12 of those 17 share `ad_name = "_001"` with substantial view counts (740K, 388K, 187K). Initial catalog hypothesis was rejected by the user (IMAA runs zero catalog ads on TikTok).
+
+### Investigation — three Marketing-API paths exhausted
+
+**Probe 1 — `/ad/get/` default-response field set, 106 fields** (`scripts/_tiktok-001-ad-probe.mts`):
+
+For each "_001" ad:
+- `identity_type` = **null**, `identity_id` = **null**, `video_id` = null, `image_ids` = []
+- `tiktok_item_id` = populated (e.g. 7635328220438613269)
+- `ad_format` = `SINGLE_VIDEO` (not catalog)
+- No catalog signals: `catalog_id` / `product_set_id` / `sku_ids` / `hotel_ids` / `domain_ids` / `media_title_ids` all absent or empty
+
+Verdict: not catalog, not a normalize bug — TikTok genuinely returns `identity_type=null` for this sub-type.
+
+**Probe 2 — `/adgroup/get/` default-response field set, 106 fields** (`scripts/_tiktok-adgroup-identity-probe.mts`):
+
+All 12 "_001" ads belong to **one** adgroup, `1833373551147058`. The adgroup payload exposes the structural cause:
+
+```
+campaign_automation_type          = SMART_PLUS
+is_smart_performance_campaign     = true
+creative_material_mode            = DYNAMIC
+```
+
+Smart Performance Campaign + Dynamic Creative auto-assembles the auction-time creative from a material pool. The single "identity + video" relation the Marketing API normally exposes does not exist for these ads — it is constructed dynamically per auction.
+
+Identity-related keys returned at adgroup level: **0**. Video/material list keys returned: **0** (only `creative_material_mode=DYNAMIC` and `video_download_disabled=false`).
+
+**Probe 3 — Embed iframe fallback** ([TikTokAdDetailModal.tsx:191](../../src/components/creatives/TikTokAdDetailModal.tsx#L191)):
+
+The existing modal iframe (`https://www.tiktok.com/player/v1/{item_id}`) DOES play the actual video when the user clicks a "_001" card — confirmed via static code analysis (`tiktokVideoUrl` is constructed from `tiktok_item_id` in normalize, modal renders the iframe when `urls` is null + `tiktokVideoUrl` is set). This is the working in-modal fallback, but produces no static poster for the Card surface.
+
+### Conclusion — Marketing API cannot resolve DCO/SPC identity
+
+TikTok treats the Smart-Performance-Campaign + Dynamic-Creative material pool as internal. There is no documented Marketing-API path from `(ad_id | adgroup_id)` → identity/video reference for these ads. **Do not re-investigate via the Marketing API** — the three routes above cover the full surface. The pattern is structural to `SMART_PLUS` + `DYNAMIC`, not a permissions or field-set issue.
+
+This is the **3rd instance of TikTok silently dropping identity for DCO/SPC**, now confirmed at scale (12 ads, single adgroup, 70 % of placeholder population). §12c §4 Mode 3's framing of DCO as "rare" was empirically wrong for this account — at 70 % of a category surface, the Card-level UX response must improve.
+
+### Decision — Path D: public TikTok oEmbed resolver
+
+**Probe 4 — TikTok oEmbed endpoint, local** (`scripts/_tiktok-oembed-probe.mts`):
+
+For each "_001" `item_id`:
+- Endpoint: `https://www.tiktok.com/oembed?url=https://www.tiktok.com/@_/video/{item_id}` (placeholder username `@_` is accepted; TikTok resolves the `item_id` alone)
+- HTTP 200, `application/json; charset=utf-8`
+- Returns: `thumbnail_url` (signed CDN JPEG 576×1024, 84-238 KB), `author_name`, `author_unique_id`, `author_url`, `title`, `html` (embed blockquote)
+- Thumbnail HEAD: 200, `image/jpeg`, CDN `cache-control: max-age=31536000` (~1 year)
+- oEmbed response itself: `cache-control: max-age=0, no-cache, no-store` (uncached at TikTok's edge; client may cache freely)
+- Signed-URL TTL: `x-expires=1780437600` → ~24h from fetch. Image bytes themselves cached ~1 year on CDN.
+
+**Probe 5 — TikTok oEmbed endpoint, Vercel iad1 serverless** (`/api/probe/oembed`, deleted in follow-up commit):
+
+```json
+{
+  "ok": true,
+  "vercelRegion": "iad1",
+  "vercelEnv": "preview",
+  "elapsedMs": 179,
+  "response": { "status": 200, "statusText": "OK", "contentType": "application/json; charset=utf-8" },
+  "result": {
+    "hasThumbnail": true,
+    "thumbnailUrl": "https://p16-common-sign.tiktokcdn-us.com/.../oAAAgi08AIIoim4...&x-expires=1780437600&idc=useast5",
+    "thumbnailWidth": 576, "thumbnailHeight": 1024,
+    "authorName": "موسى بن ابراهيم 🇸🇦",
+    "authorHandle": "mousaday"
+  }
+}
+```
+
+Local-vs-Vercel parity (same `item_id`, different egress):
+
+| Field | Local (WARP, Saudi-egress) | Vercel (iad1, US-East) |
+|---|---|---|
+| HTTP status | 200 | 200 |
+| Thumbnail CDN host | `tiktokcdn-eu.com` | `tiktokcdn-us.com` |
+| Thumbnail dims | 576×1024 | 576×1024 |
+| Author name + handle | identical | identical |
+| Signed-URL `x-expires` | 1780437600 | 1780437600 |
+| Server-side latency | n/a (measured client-side only) | 179 ms |
+
+TikTok's oEmbed is globally consistent. The only difference is CDN-edge routing (`-eu` vs `-us`), which is exactly the desired behaviour — TikTok routes thumbnail bytes to the nearest CDN node automatically.
+
+### Risks dissolved by Probe 5
+
+| Risk in initial path-D draft | Status after Vercel-side measurement |
+|---|---|
+| STC blocking `www.tiktok.com` | **Dissolved** — Vercel iad1 egress never traverses STC; production runtime is non-Saudi |
+| Anti-bot rate-limit / UA rejection | **Dissolved** — clean 200, no rate-limit headers, same UA as local probe |
+| Public-host availability | **Dissolved** — globally consistent payload across both EU + US CDN edges |
+| Latency budget for §ResolveConcurrency fan-out | **Dissolved** — 179 ms server-side leaves generous headroom under cap=4 |
+
+### Path-D resolver shape (specification — implementation lands per-commit after this ADR)
+
+```
+Input:  UnifiedAd where ad_type === "TIKTOK_AD"
+        && type_data.tiktokVideoUrl is set (item_id present)
+        && type_data.creativeImageUrl is null (path A/B failed)
+Output: type_data.creativeImageUrl ← oembed.thumbnail_url
+        type_data.creator_name     ← oembed.author_name      (Obs 3 enrichment)
+        type_data.creator_handle   ← oembed.author_unique_id (Obs 3 enrichment)
+        type_data.creator_url      ← oembed.author_url       (Obs 3 enrichment)
+Concurrency:  OEMBED_CONCURRENCY = 4 (matches §ResolveConcurrency PATH_B cap)
+Fail-fast:    in-loop chunk bubble check (matches §ResolveConcurrency pattern)
+TTL:          signed-URL ~24h; re-resolve on next refresh (SWR cache pattern)
+```
+
+This single endpoint resolves BOTH:
+- **Obs 2** — real posters for the 12 "_001" DCO ads (70 % of placeholder population)
+- **Obs 3** — creator display name + handle for every TikTok ad whose path-A/B succeeded too (super-set of the planned `/identity/get/` enrichment for Spark-Ad path)
+
+### Supersession + preservation
+
+**Supersedes:**
+- §12c §4 Mode 3's UX prescription ("DCO/SPC silently drops identity_type — accept and route to embed-only") for the **Card surface**. Modal embed remains the fallback when oEmbed itself fails (private item, deleted item, geo-restricted). Mode 3's diagnosis remains canonical — only the UX response changes.
+
+**Preserves unchanged:**
+- §ResolveConcurrency cap=4 + chunk-loop + in-loop fail-fast bubble check — Path-D reuses the same pattern verbatim.
+- §StatusCollapse + §2b + §Lifetime — orthogonal concerns, not touched.
+- §12c §3's per-kind grouping in `resolveAds` (A / B / C / UNKNOWN dispatch) — Path D inserts as a sibling kind, not a replacement.
+- The modal iframe embed at [TikTokAdDetailModal.tsx:191](../../src/components/creatives/TikTokAdDetailModal.tsx#L191) — remains the click-through fallback when oEmbed returns no thumbnail.
+
+### Implementation scope (specification — does not land in this commit)
+
+| File | Change |
+|---|---|
+| `src/lib/tiktok/normalize.ts` | extend `type_data` schema with optional `creator_name` / `creator_handle` / `creator_url` fields (additive, see backward-compat note below) |
+| `src/lib/tiktok/api.ts` | add `resolveOembed(itemId)` helper + `OEMBED_CONCURRENCY=4` constant (mirrors PATH_B_CONCURRENCY) |
+| `src/app/api/ads/creatives/tiktok-url-resolve/route.ts` | add Path-D branch: when `item_id` present AND identity absent AND path-B impossible, call `resolveOembed`; populate `creativeImageUrl` + creator fields; preserve §ResolveConcurrency chunk-loop + fail-fast pattern verbatim |
+| `src/components/creatives/TikTokCreativeCard.tsx` | render creator name when present; "ديناميكي" badge when DCO is derived (identity absent + item_id present) |
+| `src/components/creatives/TikTokAdDetailModal.tsx` | display creator name + handle in modal header when present |
+
+**Backward-compatibility recon (whether v13→v14 bump is required) lands in a separate scoping commit before C1**, per the Memory #28 protocol. Memory #28 mandates an e2e cross-platform refresh probe + rollback plan for any bump; the recon question is whether an additive optional-field extension actually triggers a misread on existing cached rows, or whether old rows can naturally expire/refresh under the existing schema. If backward-compatible, no bump → no Memory #28 protocol burden. If a bump is required, full protocol applies and Issue #30's 42501 GRANT-block is the production prerequisite.
+
+### Risks + open questions
+
+1. **Path-D coverage** — limit `resolveOembed` to ads where path A (`image_ids`) + path B (Spark-Ad identity lookup) have both produced no result. Do NOT call oEmbed for already-resolved ads (latency budget + politeness).
+2. **Per-ad oEmbed failure** — if `www.tiktok.com/oembed` returns 4xx/5xx for a specific `item_id` (private, deleted, geo-restricted), accept STATE 3 for that card and surface the error in telemetry. Do not block the whole creatives surface on a single oEmbed miss.
+3. **TTL re-resolution** — signed-URL `x-expires` is ~24h. The SWR `creatives_cache` already drives re-resolution on user refresh; no explicit TTL handling needed inside the resolver. If a thumbnail 403s mid-session, the card falls back to STATE 3 + the modal iframe still works.
+4. **Future rate-limit observation** — Probe 4 (3 sequential local) + Probe 5 (1 Vercel) returned no rate-limit headers. We have no documented TikTok oEmbed quota. If aggressive batches surface a 4xx pattern, drop `OEMBED_CONCURRENCY` and instrument retries with backoff — same shape as §ResolveConcurrency.
+
+### Memory carryover
+
+- `feedback_cache_bump_pattern.md` — referenced by the bump-recon commit; not amended here.
+- New candidate memory after implementation lands: **"TikTok DCO/SPC ads need public-host oEmbed for the Card surface — Marketing API alone is insufficient at scale (70 % case on IMAA)"** with cross-link to §12c §4 Mode 3's superseded framing.
+
+### Probe artifacts (throwaway, removed in follow-up commits)
+
+- `scripts/_tiktok-001-ad-probe.mts` — full `/ad/get/` default-response dump
+- `scripts/_tiktok-adgroup-identity-probe.mts` — full `/adgroup/get/` default-response dump + SMART_PLUS confirmation
+- `scripts/_tiktok-oembed-probe.mts` — local 3-item_id oEmbed probe (WARP-on)
+- `src/app/api/probe/oembed/route.ts` — Vercel-side reachability probe (deleted immediately after this ADR commit, per the throwaway protocol)
