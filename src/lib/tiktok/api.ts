@@ -223,9 +223,21 @@ function toYmd(d: Date): string {
 
 /**
  * Resolve a DateRangeInput to explicit YYYY-MM-DD strings.
- * "lifetime" → 2-year lookback (TikTok has no date_preset=maximum
- * equivalent; pick a wide window that's well beyond typical campaign
- * histories on this customer profile).
+ * "lifetime" → 365-day lookback (TikTok has no date_preset=maximum
+ * equivalent — unlike Meta's `date_preset=maximum` real lifetime
+ * preset; we synthesize one by clamping to TikTok's hard cap).
+ *
+ * The 365-day cap is empirically verified live against IMAA
+ * (probe scripts/_tiktok-lifetime-paused-probe.mts, 2026-05-31):
+ *   - 365d range → /report/integrated/get/ returns code:0, rows:1
+ *   - 366d range → code:40002 "max time span must be less than 365 days"
+ *   - 730d range (pre-fix) → code:40002 → tiktokGet throws → adapter
+ *     filter drops all ads → empty grid (the user-visible "no data"
+ *     symptom that motivated this clamp)
+ * 365d sits exactly on the boundary. Despite TikTok's error message
+ * wording ("less than 365"), 365 succeeds — likely off-by-one in
+ * their check, or inclusive-endpoint counting. Going defensive to
+ * 364 would over-engineer against a hypothetical tightening.
  *
  * Exported per Session 2 Commit 2b-3 plan so the adapter can thread
  * the same resolved (since, until) into normalize.ts opts without
@@ -239,10 +251,10 @@ export function resolveRangeToDates(
   }
   if (range === "lifetime") {
     const today = new Date();
-    const twoYearsAgo = new Date(
-      today.getTime() - 730 * 24 * 60 * 60 * 1000
+    const oneYearAgo = new Date(
+      today.getTime() - 365 * 24 * 60 * 60 * 1000
     );
-    return { since: toYmd(twoYearsAgo), until: toYmd(today) };
+    return { since: toYmd(oneYearAgo), until: toYmd(today) };
   }
   const customRange = presetToCustomRange(range);
   return { since: customRange.since, until: customRange.until };
