@@ -1191,3 +1191,236 @@ This §Lifetime **PRESERVES** unchanged:
 - The route-layer cache contract (`insights_cache` schema, key shape, TTL)
 - Memory #28's cache-bump pre-push protocol (still applies — Meta + Google paths must validate even though this work is TikTok-only)
 - Meta's `date_preset=maximum` lifetime path (untouched by definition)
+
+## §StatusCollapse — Honest active-vs-paused semantics for TikTok ads via secondary_status (2026-05-31, supersedes the operation_status-only collapse from `normalize.ts:collapseTiktokStatus`)
+
+The original `collapseTiktokStatus` in [src/lib/tiktok/normalize.ts](../../src/lib/tiktok/normalize.ts) returned `"ACTIVE"` unconditionally whenever `operation_status === "ENABLE"`, without checking `secondary_status` at all. This produced a load-bearing UX bug: ENABLE ads whose parent campaign or adgroup is paused (and which therefore are NOT serving) were labeled ACTIVE in the dashboard. Live-data evidence against IMAA proved the bug affects the majority of "active" ads — the user's instinct that "98 active doesn't feel right" was exactly correct.
+
+This amendment fixes the function via a conservative, probe-grounded pattern set + a structural restructure of the deleted/archived detection path, and surfaces the cache-invalidation policy needed for clean status on first post-deploy view.
+
+### Live-data evidence (IMAA, advertiser `7327982125339328514`, 2026-05-31)
+
+`/ad/get/` full inventory (`scripts/_tiktok-active-bucket-probe.mts` + `_tiktok-secondary-enum-probe.mts`):
+
+| `operation_status` | `secondary_status` | Count | Reality |
+|---|---|---:|---|
+| `ENABLE` | `AD_STATUS_DELIVERY_OK` | 29 | Truly delivering — should be ACTIVE |
+| `ENABLE` | `AD_STATUS_CAMPAIGN_DISABLE` | **71** | **NOT delivering** — parent campaign paused. Should be PAUSED. **Currently mislabeled ACTIVE.** |
+| `DISABLE` | `AD_STATUS_CAMPAIGN_DISABLE` | 101 | Correctly not-active (caught via `operation_status` path) |
+
+Of the 71 ENABLE+CAMPAIGN_DISABLE ads, 69 pass the adapter's `spend > 0 || impressions > 0` filter and render in the lifetime grid with a stale-true ACTIVE badge. The 2 zero-spend ENABLE+CAMPAIGN_DISABLE ads are correctly dropped by the filter (not user-visible). User-visible mislabel count = **69 / 98 (70%) of "active" badges are wrong**.
+
+`/campaign/get/` (15 campaigns):
+
+| `operation_status` | `secondary_status` | Count |
+|---|---|---:|
+| `ENABLE` | `CAMPAIGN_STATUS_ENABLE` | 3 |
+| `DISABLE` | `CAMPAIGN_STATUS_DISABLE` | 12 |
+
+Campaign-level collapse correctly handled by `operation_status` today — the bug is ad-specific (ads have an additional "parent paused" failure mode that campaigns don't).
+
+### Why the bug exists
+
+`collapseTiktokStatus` in `normalize.ts:69-77`:
+
+```typescript
+if (operationStatus === "ENABLE") return "ACTIVE";  // ← early return, ignores secondary_status
+if (secondaryStatus && /DELETE/i.test(secondaryStatus)) return "DELETED";
+if (secondaryStatus && /ARCHIVE/i.test(secondaryStatus)) return "ARCHIVED";
+return "PAUSED";
+```
+
+The `operation_status === "ENABLE"` early return bypasses the secondary_status check that would catch parent-disable cases. TikTok's hierarchy means an ad can be individually ENABLE while its parent campaign is DISABLE — operationally not delivering, semantically not active. The dashboard renders the ad-level operation_status without considering the hierarchy, producing the false ACTIVE badge.
+
+### The conservative pattern decision (load-bearing — getting this wrong silently corrupts UI)
+
+The risk asymmetry is steep:
+
+- **False-ACTIVE** (current behavior): shows an over-count of active ads. Users see ads they remember pausing as "active". Annoying, eroding trust, but the spend/revenue numbers themselves stay correct — only the badge is wrong.
+- **False-PAUSED** (over-correction risk): hides a truly-active ad behind a wrong PAUSED badge. Users can't find ads they actually paused recently OR that the platform actually paused for delivery-policy reasons. Hidden customer ads = trust collapse. **Worse than the current bug.**
+
+Public TikTok docs do not enumerate the `secondary_status` enum. The SDK YAML files describe the field as `String` with no value list. The Postman / portal docs are gated behind auth or empty on this surface. We have ONE authoritative source: live probe of real accounts.
+
+**Decision: match only the probe-supported non-delivery patterns + the structural symmetry.**
+
+| Pattern | Evidence | Confidence | Action |
+|---|---|---|---|
+| `AD_STATUS_CAMPAIGN_DISABLE` | 71 ads on IMAA (live-probed) | **Direct** | INCLUDE |
+| `AD_STATUS_ADGROUP_DISABLE` | Not in IMAA, but TikTok's parent-hierarchy is identical to Meta's (campaign → adgroup → ad), so the symmetric "adgroup paused, ad ENABLE" state has the same naming convention and same semantic | **High by structural symmetry** | INCLUDE |
+| `AD_STATUS_REJECT` / `AD_STATUS_AUDIT` / `AD_STATUS_TIME_DONE` / `AD_STATUS_NO_BUDGET` / etc. | None — no live evidence; exact string form unverified; could be regex-mismatch | **Speculation** | **EXCLUDE** — adding without evidence risks false-PAUSED |
+
+Final regex:
+
+```typescript
+const NON_DELIVERY_SECONDARY = /CAMPAIGN_DISABLE|ADGROUP_DISABLE/i;
+```
+
+Two patterns. Both grounded — one direct, one by symmetry. Anything else stays in the ACTIVE bucket until we observe its real string form in production.
+
+### Coverage gap acknowledged (NOT a bug — a documented v1 scope limit)
+
+An account with rejected ads, ads under review (audit), time-expired ads, or budget-exhausted ads will continue to over-count those as ACTIVE in v1 of this fix. This is intentional. The remedy is data-driven, not speculation-driven:
+
+> **TODO** (in code comment): Add more `secondary_status` patterns to `NON_DELIVERY_SECONDARY` as we encounter them in production. Each addition requires either (a) a live probe identifying the exact string, or (b) explicit TikTok docs confirming the value. NEVER add a guess.
+
+Customer-impact analysis: accounts with rejected / under-review / time-expired ads typically pause them quickly OR delete them entirely. The bucket of "ad is ENABLE individually + secondary indicates delivery problem + still has historical spend > 0" is the narrow surface affected. The customer impact of over-counting these as ACTIVE is materially smaller than the customer impact of hiding real active ads via false-PAUSED.
+
+### Structural restructure for DELETED / ARCHIVED (the bundled `verify status collapse` task)
+
+The original regex-on-secondary path:
+
+```typescript
+if (secondaryStatus && /DELETE/i.test(secondaryStatus)) return "DELETED";
+if (secondaryStatus && /ARCHIVE/i.test(secondaryStatus)) return "ARCHIVED";
+```
+
+worked for any value containing the literal "DELETE" / "ARCHIVE" substring. Live probe against IMAA confirmed no false-matches against observed values (`AD_STATUS_DELIVERY_OK` / `AD_STATUS_CAMPAIGN_DISABLE` / `CAMPAIGN_STATUS_ENABLE` / `CAMPAIGN_STATUS_DISABLE` — none contain DELETE or ARCHIVE substrings). The regex was safe in practice, but structurally fragile: it depended on TikTok's status strings happening to embed the literal word.
+
+**Restructure**: check `operation_status` first as the primary path; keep secondary regex as defensive fallback only.
+
+```typescript
+export function collapseTiktokStatus(
+  operationStatus: string | undefined,
+  secondaryStatus: string | undefined
+): UnifiedCampaign["status"] {
+  // Primary path — operation_status is the authoritative top-level signal.
+  if (operationStatus === "DELETE") return "DELETED";
+  if (operationStatus === "ARCHIVE") return "ARCHIVED";
+  if (operationStatus === "ENABLE") {
+    // ENABLE ads still need a secondary_status check for parent-pause
+    // cases (per §StatusCollapse). The probe-supported NON_DELIVERY_SECONDARY
+    // pattern catches campaign/adgroup-paused while staying conservative
+    // against false-PAUSED of truly-active ads.
+    if (secondaryStatus && NON_DELIVERY_SECONDARY.test(secondaryStatus)) {
+      return "PAUSED";
+    }
+    return "ACTIVE";
+  }
+  if (operationStatus === "DISABLE") return "PAUSED";
+
+  // Defensive fallback — for operation_status values we don't recognize
+  // (TikTok may introduce new states in v1.4+), parse the secondary_status
+  // regex as the last-resort signal. The current regex doesn't false-match
+  // on any IMAA-observed value, so it's safe as a fallback.
+  if (secondaryStatus && /DELETE/i.test(secondaryStatus)) return "DELETED";
+  if (secondaryStatus && /ARCHIVE/i.test(secondaryStatus)) return "ARCHIVED";
+  return "PAUSED";  // conservative default — Meta-precedent
+}
+```
+
+The structure clarifies the signal hierarchy: `operation_status` is the primary truth source, `secondary_status` adds delivery-state nuance (specifically for ENABLE ads), and the fallback regex stays for forward-compat with TikTok enum additions.
+
+#### Why the exact-match `operation_status === "DELETE" / "ARCHIVE"` is safe despite being unverified for IMAA
+
+IMAA has zero deleted or archived ads/campaigns, so the primary-path branches `operation_status === "DELETE"` and `operation_status === "ARCHIVE"` are themselves **convention-based but unverified** by this session's live probes. This raises an obvious question: didn't we just reject the broader `REJECT/AUDIT/TIME_DONE` patterns precisely BECAUSE they were unverified? Why is this different?
+
+The key distinction is the **match mechanism**:
+
+| Pattern type | Match mechanism | False-PAUSED risk if wrong |
+|---|---|---|
+| Rejected `NON_DELIVERY_SECONDARY` guesses (`/REJECT/i`, `/AUDIT/i`, etc.) | **Regex** — fires on any substring match | **REAL** — could accidentally match a delivering-state string that happens to contain the substring (e.g. a hypothetical `AD_STATUS_AUDIENCE_DELIVERY_OK` would match `/AUDIT/i` and mislabel a delivering ad as PAUSED) |
+| Approved primary-path `operation_status === "DELETE"` / `=== "ARCHIVE"` | **Exact string equality** | **ZERO** — if TikTok doesn't use `"DELETE"` / `"ARCHIVE"` as op_status values, the branch simply doesn't fire and falls through to the defensive regex fallback. There is no possible false-PAUSED state because the only inputs that can match these branches are the exact strings `"DELETE"` / `"ARCHIVE"` themselves — nothing else can accidentally hit them. |
+
+So the rule isn't "verified vs unverified" — it's "exact-match-safe vs regex-substring-risky". An unverified exact-match on a documented convention is safe because the failure mode is "the branch never fires" (we fall through to the existing regex fallback that handles DELETED/ARCHIVED via secondary_status). An unverified regex pattern is unsafe because the failure mode is "the branch fires on something it shouldn't" (false-PAUSED on a delivering ad).
+
+This is why the conservative-pattern rule applies to `NON_DELIVERY_SECONDARY` but NOT to the `operation_status` primary path: different match mechanisms, different failure modes. A future reader encountering an account that DOES exhibit `operation_status === "DELETE"` confirms the convention with zero risk; a future reader needs to live-probe before extending `NON_DELIVERY_SECONDARY` because the failure modes are not symmetric.
+
+The defensive regex fallback at the bottom of the function (the `/DELETE/i` and `/ARCHIVE/i` checks) is the safety net for the case TikTok diverges from the documented convention entirely — it catches the actual DELETED / ARCHIVED states via secondary_status regardless of what `operation_status` value TikTok chose. Belt-and-suspenders, zero cost, forward-compat against v1.4+ enum changes.
+
+### PAUSED reuse (no new enum value)
+
+`UnifiedCampaign["status"]` stays `"ACTIVE" | "PAUSED" | "DELETED" | "ARCHIVED"` — no change. Reasons:
+
+- A new enum value (`INACTIVE` / `STOPPED`) would change the type union across Meta + Google + TikTok adapters, every status badge map (`STATUS_LABELS_AR`, `STATUS_COLORS`), the CreativesGrid status filter (`"all" | "ACTIVE" | "PAUSED"`), the modal status badges, sort logic, and every adapter's `collapseStatus` equivalent. Large blast radius for a TikTok-specific distinction.
+- User mental model is binary: "delivering vs not". PAUSED covers "parent-paused + ad still ENABLE individually" cleanly.
+- Cross-platform semantic drift risk: a TikTok-specific `INACTIVE` value would tempt UI consumers to special-case it, undermining the unified-status contract.
+- **Escape hatch documented**: if a future need surfaces for distinguishing pause reasons (e.g. "ads I paused vs ads TikTok paused vs parent-paused"), the right path is a separate `pausedReason: "ad" | "parent_campaign" | "parent_adgroup" | "delivery_policy" | undefined` field on `UnifiedAd.type_data` — additive, TikTok-specific, doesn't touch the cross-platform status union. NOT in scope for this amendment.
+
+### Cache invalidation policy
+
+Both caches carry stale-status TikTok rows:
+
+| Cache | Field affected | TTL |
+|-------|---------------|-----|
+| `insights_cache` | `UnifiedInsight.status` (campaign-level only — populated from `campaignLookup` via `collapseTiktokStatus`) | `INSIGHTS_STALE_HOURS = 24` (SWR stale window) |
+| `creatives_cache` | `UnifiedAd.status` (every ad row — populated from `collapseTiktokStatus` directly) | `CREATIVES_STALE_HOURS = 24` (SWR stale window) |
+
+Without intervention: 24 hours of stale-status data after the fix lands. User retesting the lifetime view within that window would still see the buggy 98 ACTIVE count via SWR until expiry.
+
+**Decision: combined targeted DELETE.**
+
+```sql
+DELETE FROM insights_cache WHERE provider = 'tiktok';
+DELETE FROM creatives_cache WHERE provider = 'tiktok';
+```
+
+Two statements. Scoped to `provider = 'tiktok'` — Meta + Google cache untouched. Broader than the §Lifetime-only DELETE (which targeted `cache_key LIKE '%:lifetime:%'`) because the status mislabel affects **all date-range cache entries** for TikTok, not just lifetime. Subsumes the §Lifetime DELETE entirely — one combined cleanup instead of two.
+
+**GRANT-contingent execution**: an earlier diagnostic during §Lifetime work surfaced that PostgREST denies `SELECT` on `insights_cache` and `creatives_cache` for the service_role with `code:42501` (per Issue #30, GRANTs misaligned). Before relying on this DELETE, the implementation step MUST verify `service_role` has `DELETE` permission on both tables — likely also denied with the same 42501 error. If denied, fallback options:
+
+| Fallback | Cost | Verdict |
+|----------|------|---------|
+| Rely on TTL (24h max stale window) | Stale UX for ≤24h post-deploy | Worse than the §Lifetime DELETE rationale rejected; only acceptable if GRANT is genuinely blocked AND adding the GRANT is out of scope for this amendment |
+| Add the missing GRANTs as part of the same commit (one-line SQL via Supabase migration) | Slightly broader scope — touches GRANT policy | Pre-empts Issue #30's broader audit for one delete. REJECTED. |
+| Hit the cache tables via a one-off API route (server-side `supabase` client which bypasses PostgREST grants per cache.ts's existing pattern) | One small route, single-use | Pragmatic compromise — uses the same code path that successfully writes to cache, sidesteps PostgREST GRANTs without modifying them. **Recommended fallback** |
+
+Final order during the implementation step:
+1. Test PostgREST DELETE permission on `insights_cache` (single test row).
+2. If allowed → run the two DELETEs at the route.
+3. If denied → add a one-time admin route that uses the server-side `supabase` client (which works for cache writes, so should work for deletes) → invoke once → remove.
+
+**Memory #28 protocol**: still NOT a schema bump. No `CACHE_SCHEMA_VERSION` change. No cross-platform cache wipe. Meta + Google cache untouched. Same risk-avoidance posture as the §Lifetime DELETE.
+
+### Implementation scope (files that change vs files that don't)
+
+**Files that change:**
+
+| File | Change | LOC est. |
+|------|--------|----------|
+| `src/lib/tiktok/normalize.ts` | Rewrite `collapseTiktokStatus` per the restructure above; add `NON_DELIVERY_SECONDARY` constant with jsdoc citing live evidence + the conservative-pattern decision | ~25 |
+| `docs/decisions/020-tiktok-adapter-v1.md` | This amendment | — |
+
+**Files that explicitly do NOT change:**
+
+| File | Why |
+|------|-----|
+| `src/lib/ads/types.ts` | `UnifiedCampaign["status"]` union stays `"ACTIVE" \| "PAUSED" \| "DELETED" \| "ARCHIVED"` — no new enum value |
+| `src/lib/ads/providers/tiktok.ts` | Adapter calls `collapseTiktokStatus` unchanged — only the function body changes |
+| `src/lib/meta/*` / `src/lib/google-ads/*` | Untouched — bug + fix are TikTok-specific |
+| `src/lib/ads/cache.ts` | No schema change |
+| `src/app/dashboard/reports/ReportsClient.tsx` | UI badges + status filter consume the same union values; counts update via re-render after the cache DELETE |
+
+### What gets surfaced to the user after this lands
+
+- The TikTok lifetime tab's "active" count drops from 98 → **29** for IMAA
+- The PAUSED count grows from 96 → **165** (96 existing + 69 reclassified)
+- Total visible ad count stays **194** (the adapter filter is spend-based; only badge labels change)
+- Status badges on the 69 ENABLE+CAMPAIGN_DISABLE ads flip from green ACTIVE to yellow PAUSED
+- The CreativesGrid status filter (`ACTIVE` / `PAUSED` / `all`) now correctly partitions the grid
+- Modal status badges align with the same correction
+- No data loss, no metric drift — `spend` / `revenue` / `roas` numbers stay identical (only `status` field changes)
+
+### Probe evidence
+
+- `scripts/_tiktok-active-bucket-probe.mts` (2026-05-31) — the load-bearing probe: confirmed 71 ENABLE+CAMPAIGN_DISABLE ads, 29 ENABLE+DELIVERY_OK ads, 2 ENABLE+zero-spend (filter-dropped). User-visible mislabel count = 69 / 98.
+- `scripts/_tiktok-secondary-enum-probe.mts` (2026-05-31) — full enum surface enumeration for IMAA: confirmed IMAA only exhibits `AD_STATUS_DELIVERY_OK` + `AD_STATUS_CAMPAIGN_DISABLE` for ads and `CAMPAIGN_STATUS_ENABLE` + `CAMPAIGN_STATUS_DISABLE` for campaigns.
+
+Both throwaway (untracked); preserve in Session 3's `chore(scripts)` commit per ADR-020 §18 disposition-B since the chain landing this amendment depends on them.
+
+### Supersession + preservation
+
+This §StatusCollapse amendment **SUPERSEDES**:
+
+- The original `collapseTiktokStatus`'s unconditional `ENABLE → ACTIVE` early return. ENABLE ads now check `secondary_status` for the conservative non-delivery pattern set before defaulting to ACTIVE.
+- The previous regex-only DELETED/ARCHIVED detection as the PRIMARY path. The restructure makes `operation_status === "DELETE" / "ARCHIVE"` the primary path; the regex stays as defensive fallback for forward-compat with TikTok enum additions we haven't observed.
+- The deferred task "verify DELETED/ARCHIVED secondary_status substring-match collapse" — folded into this amendment's restructure. Task removed from the open list.
+
+This §StatusCollapse **PRESERVES** unchanged:
+
+- The `UnifiedCampaign["status"]` cross-platform type union (no enum addition)
+- Meta + Google adapter status-collapse logic (TikTok-specific work only)
+- The adapter's `withReauthMapping` wrapper around `getCampaigns` / `getAds` / insight methods (status is computed in the normalizer, after the fetcher and within the wrap)
+- The route-layer cache contract (`insights_cache` / `creatives_cache` schemas, key shapes, TTLs)
+- The §Lifetime chunked-fetch path (status is computed after the chunked merge, on the merged rows fed through `normalizeReportRowToInsight`)
+- Memory #28's cache-bump pre-push protocol (still applies — no schema change here, but the combined DELETE is the deploy-day action)
+- The `pausedReason` metadata-field escape hatch is documented as an option but explicitly NOT in scope (TikTok-specific paused-reason precision can be added later without touching the status union)
