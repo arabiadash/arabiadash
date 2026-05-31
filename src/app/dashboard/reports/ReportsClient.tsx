@@ -34,6 +34,7 @@ import KpiCard, { type KpiCardProps } from "@/components/reports/KpiCard";
 // via renderAdCard below; M5/M6 variants continue using the inline
 // CreativeCard so existing render behavior stays byte-for-byte identical.
 import { PMaxAssetGroupCard } from "@/components/creatives/PMaxAssetGroupCard";
+import { TikTokAdDetailModal } from "@/components/creatives/TikTokAdDetailModal";
 import type { Workspace, WorkspaceConnection } from "@/lib/workspaces";
 import {
   useInsights,
@@ -816,6 +817,15 @@ interface AdDetailModalProps {
    */
   range?: DateRange;
   customRange?: CustomDateRange;
+  /**
+   * Phase 7 / ADR-020 §2b — campaign-level ROAS for TIKTOK_AD only.
+   * Per-ad ROAS is misleading for TikTok (app/web pixel attribution
+   * split), so the TikTok modal surfaces the parent-campaign ROAS
+   * instead. Passed through to TikTokAdDetailModal via the early-
+   * return branch; ignored for all other variants. 2d-4 will replace
+   * the current null placeholder with a real lookup at the call site.
+   */
+  campaignRoas?: number | null;
 }
 
 function AdDetailModal({
@@ -826,6 +836,7 @@ function AdDetailModal({
   adGroupAdCount = 0,
   range,
   customRange,
+  campaignRoas = null,
 }: AdDetailModalProps) {
   // PMAX_ASSET_GROUP gets its own dedicated modal — wholly different
   // shape (tabbed asset surfaces, wider shell, in-modal YouTube embeds,
@@ -839,6 +850,23 @@ function AdDetailModal({
         accountCurrency={accountCurrency}
         displayCurrency={displayCurrency}
         onClose={onClose}
+      />
+    );
+  }
+
+  // TIKTOK_AD gets its own dedicated modal — vertical 9:16 video
+  // player, on-mount signed-URL fetch via useTiktokCreativeUrl, and
+  // a campaign-level ROAS cell (per-ad ROAS would mix TikTok's app
+  // vs web pixel attribution surfaces — §2b). Same early-return
+  // pattern as PMAX above.
+  if (ad.ad_type === "TIKTOK_AD") {
+    return (
+      <TikTokAdDetailModal
+        ad={ad}
+        accountCurrency={accountCurrency}
+        displayCurrency={displayCurrency}
+        onClose={onClose}
+        campaignRoas={campaignRoas}
       />
     );
   }
@@ -2899,6 +2927,12 @@ function CreativesGrid({
           // lazy search-terms + keywords fetches align with the cards.
           range={range}
           customRange={customRange}
+          // Phase 7 / ADR-020 §2b — campaign-level ROAS for the TikTok
+          // branch. 2d-4 will replace this null with a real lookup
+          // (selectedAd.campaignId → campaignMetricsById Map). Today
+          // the TikTok modal renders the "غير متوفر" tooltip in the
+          // ROAS cell, which is the correct behavior pre-2d-4 wiring.
+          campaignRoas={null}
         />
       )}
     </>
