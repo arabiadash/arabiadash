@@ -668,26 +668,100 @@ export interface UnifiedAdUnknownGoogle extends UnifiedAdCommon {
 export interface UnifiedAdTiktok extends UnifiedAdCommon {
   ad_type: "TIKTOK_AD";
   type_data: {
-    /** From /file/video/ad/info/ — poster image for the video card. */
+    /**
+     * Resolved poster image URL. NEVER stored in creatives_cache —
+     * the URL is signed/expiring (hours-scale TTL) per ADR-020 §12c
+     * §2. Populated at render time by the tiktok-url-resolve route
+     * (2c work); undefined on cached rows.
+     */
     posterUrl?: string;
-    /** TikTok-internal video_id; used for /file/video/ad/info/ lookups. */
+    /**
+     * Direct-upload video_id (path A discriminator per §12c §1).
+     * Populated when the ad's identity_type is BC_AUTH_TT and a
+     * raw video file was uploaded. Cached value — used by
+     * tiktok-url-resolve route to call /file/video/ad/info/.
+     */
     videoId?: string;
-    /** Public share URL for "View on TikTok" external link. */
+    /**
+     * "View on TikTok" embed-player URL per §12c §6. Format:
+     * `https://www.tiktok.com/player/v1/<tiktokItemId>`. Constructed
+     * client-side from tiktokItemId; populated for path B (Spark Ads)
+     * only — direct uploads (path A) and pure-image ads (path C) have
+     * no public tiktok.com URL.
+     */
     tiktokVideoUrl?: string;
     /**
-     * TikTok ad objective_type (CONVERSIONS / TRAFFIC / VIDEO_VIEWS /
-     * ENGAGEMENT / REACH / APP_PROMOTION). Surfaced in modal for
-     * context — different objectives expect different success metrics.
+     * TikTok ad objective_type (WEB_CONVERSIONS / TRAFFIC /
+     * VIDEO_VIEWS / ENGAGEMENT / REACH / APP_PROMOTION). Sourced
+     * from the parent campaign's objective_type via the adapter's
+     * getCampaigns join — TikTok doesn't expose objective at the ad
+     * row level. Empty string when the campaign join fails (rare
+     * orphan-row edge case).
      */
     objective_type: string;
-    /** Call-to-action label (SHOP_NOW / LEARN_MORE / DOWNLOAD / etc.). */
+    /**
+     * Call-to-action label (SHOP_NOW / LEARN_MORE / DOWNLOAD / etc.).
+     *
+     * v1: always undefined. The `call_to_action` field is in
+     * TikTok's /ad/get/ allowed-fields list but silently dropped
+     * from the response on AUTH_CODE (Spark Ad) rows — per ADR-020
+     * §12c §4 mode 3. Excluded from AD_FIELDS in api.ts to avoid
+     * the "valid name, missing value" anti-pattern. Field kept for
+     * forward-compat: if a future probe shows direct-upload ads
+     * return it reliably, re-add to AD_FIELDS + populate here.
+     */
     callToAction?: string;
     /**
      * TikTok-native total view count (autoplay views included).
      * Differs from `impressions` (impressions = times rendered in
      * feed; videoViews = times actually started playing).
+     *
+     * Sourced from `metrics.video_play_actions` per the report-shape
+     * findings §1 (the original `video_views` name was wrong;
+     * rejected with 40002 at all data_levels).
+     *
+     * Always a number when set — 0 when the ad ran but had no plays
+     * AND 0 when the ad had no matching insight row in window. The
+     * UI cannot distinguish "no activity" from "zero plays" via this
+     * field alone; consumers needing the distinction must check
+     * `spend === 0 && impressions === 0` as the no-activity signal.
      */
     videoViews?: number;
+    /**
+     * Spark Ad item_id — references the source organic TikTok post
+     * (path B discriminator per §12c §1). Populated when the ad's
+     * identity_type is AUTH_CODE. Cached value — used by the
+     * tiktok-url-resolve route to call /identity/video/info/.
+     * ALSO feeds the embed-player URL construction (tiktokVideoUrl).
+     */
+    tiktokItemId?: string;
+    /**
+     * TikTok identity type — descriptive label for the ad's source
+     * identity. Common values: "AUTH_CODE" (Spark Ad), "BC_AUTH_TT"
+     * (Business Center authorized account), "TT_USER",
+     * "CUSTOMIZED_USER". Per ADR-020 §12c §1 this is a SECONDARY
+     * signal — creative-path routing uses ID-presence
+     * (videoId / tiktokItemId / imageIds), NOT identity_type.
+     */
+    identityType?: string;
+    /**
+     * Spark Ad identity_id — paired with tiktokItemId to call
+     * /identity/video/info/ for URL resolution. Numeric on AUTH_CODE,
+     * UUID on BC_AUTH_TT identities (per empirical probe
+     * 2026-05-31). Defensive optional: if missing on a Spark Ad,
+     * URL resolution fails → card falls back to embed iframe.
+     */
+    identityId?: string;
+    /**
+     * Pure-image ad image asset references (path C — DEFERRED per
+     * §12c §1). TikTok returns image_ids in the TOS object-path
+     * format (e.g. "tos-alisg-p-..."). Resolution endpoint
+     * /file/video/image/info/ exists but response shape is
+     * UNVERIFIED (no pure-image ads on test accounts to probe).
+     * Cached for diagnostic visibility + to drive the path-C
+     * fallback render in TikTokCreativeCard.
+     */
+    imageIds?: string[];
   };
 }
 
