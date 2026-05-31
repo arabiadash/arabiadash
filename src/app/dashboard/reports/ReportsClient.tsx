@@ -44,6 +44,8 @@ import {
 import { useProviderInsights } from "@/lib/hooks/use-provider-insights";
 import { useProviderAds } from "@/lib/hooks/use-provider-ads";
 import { useAds } from "@/lib/hooks/use-ads";
+import { useTiktokCreativeUrlsBatch } from "@/lib/hooks/use-tiktok-creative-urls";
+import type { TikTokCreativeUrls } from "@/lib/tiktok/normalize";
 import { useSearchTerms } from "@/lib/hooks/use-search-terms";
 import { useKeywords } from "@/lib/hooks/use-keywords";
 import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
@@ -71,6 +73,7 @@ import {
   type CustomDateRange,
   type UnifiedCampaign,
   type UnifiedAd,
+  type UnifiedAdTiktok,
   type UnifiedInsight,
 } from "@/lib/ads/types";
 import {
@@ -2741,6 +2744,16 @@ function renderAdCard(
     accountCurrency: Currency;
     displayCurrency: Currency;
     onClick: () => void;
+    /**
+     * TikTok URL batch lookup keyed by ad.id. Only set when CreativesGrid
+     * is rendering for the TikTok tab; undefined elsewhere. Read only by
+     * the TIKTOK_AD branch — Meta/Google/PMAX branches ignore it.
+     */
+    tiktokUrlsByAdId?: Record<string, TikTokCreativeUrls | null>;
+    /** TikTok per-ad URL-resolve errors keyed by ad.id. */
+    tiktokUrlErrors?: Record<string, string>;
+    /** TikTok batch-loading flag — true while the batch resolve is in-flight. */
+    tiktokUrlsLoading?: boolean;
   }
 ): React.ReactElement {
   switch (ad.ad_type) {
@@ -2754,20 +2767,20 @@ function renderAdCard(
         />
       );
     case "TIKTOK_AD":
-      // 2e dispatch: constant null/false/undefined props for URL fields.
-      // Card renders in STATE 4 placeholder (camera icon + Arabic
-      // "صورة الإعلان غير متوفرة في المعاينة") — honest "we know it's
-      // TikTok, poster not resolved yet" vs the §2b regression of
-      // mis-rendering as generic CreativeCard (which would show
-      // ad.roas mixing TikTok's app/web pixel attribution surfaces).
-      // 2f will flip these 3 props from constants to real batch-hook
-      // values (resolvedUrls + urlsLoading + urlError per ad).
+      // Phase 7 / ADR-020 §12c — real batch-hook values from
+      // useTiktokCreativeUrlsBatch (lifted into CreativesGrid).
+      // resolvedUrls=null on this ad's key means: the route returned
+      // null for this ad (path C/UNKNOWN, OR fetch hasn't completed
+      // yet — distinguish via urlsLoading). urlError set means the
+      // route returned an error for this specific ad. The
+      // TikTokCreativeCard 4-state dispatcher handles LOADING /
+      // POSTER / EMBED_PLACEHOLDER / PLACEHOLDER from those inputs.
       return (
         <TikTokCreativeCard
           ad={ad}
-          resolvedUrls={null}
-          urlsLoading={false}
-          urlError={undefined}
+          resolvedUrls={sharedProps.tiktokUrlsByAdId?.[ad.id] ?? null}
+          urlsLoading={sharedProps.tiktokUrlsLoading ?? false}
+          urlError={sharedProps.tiktokUrlErrors?.[ad.id]}
           accountCurrency={sharedProps.accountCurrency}
           displayCurrency={sharedProps.displayCurrency}
           onClick={sharedProps.onClick}
@@ -2806,6 +2819,69 @@ function CreativesGrid({
   const [sortBy, setSortBy] = useState<CreativeSortKey>("roas");
   const [selectedAd, setSelectedAd] = useState<UnifiedAd | null>(null);
   const [visibleCount, setVisibleCount] = useState(CREATIVES_PAGE_SIZE);
+
+  // ── Phase 7 / ADR-020 §12c — TikTok URL batch + campaign-ROAS Map ──
+  //
+  // CreativesGrid is SHARED across Meta/Google/TikTok tabs. The two
+  // hooks below fire on every render (Rules of Hooks — can't be
+  // conditional) but are TRUE pre-fetch no-ops when no TikTok ads are
+  // present: both have early returns before any fetch() call. So
+  // Meta/Google CreativesGrid calls hit synthetic empty-state paths
+  // (zero network, zero side effects) — behavior bit-identical to
+  // pre-2f for those tabs.
+  //
+  // Verified empty-input short-circuits:
+  //   useTiktokCreativeUrlsBatch (use-tiktok-creative-urls.ts:214-221)
+  //     `if (!enabled || !accountId || ads.length === 0) return;`
+  //   useProviderInsights (use-provider-insights.ts:137-138 + :240
+  //   + :254-262) — useEffect skip + doFetch early-return + synthetic
+  //   noConnection return when accountIds is empty.
+  //
+  // Derived from RAW `ads` (not `filteredAds`) so the URL set is stable
+  // across status-filter / sort changes — refetches fire only when
+  // the underlying ad inventory changes.
+  const tiktokAds = useMemo(
+    () =>
+      ads.filter(
+        (a): a is UnifiedAdTiktok => a.ad_type === "TIKTOK_AD"
+      ),
+    [ads]
+  );
+  // The adapter's getAds normalizer + useProviderAds stamping guarantee
+  // accountId is set on every ad row; first ad's accountId is the
+  // implicit primary for the single-account v1 constraint (the multi-
+  // account amber warning already lives at the tab level).
+  const tiktokAccountId = tiktokAds[0]?.accountId ?? "";
+  const hasTiktokAds = tiktokAds.length > 0 && !!tiktokAccountId;
+
+  const {
+    urls: tiktokUrlsByAdId,
+    errors: tiktokUrlErrors,
+    loading: tiktokUrlsLoading,
+  } = useTiktokCreativeUrlsBatch({
+    accountId: tiktokAccountId,
+    ads: tiktokAds,
+    enabled: hasTiktokAds,
+  });
+
+  // Campaign-level insights drive the modal's "ROAS — على مستوى الحملة"
+  // cell (per §2b: per-ad ROAS would mix app/web pixel attribution
+  // surfaces, so we surface the parent-campaign ROAS instead).
+  const tiktokCampaigns = useProviderInsights({
+    provider: "tiktok",
+    accountIds: hasTiktokAds ? [tiktokAccountId] : [],
+    range,
+    customRange,
+    level: "campaign",
+  });
+
+  const tiktokCampaignRoasById = useMemo(() => {
+    const m = new Map<string, number | null>();
+    for (const insight of tiktokCampaigns.insights) {
+      if (insight.campaignId) m.set(insight.campaignId, insight.roas);
+    }
+    return m;
+  }, [tiktokCampaigns.insights]);
 
   const filteredAds = useMemo(() => {
     let result = [...ads];
@@ -2905,6 +2981,9 @@ function CreativesGrid({
                 accountCurrency,
                 displayCurrency,
                 onClick: () => setSelectedAd(ad),
+                tiktokUrlsByAdId,
+                tiktokUrlErrors,
+                tiktokUrlsLoading,
               })}
             </div>
           ))}
@@ -2949,11 +3028,19 @@ function CreativesGrid({
           range={range}
           customRange={customRange}
           // Phase 7 / ADR-020 §2b — campaign-level ROAS for the TikTok
-          // branch. 2d-4 will replace this null with a real lookup
-          // (selectedAd.campaignId → campaignMetricsById Map). Today
-          // the TikTok modal renders the "غير متوفر" tooltip in the
-          // ROAS cell, which is the correct behavior pre-2d-4 wiring.
-          campaignRoas={null}
+          // branch. Wired in 2f: lookup via selectedAd.campaignId in
+          // tiktokCampaignRoasById. For non-TikTok selectedAd, the
+          // ternary's null branch fires → AdDetailModal ignores the
+          // prop for Meta/Google variants (passed through to the
+          // TikTokAdDetailModal early-return only). Modal's "غير متوفر"
+          // tooltip renders when the lookup misses (e.g. campaign with
+          // no spend in window → no insight row → no Map entry).
+          campaignRoas={
+            selectedAd.ad_type === "TIKTOK_AD"
+              ? tiktokCampaignRoasById.get(selectedAd.campaignId ?? "") ??
+                null
+              : null
+          }
         />
       )}
     </>
