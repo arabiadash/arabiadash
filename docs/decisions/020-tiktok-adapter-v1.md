@@ -1704,6 +1704,14 @@ This §ResolveConcurrency **PRESERVES** unchanged:
 
 Smart-Performance-Campaign (`SMART_PLUS`) ads with `creative_material_mode = DYNAMIC` silently return `identity_type=null` and `identity_id=null` from `/ad/get/`, even though `tiktok_item_id` is populated. The same ads also return zero identity fields at the parent `/adgroup/get/` level. At scale this is not a marginal case: on IMAA, 12 of 17 placeholder-rendering ads (70 %) share this signature, all 12 owned by a single adgroup. §12c §4 Mode 3's "accept STATE 3 embed-only" UX response was tolerable when DCO was described as "rare"; at 70 % of a category surface, it dominates and the Card surface needs a real poster + creator. This amendment documents the three Marketing-API resolution paths as exhausted, adds **Path D — public oEmbed lookup** as the resolver of record for these ads, and confirms the path is production-viable by direct measurement from a Vercel iad1 serverless function.
 
+### Spec correction (2026-06-01) — Path-D outputs flow through `TikTokCreativeUrls`, not `UnifiedAdTiktok.type_data`
+
+The original "Path-D resolver shape" specification below routed `thumbnail_url` and creator fields into `UnifiedAdTiktok.type_data` (which lives in `creatives_cache`). That was incorrect. The thumbnail URL is a signed URL with `x-expires` ~24h TTL — the same signed-URL invariant as the existing `posterUrl` field, which [`types.ts:670-677`](../../src/lib/ads/types.ts#L670-L677) explicitly documents as "**NEVER stored in creatives_cache** per §12c §2." Creator fields (`author_name`, `author_unique_id`, `author_url`) are derived from the same signed-URL endpoint and naturally co-expire. Caching any of them would 403 the next time the row is read.
+
+The corrected resolver routes outputs through `TikTokCreativeUrls` ([`normalize.ts:486`](../../src/lib/tiktok/normalize.ts#L486)) — the in-memory shape returned by `/api/ads/creatives/tiktok-url-resolve` and stored in the `useTiktokCreativeUrls{Batch}` hook state. This shape already carries `posterUrl` / `playableUrl` / `expiresAt` for path A/B — Path-D adds optional `creatorName` / `creatorHandle` / `creatorUrl` to the same shape.
+
+Cache impact: **zero**. Path-D adds zero fields to `creatives_cache`. No `CACHE_SCHEMA_VERSION` bump. Memory #28 cache-bump protocol does not apply. Issue #30's 42501 GRANT-block on `creatives_cache` DELETE is irrelevant for this milestone. The "Path-D resolver shape" and "Implementation scope" blocks below have been updated to reflect this.
+
 ### Trigger
 
 Live-test triage Obs 2 on the IMAA TikTok surface: 17 of 53 ads (32 %) render with the generic STATE 3 placeholder. User flagged the pattern after spotting that 12 of those 17 share `ad_name = "_001"` with substantial view counts (740K, 388K, 187K). Initial catalog hypothesis was rejected by the user (IMAA runs zero catalog ads on TikTok).
@@ -1800,16 +1808,21 @@ TikTok's oEmbed is globally consistent. The only difference is CDN-edge routing 
 ### Path-D resolver shape (specification — implementation lands per-commit after this ADR)
 
 ```
-Input:  UnifiedAd where ad_type === "TIKTOK_AD"
-        && type_data.tiktokVideoUrl is set (item_id present)
-        && type_data.creativeImageUrl is null (path A/B failed)
-Output: type_data.creativeImageUrl ← oembed.thumbnail_url
-        type_data.creator_name     ← oembed.author_name      (Obs 3 enrichment)
-        type_data.creator_handle   ← oembed.author_unique_id (Obs 3 enrichment)
-        type_data.creator_url      ← oembed.author_url       (Obs 3 enrichment)
+Input:  UnifiedAdTiktok where path A/B identity is absent
+        (i.e. routeCreativeByIdentityType returns kind=UNKNOWN
+         but type_data.tiktokItemId is populated — DCO/SPC pattern)
+Output: TikTokCreativeUrls extended with:
+        posterUrl       ← oembed.thumbnail_url       (existing field, populated for Path-D)
+        expiresAt       ← parsed from thumbnail_url's x-expires query param
+        creatorName?    ← oembed.author_name         (Obs 3 enrichment, new optional field)
+        creatorHandle?  ← oembed.author_unique_id    (Obs 3 enrichment, new optional field)
+        creatorUrl?     ← oembed.author_url          (Obs 3 enrichment, new optional field)
+playableUrl: empty string (no MP4 from oEmbed; Card renders poster,
+             Modal embed iframe handles playback per §12c §6)
 Concurrency:  OEMBED_CONCURRENCY = 4 (matches §ResolveConcurrency PATH_B cap)
 Fail-fast:    in-loop chunk bubble check (matches §ResolveConcurrency pattern)
-TTL:          signed-URL ~24h; re-resolve on next refresh (SWR cache pattern)
+TTL:          signed-URL ~24h; re-resolve on next refresh (in-memory hook
+              state only — NOT persisted to creatives_cache, per §12c §2 invariant)
 ```
 
 This single endpoint resolves BOTH:
@@ -1831,13 +1844,13 @@ This single endpoint resolves BOTH:
 
 | File | Change |
 |---|---|
-| `src/lib/tiktok/normalize.ts` | extend `type_data` schema with optional `creator_name` / `creator_handle` / `creator_url` fields (additive, see backward-compat note below) |
+| `src/lib/tiktok/normalize.ts` | extend `TikTokCreativeUrls` interface with optional `creatorName` / `creatorHandle` / `creatorUrl` fields (in-memory shape only — NOT cached, per §12c §2 invariant) |
 | `src/lib/tiktok/api.ts` | add `resolveOembed(itemId)` helper + `OEMBED_CONCURRENCY=4` constant (mirrors PATH_B_CONCURRENCY) |
 | `src/app/api/ads/creatives/tiktok-url-resolve/route.ts` | add Path-D branch: when `item_id` present AND identity absent AND path-B impossible, call `resolveOembed`; populate `creativeImageUrl` + creator fields; preserve §ResolveConcurrency chunk-loop + fail-fast pattern verbatim |
 | `src/components/creatives/TikTokCreativeCard.tsx` | render creator name when present; "ديناميكي" badge when DCO is derived (identity absent + item_id present) |
 | `src/components/creatives/TikTokAdDetailModal.tsx` | display creator name + handle in modal header when present |
 
-**Backward-compatibility recon (whether v13→v14 bump is required) lands in a separate scoping commit before C1**, per the Memory #28 protocol. Memory #28 mandates an e2e cross-platform refresh probe + rollback plan for any bump; the recon question is whether an additive optional-field extension actually triggers a misread on existing cached rows, or whether old rows can naturally expire/refresh under the existing schema. If backward-compatible, no bump → no Memory #28 protocol burden. If a bump is required, full protocol applies and Issue #30's 42501 GRANT-block is the production prerequisite.
+**No cache bump.** The implementation scope above touches only `TikTokCreativeUrls` (in-memory hook state) and the resolve route's response shape. `UnifiedAdTiktok.type_data` — the only TikTok shape that lives in `creatives_cache` — is not modified. `CACHE_SCHEMA_VERSION` remains v13. Memory #28 cache-bump protocol does not apply for Path-D. See **Spec correction (2026-06-01)** at the top of this section for the architectural reasoning.
 
 ### Risks + open questions
 
