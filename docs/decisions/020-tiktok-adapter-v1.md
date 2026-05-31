@@ -912,3 +912,99 @@ This amendment's findings derive from these probe runs (preserved in `scripts/` 
 - `_tiktok-creative-probe.mjs` — `/file/video/ad/info/` shape (path A) + `/ad/get/` field behavior (three failure modes)
 
 Full raw response evidence catalogued in [docs/recon/tiktok-creative-findings-2026-05-31.md](../recon/tiktok-creative-findings-2026-05-31.md) — that recon doc is canonical for the verbatim JSON shapes; this amendment is the architectural-decision distillation.
+
+## §2b — Revenue metric correction: `total_complete_payment_rate`, not `total_purchase_value` (2026-05-31, live-data verified)
+
+§Decision 2 + the Report-Shape Empirical Findings §4 chose `total_purchase_value` as the revenue metric (paired with `complete_payment` count + `complete_payment_roas` ratio). Live integration testing against IMAA (a real website-pixel Saudi store, May 2-31) proved this returns 0 for website-attributed purchases — `total_purchase_value` is the APP-attribution value metric (internal ID `time_attr_total_repetitive_active_pay_value` — the `active_pay` family), which is 0 for any pure website pixel store.
+
+The CORRECT website revenue metric is **`total_complete_payment_rate`**.
+
+### ⚠️ NAMING TRAP
+
+Despite the `_rate` suffix, this metric is the **aggregate VALUE in account currency**, NOT a rate/percentage. TikTok's internal ID is `time_attr_total_shopping_value` (per the SDK YAML mapping in `smart_plus_material_report_overview.yml`), which confirms it's a SUM-of-values, not a ratio. The API key name appears to be a TikTok SDK naming inconsistency — the value family generally uses `total_*_value` suffixes, but this particular metric got `_rate` instead. Documented prominently in `src/lib/tiktok/api.ts` next to the metric so no future reader "fixes" the apparent rate-vs-value mismatch.
+
+### Live-data evidence (IMAA, advertiser `7327982125339328514`, May 2-31, AUCTION_ADVERTISER)
+
+| Source | Value | Method |
+|--------|------:|--------|
+| **`total_complete_payment_rate`** (direct) | **456,410.51 SAR** | single metric request |
+| `value_per_complete_payment` × `complete_payment` | 456,404.20 SAR | per-event (246.04) × count (1855) |
+| `spend` × `complete_payment_roas` | 456,335.83 SAR | computed sanity check |
+| **Platform UI "Purchase value (website)" sum** | **456,409 SAR** | 391,681 + 35,870 + 28,858 across 3 active campaigns |
+
+Three independent computation paths converge within **0.02%** (max delta 75 SAR on a 456,410 SAR figure). The direct metric matches the platform within **0.00%** (1.51 SAR delta).
+
+### Per-campaign verification — exact platform UI match
+
+| campaign_id | spend (SAR) | count | API `complete_payment_roas` | Platform UI "Payment completion ROAS (website)" |
+|-------------|------------:|------:|----------------------------:|------------------------------------------------:|
+| 1856897020453890 | 7,490.05 | 116 | **4.79** | **4.79** ✓ |
+| 1856896918015106 | 7,429.86 | 74 | **3.88** | **3.89** (rounding) ✓ |
+| 1833373551147026 | 70,058.46 | 1,665 | **5.59** | **5.59** ✓ |
+
+The platform UI's `4.79 / 3.89 / 5.59` figures the user reported map verbatim to the API's per-campaign `complete_payment_roas` values. **The `complete_payment_roas` metric IS the website ROAS**, NOT app-attribution — the original "app-attribution" hypothesis was wrong; the confusion was in the platform UI's separate "Purchase ROAS (app)" label (a distinct metric that returns 0 for website stores) vs "Payment completion ROAS (website)" (the one our metric matches).
+
+### §Decision 2 metric set correction
+
+| Metric | Action | Reason |
+|--------|--------|--------|
+| `total_purchase_value` | **REMOVE** from request list | App-attribution (active_pay family); returns 0 for website pixel stores — wrong family entirely |
+| `complete_payment_roas` | **REMOVE** from request list | Metric itself is VALID + correct (returns website ROAS), but we compute `roas = revenue / spend` client-side per the null-safe contract pattern (see `src/lib/tiktok/normalize.ts` — null on zero spend, distinct from 0). The metric remains a documented diagnostic reference but is not requested. |
+| `complete_payment` | KEEP unchanged | Returns the correct website purchase count from the same shopping family |
+| `total_complete_payment_rate` | **ADD** to request list | Website-pixel aggregate revenue per this amendment's evidence |
+
+Net change to `INSIGHTS_METRICS_ACCOUNT` / `INSIGHTS_METRICS_CAMPAIGN` / `INSIGHTS_METRICS_AD`: **−2 metrics, +1 metric → 11 → 10 metrics per `/report/integrated/get/` call**.
+
+### `normalize.ts` mapper change
+
+Single line in `normalizeReportRowToInsight`:
+
+```typescript
+// Was:
+const revenue = extractNumber(m, "total_purchase_value");
+// Now:
+const revenue = extractNumber(m, "total_complete_payment_rate");
+```
+
+The `roas` and `costPerPurchase` null-safe computation logic is unchanged (`roas = spend > 0 ? revenue / spend : null`; `costPerPurchase = purchases > 0 ? spend / purchases : null`). The contract semantics from 2b-1 stay intact — TikTok purchases/revenue are always numbers (never null per pixel-native; 0 = real zero, not "no data"). Only the source metric name changes.
+
+### Generalization — applies to the full Saudi/Gulf customer base
+
+TikTok Pixel's `CompletePayment` event is the standard website-conversion event for ecommerce platforms. Per the TikTok Pixel installation docs:
+
+- **Salla** uses CompletePayment for order-completion firing
+- **Zid** uses CompletePayment for order-completion firing
+- **Custom website pixels** (Shopify-hosted, WordPress/WooCommerce, headless React/Next.js storefronts) follow the same convention
+
+The internal ID family `time_attr_shopping*` (which `total_complete_payment_rate` belongs to) captures ALL CompletePayment events. So this correction covers the entire Saudi/Gulf ecommerce customer profile — not just IMAA. The `active_pay` family that `total_purchase_value` belongs to is for APP-install + in-app-purchase campaigns, which is a different ad-objective surface (`APP_PROMOTION` rather than `WEB_CONVERSIONS`). ArabiaDash's customer focus is `WEB_CONVERSIONS` advertisers, so app-attribution metrics are universally wrong for our use case.
+
+### Open checkpoint (NOT corrected here — deferred)
+
+API `complete_payment` account-total returned 1,855 while platform UI's "Purchases (website)" showed 1,665. Investigation confirmed:
+
+- 1,665 is the dominant campaign's per-campaign count (campaign 1833373551147026), not the account total
+- 1,855 is the API account-level sum (1,665 + 74 + 116 across the 3 active campaigns)
+- NOT a discrepancy — different aggregation scopes (the platform UI may default to the highest-spend campaign's headline number; the API returns the true account aggregate)
+
+Attribution window may also contribute small deltas: platform UI typically defaults to "7-day click + 1-day view" attribution while the API may default to "7-day click" or another window. The API has request params for `attribution_event_lookback_window` + `attribution_view_lookback_window` that could be added to align if a customer reports the difference. **Deferred** — current values are within 0.02% on revenue + ROAS, which is the load-bearing metric. Worth a future probe if attribution-window alignment becomes a customer concern.
+
+### Probe evidence
+
+- `scripts/_tiktok-website-attribution.mjs` — initial onsite_shopping family probe (family doesn't exist for IMAA; rules out the wrong path)
+- `scripts/_tiktok-revenue-metric.mjs` — final probe that identified `total_complete_payment_rate` + cross-validated 3 methods against platform UI
+
+Both throwaway (untracked); preserve in Session 3's `chore(scripts)` commit per ADR-020 §18 disposition-B since they document the empirical chain that landed this correction.
+
+### Supersession + preservation
+
+This §2b **SUPERSEDES**:
+
+- §Decision 2's `total_purchase_value` → `revenue` mapping (incorrect family — replaced with `total_complete_payment_rate`)
+- Report-Shape Empirical Findings §4's listing of `total_purchase_value` as a "valid + verified" purchase metric (the metric is valid as an API name but returns wrong-family data for website stores — corrected here)
+
+This §2b **PRESERVES** unchanged:
+
+- §Decision 2's `complete_payment` → `purchases` mapping (count correct + website-family confirmed)
+- §Decision 2's pixel-native semantic (`hasConversionData: true` always — TikTok pixel is the platform-native attribution source)
+- The null-safe `roas` + `costPerPurchase` computation pattern from 2b-1's normalize.ts
+- The deferral of `vta_purchase` / `cta_purchase` attribution-split metrics to a v2 TikTok-specific surface
