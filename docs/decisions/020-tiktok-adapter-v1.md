@@ -1008,3 +1008,186 @@ This §2b **PRESERVES** unchanged:
 - §Decision 2's pixel-native semantic (`hasConversionData: true` always — TikTok pixel is the platform-native attribution source)
 - The null-safe `roas` + `costPerPurchase` computation pattern from 2b-1's normalize.ts
 - The deferral of `vta_purchase` / `cta_purchase` attribution-split metrics to a v2 TikTok-specific surface
+
+## §Lifetime — Chunked-fetch architecture for true lifetime semantics across long-history accounts (2026-05-31, supersedes commit 772f500's single-request 365-day clamp)
+
+Commit 772f500 fixed the immediate "lifetime returns empty grid" symptom by clamping the `lifetime` preset to 365 days in `src/lib/tiktok/api.ts:resolveRangeToDates`. That fix unblocked the lifetime range from erroring out (`code:40002 max time span must be less than 365 days`) but introduced a different problem: **TikTok's "lifetime" now means "last 365 days"**, while Meta's lifetime means "since account inception" via the real `date_preset=maximum` preset, and Google's lifetime path is similarly unbounded. Cross-platform semantic drift — same UI label, materially different data scopes.
+
+Live-data evidence against IMAA (2026-05-31) proved the drift hides real customer data, not just an edge-case. This amendment moves TikTok lifetime to **chunked-fetch + client-side merge** to restore semantic parity with the other adapters.
+
+### Live-data evidence (IMAA, advertiser `7327982125339328514`)
+
+`/advertiser/info/` returns a `create_time` field (Unix epoch seconds) that we do NOT currently capture in `TiktokAdvertiserInfo`:
+
+| Field | Value | Decoded |
+|-------|------:|---------|
+| `create_time` | `1706178822` | **2024-01-25 UTC** (account inception) |
+
+Chunked AUCTION_ADVERTISER probe (`scripts/_tiktok-history-chunked-probe.mts`, 2026-05-31) over 7 × 365-day windows back from today:
+
+| Chunk | Window | Spend (SAR) | % of total history |
+|-------|--------|------------:|-------------------:|
+| 0 (current 365d clamp covers) | 2025-05-31 → 2026-05-31 | **570,096.94** | **70%** |
+| 1 | 2024-05-31 → 2025-05-30 | 222,086.06 | 27% |
+| 2 | 2023-06-01 → 2024-05-30 | 22,386.44 | 3% |
+| 3-6 (pre-creation) | older | 0 | 0% |
+| **Total IMAA history** | ~2.4 years | **~814K** | 100% |
+
+**~30% of IMAA's total TikTok spend (~244K SAR) lives BEYOND the current 365-day clamp.** Chunks 1+2 are real customer history the clamp truncates.
+
+### Paused-ad coverage gap (the load-bearing evidence)
+
+Cross-referencing `/ad/get/` inventory (no status filter) with the AUCTION_AD report per-chunk:
+
+| Metric | Count |
+|--------|------:|
+| Total ads (`/ad/get/`) | 201 |
+| Paused ads (`operation_status != ENABLE`) | 101 |
+| Ads with spend > 0 anywhere in history | 194 |
+| **Paused ads with spend > 0 anywhere in history** | **96** |
+| **Paused ads whose spend is ONLY beyond 365d (clamp truncates)** | **96 of 96 (100%)** |
+
+Every single paused-with-spend ad for IMAA spent before the 365-day clamp, then was paused. The current clamp makes **all 96 of them invisible**. The user-facing complaint "paused ads with results don't show" is a legitimate coverage gap, not a misperception — the ads exist, they had real spend, they were paused, and they fall entirely outside the visible window. The earlier dismissal of Observations 5/6 as "behavior is correct" was based on the 90-day probe; the chunked probe across full history shows the opposite.
+
+### Why TikTok is the only platform that needs this
+
+| Platform | Lifetime semantic | API capability |
+|----------|------------------|----------------|
+| Meta | `date_preset=maximum` | Native lifetime preset; Meta resolves against full account history server-side ([src/lib/meta/api.ts:305-323](../../src/lib/meta/api.ts#L305-L323)) |
+| Google | preset-driven | Google Ads API has no per-query hard cap that requires client chunking for the typical account lifetime |
+| **TikTok** | NO lifetime preset + **HARD 365-day per-request cap** (`code:40002 max time span must be less than 365 days`, probe-confirmed at exactly the 365/366 boundary) | Must synthesize lifetime client-side by chunking |
+
+This is TikTok-specific work. The `resolveRangeToDates` helper in `src/lib/tiktok/api.ts` is already TikTok-scoped (Meta has a separate file-private `resolveRangeToDates`; Google has its own date-handling). The chunking logic stays within TikTok files. **Zero Meta / Google regression risk.**
+
+### Decision
+
+Replace TikTok's lifetime path with chunked-fetch + client-side merge. Single-request paths for finite-window presets (`7d`, `30d`, `90d`, `365d`, custom ranges) remain unchanged.
+
+#### Chunking policy
+
+1. **Lower bound**: account `create_time` from `/advertiser/info/` (capped at today − N days for sanity, where N is the largest documented TikTok history retention — empirically ~3 years per probe data, but in practice the account's `create_time` is always tighter).
+2. **Chunk size**: 365 days (the probe-confirmed boundary — `365d` succeeds at `code:0`, `366d` errors at `code:40002`).
+3. **Chunk count**: `ceil((today − create_time) / 365)`. For IMAA (2.4y history) = 3 chunks. For a 5-year power-user account = 6 chunks. Bounded by retention.
+4. **Execution**: `Promise.all` over the chunks — N parallel `/report/integrated/get/` calls, not sequential.
+5. **Off-by-one safety**: chunk N covers `[today − 365(N+1), today − 365N − 1]` to avoid double-counting the boundary day. Tested across the 365/366 cap probe; the empirical 365-inclusive behavior matches.
+
+#### Merge rules (load-bearing — getting this wrong silently corrupts metrics)
+
+The merge happens per dimension key (`advertiser_id` for account-level, `campaign_id` for campaign-level, `ad_id` for ad-level).
+
+| Metric class | Examples | Merge rule | Why |
+|--------------|----------|------------|-----|
+| **Additive** | `spend`, `impressions`, `clicks`, `complete_payment` (purchases), `total_complete_payment_rate` (revenue per §2b), `reach` (caveat below) | **SUM across chunks** | Each chunk reports a window-scoped sum; cross-chunk total = sum of windows. |
+| **Ratios — recomputed in the MERGE layer** | `ctr`, `cpc`, `cpm`, `frequency` | **RECOMPUTE from summed components BEFORE building the synthesized row** | These metrics are PASSTHROUGH in [`normalizeReportRowToInsight`](../../src/lib/tiktok/normalize.ts) (the normalizer reads them as-is from `row.metrics`). Summing them in the merge would produce sum-of-percentages (garbage). The merge layer recomputes from summed components: `ctr = clicks / impressions * 100`, `cpc = spend / clicks`, `cpm = spend / impressions * 1000`, `frequency = impressions / reach`. Standard recompute, ~6 lines. |
+| **Ratios — recomputed in the NORMALIZER** | `roas`, `costPerPurchase` | **NOT recomputed by the merge** — passed through as summed `spend` / `revenue` / `purchases`, then `normalizeReportRowToInsight` recomputes correctly downstream | The normalizer already computes these client-side per §2b's null-safe contract (`roas = spend > 0 ? revenue / spend : null`; `costPerPurchase = purchases > 0 ? spend / purchases : null`). Feeding it the merged spend/revenue/purchases produces correct merged roas + costPerPurchase. No duplication. |
+| **Caveat: `reach`** | unique-reach across chunks | **SUM is an overestimate** (the same user reached in chunks 0 and 1 is counted twice). | We don't currently surface `reach` as a load-bearing metric in the v1 KPI set; if added later, this needs a deduplication strategy or an explicit "reach is window-scoped" UI disclaimer. Out of scope for this amendment — flagged for the same future work as the §Open Items reach metric addition. |
+
+**Split responsibility — merge layer vs normalizer**: the merge step constructs a single synthesized `TiktokReportRow` per dimension key by (1) summing additive metrics across chunks, (2) recomputing `ctr` / `cpc` / `cpm` / `frequency` from those summed components and writing them into the synthesized row, then feeding the row through the existing normalizer. The normalizer's existing null-safe computation handles `roas` + `costPerPurchase` from the merged components; `ctr` / `cpc` / `cpm` / `frequency` are passthrough at the normalizer layer but already-correct because the merge layer recomputed them. **No normalizer signature change.** **The §2b correction is preserved** — `total_complete_payment_rate` (revenue) is additive across chunks (sum-of-sums = total website revenue), and `roas` is recomputed from the merged components by the normalizer.
+
+#### `create_time` capture approach
+
+Two viable approaches:
+
+| Approach | Pros | Cons | Verdict |
+|----------|------|------|---------|
+| **(A) Call `/advertiser/info/` inside the lifetime path** | Zero schema change; no migration; data is always fresh; trivial | One extra API call per lifetime fetch (~200ms overhead) | ✅ Pick this for v1 |
+| (B) Thread `create_time` through `select-accounts` into `connections.metadata` | One-time fetch; no per-request overhead | Requires schema (or metadata-jsonb) work; existing TikTok rows lack the field and need a backfill path | Defer to a later optimization if the extra call shows up in latency budgets |
+
+The lifetime path is by definition rare (user explicitly opts into a max-history view), and `create_time` doesn't change. The extra call is amortized by cache (the lifetime cache entry covers most subsequent lifetime requests within TTL). Option A is the right call for v1; revisit if real-world telemetry shows the overhead matters.
+
+#### Cache interaction
+
+`insights_cache` keys by `(connection_id, provider, cache_key)`. The route at [src/app/api/ads/insights/route.ts](../../src/app/api/ads/insights/route.ts) builds `cache_key` from a string-prefix + `cacheKeyRangePart`, where `cacheKeyRangePart === "lifetime"` for the lifetime preset.
+
+**Decision: one merged cache entry per `(account, level, lifetime)` tuple.**
+
+- Cache **hit**: single DB read returns the pre-merged lifetime result. Same speed as today's 365d clamp behavior.
+- Cache **miss**: fire N parallel chunk requests → merge → write ONE cache row with the merged result. The TTL (`CACHE_TTL_MINUTES = 15` and the SWR `INSIGHTS_FRESH_MINUTES = 15` / `INSIGHTS_STALE_HOURS = 24` from [src/lib/ads/cache.ts](../../src/lib/ads/cache.ts)) applies uniformly.
+- `?refresh=true`: invalidates the lifetime cache entry → re-fires all N chunks on next read.
+- No per-chunk caching: simpler invalidation semantics; no risk of partial-stale composition (e.g. chunk 0 fresh, chunk 1 stale, merging produces inconsistent metrics for a single rendered point).
+
+**No cache schema bump.** The cache `data` column is jsonb; the merged result has the same shape as a single-chunk result (an array of `UnifiedInsight` rows). Existing cache schema v13 (post-§2b) accommodates the change transparently. **Memory #28 protocol still applies pre-push** — Meta + Google paths are unchanged so the cache-bump validation is a smoke-test, not a schema bump.
+
+#### Deploy-day action: stale lifetime cache entries (NOT a schema bump)
+
+Existing `insights_cache` rows whose `cache_key` ends with `:lifetime` hold pre-amendment data — i.e. the 365-day-clamped result. After this amendment lands, a lifetime cache HIT on one of those entries would return stale 365-day data instead of triggering the new chunked path. The data is wrong-shape semantically (covers only the last year, not full history) even though it's same-shape structurally (still `UnifiedInsight[]`).
+
+**Stale window without intervention**: lifetime rows enter `stale_until` at deploy time + 24h (`INSIGHTS_STALE_HOURS = 24`) and continue serving via SWR until then. Worst case: a user opening the TikTok lifetime view 23 hours and 59 minutes after deploy gets the clamped result and revalidation hands them the chunked result silently in the background — the next refresh is correct, but the first view shows last-year-only with no surface signal that it's stale-shape.
+
+**Decision: targeted invalidation on deploy.** Run ONE SQL statement post-deploy to delete the affected cache keys:
+
+```sql
+DELETE FROM insights_cache
+WHERE provider = 'tiktok'
+  AND cache_key LIKE '%:lifetime:%';
+```
+
+This is **not** a schema bump (Memory #28 risk avoided — no `CACHE_SCHEMA_VERSION` change, no universal cache flush across all platforms, no cold-cache cost for Meta/Google). It is one targeted DELETE on the rows specifically affected by this amendment. The first post-deploy lifetime fetch for each account re-runs the chunked path and writes a fresh entry. All other range presets (`7d`, `30d`, `90d`, `365d`, `custom`) for TikTok keep their cache — they're unchanged by this amendment. Meta + Google cache untouched.
+
+**Rejected: rely on TTL expiry alone.** 24h of stale-shape data on a feature shipping the correctness gain is a self-defeating launch. Targeted DELETE is one SQL statement; the cost-benefit is overwhelmingly in favor of explicit invalidation.
+
+The DELETE statement runs as part of the same commit that ships the amendment — surfaced for explicit user approval, executed once against production after the deploy reports healthy, then forgotten. No recurring action.
+
+### Implementation scope (files that change vs files that don't)
+
+**Files that change:**
+
+| File | Change | LOC est. |
+|------|--------|----------|
+| `src/lib/tiktok/api.ts` | (a) `TiktokAdvertiserInfo` interface gains `create_time?: number` (we already fetch `/advertiser/info/` but don't capture the field); (b) new `chunkLifetimeRange(createTime)` helper returning `{since, until}[]`; (c) new `fetchAccountInsightsLifetime` / `fetchCampaignInsightsLifetime` / `fetchAdInsightsLifetime` wrappers that dispatch chunked-or-single based on `range === "lifetime"`; (d) `resolveRangeToDates` lifetime branch keeps 365d clamp as defensive fallback for callers that bypass the wrappers | ~100-130 |
+| `src/lib/ads/providers/tiktok.ts` | Switch the three insight methods to call the new `*Lifetime` wrappers; no behavior change for non-lifetime ranges | ~10 |
+| `docs/decisions/020-tiktok-adapter-v1.md` | This amendment | — |
+
+**Files that explicitly do NOT change:**
+
+| File | Why |
+|------|-----|
+| `src/lib/ads/cache.ts` | Cache schema unchanged; merged-result-as-single-row pattern fits the existing jsonb shape |
+| `src/app/api/ads/insights/route.ts` | Route logic unchanged — chunking is fully internal to the adapter layer |
+| `src/lib/meta/api.ts` / Meta provider | Untouched — Meta lifetime semantic stays correct via `date_preset=maximum` |
+| `src/lib/google-ads/*` | Untouched |
+| `src/lib/tiktok/normalize.ts` | The existing `normalizeReportRowToInsight` is reused; no normalizer change |
+| `src/lib/ads/types.ts` | `UnifiedInsight` shape unchanged; merge produces same-shape rows |
+
+**Files that change as a side effect (optional):**
+
+| File | Change |
+|------|--------|
+| `src/lib/tiktok/api.ts` `getAdvertiserInfo` callers | None forced — `create_time` is captured opportunistically. The select-accounts route may opt to store it in `connections.metadata` for future optimizations, but this is OUT of scope for the amendment. |
+
+### What gets surfaced to the user after this lands
+
+- Lifetime tab on TikTok now reflects **all spend since `create_time`**, not the last 365 days
+- The 96 paused-with-historical-spend IMAA ads (96 / 101 = 95% of paused inventory) become visible in lifetime view
+- Total visible spend goes from ~570K to ~814K (+43%) for IMAA at the lifetime preset
+- Cross-platform "lifetime" semantic is consistent across Meta + Google + TikTok tabs
+- Other range presets (7d / 30d / 90d / 365d / custom) — **unchanged in any behavior**
+
+### Performance budget
+
+Lifetime cache hit ≈ today's speed. Lifetime cache miss adds 1 advertiser_info call + N parallel chunk calls (N ≈ 3 for IMAA's 2.4-year history; bounded by retention). Within TTL, lifetime is as fast as any other range. Post-merge optimizations if telemetry shows cold-fetch cost matters: pre-warm lifetime cache via background job, or persist `create_time` in `connections.metadata` to skip the per-fetch advertiser_info call.
+
+### Probe evidence
+
+- `scripts/_tiktok-lifetime-paused-probe.mts` (2026-05-31) — established the 365-day per-request hard cap at the 365/366 boundary; surfaced the `code:40002 max time span must be less than 365 days` error response shape
+- `scripts/_tiktok-paused-spend-probe.mts` (2026-05-31) — proved the 90-day window has 0 paused-with-spend ads for IMAA, which was the initial misleading "behavior is correct" data point that nearly closed Observations 5/6 as a non-issue
+- `scripts/_tiktok-history-chunked-probe.mts` (2026-05-31) — the load-bearing probe: confirmed IMAA's 2.4-year history, the 30% spend-beyond-clamp gap, and the 96 paused-with-historical-spend ads invisible to the 365d clamp. Also captured the `create_time` field availability on `/advertiser/info/`.
+
+All three are throwaway (untracked); preserve in Session 3's `chore(scripts)` commit per ADR-020 §18 disposition-B since the chain landing this amendment depends on the probe evidence trail. The chunked-history probe specifically should be retained as the empirical baseline for future lifetime regressions.
+
+### Supersession + preservation
+
+This §Lifetime amendment **SUPERSEDES**:
+
+- Commit `772f500`'s 365-day single-request lifetime clamp as the architectural answer for lifetime semantics. The 365-day value remains as a defensive fallback inside `resolveRangeToDates` for callers that bypass the chunked wrappers, but is no longer the user-facing lifetime semantic.
+- The earlier triage finding that classified Observations 5/6 as "behavior is correct, IMAA has no paused-with-spend ads" — the 90-day probe that supported that finding sampled too narrow a window; the full-history probe inverts the conclusion.
+
+This §Lifetime **PRESERVES** unchanged:
+
+- §2b's revenue metric set (`total_complete_payment_rate` remains the revenue source; additive across chunks)
+- §2b's null-safe roas/costPerPurchase computation pattern (the merge reuses it for the recompute step)
+- `normalizeReportRowToInsight`'s pixel-native semantic (TikTok purchases/revenue stay non-null; 0 = real zero)
+- The single-request path for all non-lifetime ranges (`7d` / `30d` / `90d` / `365d` / `custom`)
+- The route-layer cache contract (`insights_cache` schema, key shape, TTL)
+- Memory #28's cache-bump pre-push protocol (still applies — Meta + Google paths must validate even though this work is TikTok-only)
+- Meta's `date_preset=maximum` lifetime path (untouched by definition)
