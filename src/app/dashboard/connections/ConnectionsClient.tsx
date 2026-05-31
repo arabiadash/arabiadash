@@ -147,9 +147,20 @@ export default function ConnectionsClient({
       return;
     }
 
-    // Legacy path for TikTok/Snapchat — no real OAuth yet (Phase 7/8). We
-    // insert a placeholder row so the UI can flip into the "connected"
-    // state. Real account_id + access_token arrive when those flows ship.
+    // TikTok uses real OAuth flow (Phase 7 / ADR-020, Session 1) —
+    // redirect to init route, which sets CSRF state cookie + workspace
+    // cookie and redirects to TikTok's OAuth dialog. Callback writes
+    // platform_credentials.refresh_token then redirects to the
+    // selector page where the user picks advertiser_ids; select-
+    // accounts writes the real connections row.
+    if (platformId === "tiktok") {
+      window.location.assign(`/api/auth/tiktok/init?workspace=${activeWorkspaceId}`);
+      return;
+    }
+
+    // Legacy path for Snapchat — no real OAuth yet (Phase 8 deferred).
+    // Inserts a placeholder row so the UI can flip into the "connected"
+    // state. Real account_id + access_token arrive when Phase 8 ships.
     //
     // workspace_id is the active workspace (from the prop, set server-side
     // via resolveActiveWorkspace). No DB lookup needed — the server already
