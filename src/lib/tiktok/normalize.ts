@@ -121,6 +121,21 @@ function extractInt(metrics: Record<string, string>, key: string): number {
  */
 const NON_DELIVERY_SECONDARY = /CAMPAIGN_DISABLE|ADGROUP_DISABLE/i;
 
+/**
+ * SINGLE SOURCE OF TRUTH for TikTok status collapse. Called from:
+ *   - normalizeCampaign in providers/tiktok.ts (campaign-level)
+ *   - buildCampaignLookup in providers/tiktok.ts (campaign-level via
+ *     report-row insight normalization)
+ *   - normalizeTiktokAdToUnified in this file (ad-level, with an
+ *     ARCHIVED→PAUSED type-narrowing coercion since UnifiedAdCommon's
+ *     status union excludes ARCHIVED)
+ *
+ * MUST NOT be inlined / duplicated anywhere else. Duplication-drift
+ * was discovered on 2026-05-31 when normalizeTiktokAdToUnified had
+ * its own parallel implementation that didn't receive the
+ * §StatusCollapse fix → the fix appeared inert in the dashboard until
+ * the inline copy was deleted in favor of this delegate path.
+ */
 export function collapseTiktokStatus(
   operationStatus: string | undefined,
   secondaryStatus: string | undefined
@@ -356,23 +371,50 @@ export function normalizeTiktokAdToUnified(
 
   const spend = extractNumber(m, "spend");
   const purchases = extractInt(m, "complete_payment");
-  const revenue = extractNumber(m, "total_purchase_value");
+  // Revenue metric MUST mirror normalizeReportRowToInsight's §2b
+  // correction. The original `total_purchase_value` here was
+  // duplication-drift from before §2b landed — that metric is the
+  // app-attribution (active_pay) family which returns 0 for any
+  // website-pixel store (live-verified on IMAA). The §2b fix swapped
+  // it to `total_complete_payment_rate` (the website-attribution
+  // metric — same naming-trap as the request-side definition in
+  // api.ts:INSIGHTS_METRICS_ACCOUNT) for the account+campaign
+  // normalizer but missed THIS ad-level normalizer, leaving per-ad
+  // revenue silently 0 for all TikTok ads. Surfaced on 2026-05-31
+  // by the same duplication-audit pass that caught the status-
+  // collapse drift. Both fixes shipped together as a single bundle.
+  // Maintenance rule: this line MUST stay in sync with
+  // normalizeReportRowToInsight's revenue line — they share a
+  // single semantic source-of-truth (the §2b website-attribution
+  // metric); divergence has the same silent-data-corruption blast
+  // radius the status-collapse drift had.
+  const revenue = extractNumber(m, "total_complete_payment_rate");
   const roas = spend > 0 ? revenue / spend : null;
 
-  // Status collapse — inline 3-way (mirrors Meta's metaAdToUnified
-  // pattern). UnifiedAdCommon.status is a 3-value union — no
-  // ARCHIVED branch (that's UnifiedCampaign-only).
-  let status: UnifiedAdTiktok["status"];
-  if (adRow.operation_status === "ENABLE") {
-    status = "ACTIVE";
-  } else if (
-    adRow.secondary_status &&
-    /DELETE/i.test(adRow.secondary_status)
-  ) {
-    status = "DELETED";
-  } else {
-    status = "PAUSED";
-  }
+  // Status collapse — delegated to the shared collapseTiktokStatus
+  // helper (single source of truth for op_status + secondary_status →
+  // unified status mapping). MUST NOT be re-inlined: this function
+  // previously had its own copy of the buggy "ENABLE → ACTIVE without
+  // checking secondary_status" logic that survived the §StatusCollapse
+  // fix as dead-code drift. Surfaced on 2026-05-31 retest when the fix
+  // showed zero visible effect on the ad grid. See ADR-020
+  // §StatusCollapse for the historical context.
+  //
+  // Type-narrowing coercion: collapseTiktokStatus returns the
+  // 4-value UnifiedCampaign["status"] (includes ARCHIVED);
+  // UnifiedAdCommon.status is the 3-value
+  // "ACTIVE" | "PAUSED" | "DELETED" union (no ARCHIVED). TikTok ads
+  // empirically never return ARCHIVED at the operation_status level
+  // (it's a campaign/adgroup-only enum per the live probe), so the
+  // coercion branch never fires in practice — it exists to satisfy
+  // the narrower union type + future-proof against a hypothetical
+  // TikTok API change.
+  const collapsedStatus = collapseTiktokStatus(
+    adRow.operation_status,
+    adRow.secondary_status
+  );
+  const status: UnifiedAdTiktok["status"] =
+    collapsedStatus === "ARCHIVED" ? "PAUSED" : collapsedStatus;
 
   // Defensive id/name reads per §12c §4. ad_id is always present in
   // practice; defensive against the silently-dropped mode 3 edge.
