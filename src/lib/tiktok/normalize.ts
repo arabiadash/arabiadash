@@ -616,6 +616,7 @@ export type TikTokCreativePath =
       identityId: string;
       itemId: string;
     }
+  | { kind: "D_DCO_OEMBED"; itemId: string }
   | { kind: "C_PURE_IMAGE_DEFERRED"; imageIds: string[] }
   | { kind: "UNKNOWN" };
 
@@ -623,12 +624,12 @@ export type TikTokCreativePath =
  * Classify an ad's creative-routing path from its cached type_data.
  *
  * Path B requires identityType + identityId + itemId together —
- * /identity/video/info/ won't return URLs without all three. If
- * tiktokItemId is set but identityType or identityId is missing,
- * routes to UNKNOWN — the TikTokCreativeCard can still construct
- * the embed-iframe fallback from tiktokVideoUrl (which only needs
- * the item_id) but the URL-resolve route cannot fetch
- * poster_url/playable_url.
+ * /identity/video/info/ won't return URLs without all three. When
+ * tiktokItemId is set but identityType or identityId is missing
+ * (the DCO/SPC pattern per ADR-020 §DCO-Identity), routes to
+ * D_DCO_OEMBED — the item_id alone is recoverable via public oEmbed.
+ * The path-D check MUST come after path-B's full-triple test so
+ * Spark Ads with intact identity stay on path-B.
  */
 export function routeCreativeByIdentityType(
   typeData: UnifiedAdTiktok["type_data"]
@@ -650,6 +651,12 @@ export function routeCreativeByIdentityType(
       identityId: typeData.identityId,
       itemId: typeData.tiktokItemId,
     };
+  }
+  // Path D — DCO/SPC ads have item_id but identity_type/_id silently
+  // stripped by TikTok per ADR-020 §DCO-Identity. Recoverable via
+  // public oEmbed (no auth, returns thumbnail + author info).
+  if (typeData.tiktokItemId && typeData.tiktokItemId.length > 0) {
+    return { kind: "D_DCO_OEMBED", itemId: typeData.tiktokItemId };
   }
   if (typeData.imageIds && typeData.imageIds.length > 0) {
     return { kind: "C_PURE_IMAGE_DEFERRED", imageIds: typeData.imageIds };

@@ -6,6 +6,8 @@ import { getRefreshTokenForUser } from "@/lib/google-ads/credentials";
 import {
   getFileVideoAdInfo,
   getIdentityVideoInfo,
+  resolveOembed,
+  OEMBED_CONCURRENCY,
 } from "@/lib/tiktok/api";
 import {
   normalizeFileVideoAdInfoToCreative,
@@ -81,6 +83,7 @@ interface PostBody {
 const VALID_KINDS: ReadonlySet<CreativeKind> = new Set<CreativeKind>([
   "A_DIRECT_VIDEO",
   "B_SPARK_AD",
+  "D_DCO_OEMBED",
   "C_PURE_IMAGE_DEFERRED",
   "UNKNOWN",
 ]);
@@ -135,6 +138,11 @@ function validateAdRequest(ad: AdResolveRequest): string | null {
       return "kind_B_requires_identity_id";
     }
   }
+  if (ad.kind === "D_DCO_OEMBED") {
+    if (!ad.item_id || typeof ad.item_id !== "string") {
+      return "kind_D_requires_item_id";
+    }
+  }
   return null;
 }
 
@@ -179,6 +187,7 @@ async function resolveAds(
   // Group by kind for batching + routing.
   const pathAads = validAds.filter((a) => a.kind === "A_DIRECT_VIDEO");
   const pathBads = validAds.filter((a) => a.kind === "B_SPARK_AD");
+  const pathDads = validAds.filter((a) => a.kind === "D_DCO_OEMBED");
   const pathCorUnknown = validAds.filter(
     (a) => a.kind === "C_PURE_IMAGE_DEFERRED" || a.kind === "UNKNOWN"
   );
@@ -298,6 +307,80 @@ async function resolveAds(
         const reauth = classifyTiktokError(bubbled.bubble);
         if (reauth) throw reauth;
         // Defensive: shouldn't happen since the inner try only tags these
+        throw bubbled.bubble;
+      }
+    }
+    for (const r of results) {
+      resolved[r.ad.ad_id] = { kind: r.ad.kind, urls: r.urls };
+      if (r.error) errors[r.ad.ad_id] = r.error;
+    }
+  }
+
+  // Path D — chunked public oEmbed lookups per ADR-020 §DCO-Identity.
+  // Verbatim mirror of path-B's chunk-loop shape: OEMBED_CONCURRENCY=4
+  // (imported from api.ts), Promise.all per chunk, in-loop fail-fast
+  // on tagged bubble. Differences from path-B:
+  //   - No reauth path (oEmbed has no auth → classifyTiktokError can't
+  //     match an oEmbed failure; we only check rate-limit on bubble).
+  //   - Per-item failures (404/private/deleted/geo/5xx/timeout) are
+  //     swallowed inside resolveOembed and surface here as `null` —
+  //     mapped to error key "oembed_unresolved" so the Card falls to
+  //     STATE 3 + modal iframe (per §DCO-Identity Risk #2).
+  //   - resolveOembed throws ONLY on HTTP 429 with "rate limit" in the
+  //     message → matched by the existing isTiktokRateLimitError
+  //     detector at errors.ts:118 → batch bubbles via the same path
+  //     as path-B's 40100. No oEmbed-specific detector needed.
+  if (pathDads.length > 0) {
+    type PathDResult = {
+      ad: AdResolveRequest;
+      urls: TikTokCreativeUrls | null;
+      error?: string;
+      bubble?: unknown;
+    };
+    const results: PathDResult[] = [];
+    for (let i = 0; i < pathDads.length; i += OEMBED_CONCURRENCY) {
+      const chunk = pathDads.slice(i, i + OEMBED_CONCURRENCY);
+      const chunkResults: PathDResult[] = await Promise.all(
+        chunk.map(async (ad): Promise<PathDResult> => {
+          try {
+            const oembed = await resolveOembed(ad.item_id!);
+            if (oembed) {
+              const urls: TikTokCreativeUrls = {
+                posterUrl: oembed.thumbnailUrl,
+                playableUrl: "", // no MP4 from oEmbed; modal iframe handles playback
+                expiresAt: oembed.expiresAt,
+                duration: 0, // not applicable to still image
+                width: oembed.thumbnailWidth,
+                height: oembed.thumbnailHeight,
+                creatorName: oembed.authorName,
+                creatorHandle: oembed.authorHandle,
+                creatorUrl: oembed.authorUrl,
+              };
+              return { ad, urls };
+            }
+            return { ad, urls: null, error: "oembed_unresolved" };
+          } catch (err) {
+            if (isTiktokRateLimitError(err)) {
+              return { ad, urls: null, bubble: err };
+            }
+            // Defensive — resolveOembed shouldn't throw on anything else
+            // (all non-429 failures are swallowed to null internally).
+            console.warn(
+              `[tiktok-url-resolve] path D unexpected throw ad ${ad.ad_id}:`,
+              err instanceof Error ? err.message : "unknown"
+            );
+            return { ad, urls: null, error: "resolve_failed" };
+          }
+        })
+      );
+      results.push(...chunkResults);
+
+      // Fail-fast: same shape as path-B. Throw on the FIRST chunk that
+      // bubbles rate-limit; subsequent chunks NOT fired.
+      const bubbled = chunkResults.find((r) => r.bubble);
+      if (bubbled) {
+        if (isTiktokRateLimitError(bubbled.bubble)) throw bubbled.bubble;
+        // Defensive: only rate-limit ever tags bubble in path D
         throw bubbled.bubble;
       }
     }

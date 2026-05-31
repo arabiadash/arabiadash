@@ -41,6 +41,7 @@ export type CreativeKind = TikTokCreativePath["kind"];
  * validateAdRequest:
  *   kind=A_DIRECT_VIDEO        → video_id required
  *   kind=B_SPARK_AD            → item_id + identity_type + identity_id all required
+ *   kind=D_DCO_OEMBED          → item_id required (no identity — that's the point)
  *   kind=C_PURE_IMAGE_DEFERRED → no extra fields required
  *   kind=UNKNOWN               → no extra fields required
  *
@@ -83,6 +84,12 @@ export function buildAdResolveRequest(ad: UnifiedAdTiktok): AdResolveRequest {
         item_id: path.itemId,
         identity_type: path.identityType,
         identity_id: path.identityId,
+      };
+    case "D_DCO_OEMBED":
+      return {
+        ad_id: ad.id,
+        kind: "D_DCO_OEMBED",
+        item_id: path.itemId,
       };
     case "C_PURE_IMAGE_DEFERRED":
       return {
