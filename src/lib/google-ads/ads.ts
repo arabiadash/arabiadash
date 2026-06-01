@@ -1,4 +1,5 @@
 import { GoogleAdsApi } from "google-ads-api";
+import { classifyGoogleAdsError } from "@/lib/google-ads/errors";
 
 function requireEnv(key: string): string {
   const value = process.env[key];
@@ -395,6 +396,27 @@ export async function fetchAds(
 
     return { ads, totals };
   } catch (error) {
+    // ADR-017: bubble reauth-class errors (invalid_grant /
+    // consent_revoked / token_expired) so the existing withReauthMapping
+    // wrapper in GoogleAdsAdapter.getAds catches → ReauthRequiredError →
+    // the /api/ads/creatives route reauth-CTA path (route.ts:283-296)
+    // fires the Arabic "انتهت صلاحية ربط حساب Google" banner.
+    //
+    // Non-reauth errors (sub-resource permission, GAQL field rejections,
+    // transient 5xx, network) keep the graceful null-degradation per
+    // the original contract — caller treats the account as "not
+    // accessible right now" rather than failing the whole batch.
+    //
+    // This swallow was the root cause of the OBS 3 Google range-
+    // regression (2026-06-01): an expired Google refresh token caused
+    // 30d custom-range fetches to return data:[] silently while
+    // lifetime served stale cache — user saw no reauth banner, just
+    // misleading "no ads in this period" copy. Diagnosed via the
+    // 9b6b946 TEMP DIAGNOSTIC console.logs which surfaced the
+    // [google-ads/ads] fetch failed: invalid_grant line.
+    const reauth = classifyGoogleAdsError(error);
+    if (reauth) throw reauth;
+
     // Brief production-safe log — the silent return null was masking M5
     // GAQL field rejections during the regression investigation. Surface
     // just enough to debug from production logs without leaking tokens.
