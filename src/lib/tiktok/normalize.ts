@@ -419,7 +419,50 @@ export function normalizeTiktokAdToUnified(
   // Defensive id/name reads per §12c §4. ad_id is always present in
   // practice; defensive against the silently-dropped mode 3 edge.
   const id = adRow.ad_id ?? "";
-  const name = adRow.ad_name?.trim() ?? "";
+
+  // Display-name fallback chain for DCO/SPC placeholder ad_names per
+  // ADR-020 §DCO-Identity (2026-06-01). TikTok auto-generates internal
+  // placeholders like "_001", "_002", ... for material variants inside
+  // SMART_PLUS adgroups (DYNAMIC creative_material_mode). The user
+  // doesn't see these in Ads Manager — the real caption lives in
+  // ad_text. /^_\d+$/ catches the whole family ("_001" through "_0NN")
+  // — empirically 12 of 12 IMAA DCO ads share this exact placeholder
+  // shape (probe _tiktok-001-text-uniqueness.mts confirmed 12 distinct
+  // ad_text values cleanly disambiguate them).
+  //
+  // ad_text is the FULL post caption — truncated to 60 chars (cap
+  // matches the Card title's line-clamp-2 budget; longer overflows
+  // narrow cards). Falls back to campaign_name when ad_text is empty,
+  // then "(unnamed)" as last resort.
+  //
+  // ad.name is display-only across the surface (filter/sort/cache/
+  // search-by-name confirmed unused via grep — see C4 recon notes).
+  // Safe to mutate at normalize layer — 13 Card/Modal/log read sites
+  // automatically benefit. Zero cache touch (ad.name on UnifiedAdTiktok
+  // is cached as part of the row, but the value-write happens at
+  // normalize before cache-set; new rows get the fallback name, old
+  // cached rows refresh naturally per CREATIVES_FRESH=30min /
+  // STALE=24h — no CACHE_SCHEMA_VERSION bump required).
+  const PLACEHOLDER_AD_NAME_RE = /^_\d+$/;
+  const NAME_MAX_LEN = 60;
+
+  const rawAdName = adRow.ad_name?.trim() ?? "";
+  const isPlaceholder = rawAdName === "" || PLACEHOLDER_AD_NAME_RE.test(rawAdName);
+
+  let name = rawAdName;
+  if (isPlaceholder) {
+    const adText = adRow.ad_text?.trim() ?? "";
+    if (adText) {
+      name =
+        adText.length > NAME_MAX_LEN
+          ? adText.slice(0, NAME_MAX_LEN).trim() + "…"
+          : adText;
+    } else if (opts.campaignName?.trim()) {
+      name = opts.campaignName.trim();
+    } else {
+      name = "بدون اسم";
+    }
+  }
 
   // Spark Ad embed-player URL per §12c §6 — constructed only when
   // tiktokItemId is set (path B). NEVER constructed for path A
