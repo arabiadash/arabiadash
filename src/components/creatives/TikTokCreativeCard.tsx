@@ -15,11 +15,16 @@ import { formatAndConvert, formatCount, type Currency } from "@/lib/currency";
 // link, path-B/C diagnostics) lives in TikTokAdDetailModal (2d-3) —
 // opened via onClick, mirroring PMaxAssetGroupCard's interaction model.
 //
-// Why no per-ad ROAS in the footer (unlike CreativeCard + PMax):
-// TikTok's spend/revenue split between app pixel + web pixel surfaces
-// is a per-CAMPAIGN concern (see ADR-020 §2b). Per-ad ROAS would mix
-// the two attribution surfaces silently. ROAS is surfaced at the
-// campaign level in the modal instead.
+// Per-ad ROAS in the footer is reliable post-ADR-020 §2b (commit 9ac8294).
+// The §2b correction switched the revenue metric from total_purchase_value
+// (app-attributed) to total_complete_payment_rate (website-attributed),
+// which is consistent at the AUCTION_AD level. Empirical confirmation:
+// 42 of 53 spending IMAA ads return non-zero revenue, ROAS range
+// 1.65–12.59. The Card footer now mirrors Meta/Google CreativeCard's
+// ROAS rendering (getROASColor thresholds: ≥3 green / ≥1 yellow / <1 red).
+// المشاهدات is dropped from the Card footer but retained in the modal —
+// dense Card layout doesn't fit 4 metrics; TikTok video metrics remain
+// a first-class concern in the detail view.
 //
 // 4-state dispatch (§12c §3):
 //   1. LOADING            — urlsLoading=true (batch resolve in flight)
@@ -79,6 +84,15 @@ const STATUS_LABELS_AR: Record<string, string> = {
   ARCHIVED: "مؤرشف",
 };
 
+// Mirrors getROASColor in ReportsClient.tsx:156. Inlined here to keep
+// this commit scoped to the TikTok Card; promote to a shared util when
+// Phase 7.1 / Phase 7.2 Card variants land more consumers.
+function getROASColor(roas: number): string {
+  if (roas >= 3) return "text-green-600";
+  if (roas >= 1) return "text-yellow-600";
+  return "text-red-600";
+}
+
 // -----------------------------------------------------------------
 // Main component
 // -----------------------------------------------------------------
@@ -118,10 +132,8 @@ export function TikTokCreativeCard({
   const currency = (ad.currency as Currency) || accountCurrency;
 
   // ?? 0 is defensive — TikTok normalizer guarantees non-null for
-  // both videoViews and purchases, but the field types remain
-  // `number | undefined` for forward-compat with cached rows
-  // pre-dating the v1 schema.
-  const videoViews = ad.type_data.videoViews ?? 0;
+  // purchases, but the field type remains `number | undefined` for
+  // forward-compat with cached rows pre-dating the v1 schema.
   const purchases = ad.purchases ?? 0;
 
   return (
@@ -227,8 +239,19 @@ export function TikTokCreativeCard({
 
         <div className="grid grid-cols-2 gap-2 text-xs">
           <div>
-            <p className="text-gray-500 text-[10px]">المشاهدات</p>
-            <p className="font-bold text-gray-900">{formatCount(videoViews)}</p>
+            <p className="text-gray-500 text-[10px]">ROAS</p>
+            {ad.hasConversionData && ad.roas != null ? (
+              <p className={`font-bold ${getROASColor(ad.roas)}`}>
+                {ad.roas.toFixed(2)}x
+              </p>
+            ) : (
+              <p
+                className="font-bold text-gray-400"
+                title="لم يتم إعداد تتبع الشراء في الحساب"
+              >
+                —
+              </p>
+            )}
           </div>
           <div className="text-left">
             <p className="text-gray-500 text-[10px]">المبيعات</p>
