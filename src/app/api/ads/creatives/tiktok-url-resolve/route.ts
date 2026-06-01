@@ -266,100 +266,146 @@ async function resolveAds(
       const chunk = pathBads.slice(i, i + PATH_B_CONCURRENCY);
       const chunkResults: PathBResult[] = await Promise.all(
         chunk.map(async (ad): Promise<PathBResult> => {
-          // PRIMARY — /identity/video/info/ (path B's canonical resolver).
-          // Returns playableUrl + posterUrl + caption when the Spark Ad's
-          // identity authorization is still intact.
-          let primaryError: string | undefined;
-          try {
-            const detail = await getIdentityVideoInfo(
+          // Path-B always-call design (Phase 1B, 2026-06-02).
+          //
+          // For every Spark Ad we fire BOTH calls in parallel:
+          //   - /identity/video/info/  (business-api host, canonical
+          //     playableUrl + posterUrl + caption; null when authorization
+          //     revoked / source post moved / identity expired)
+          //   - resolveOembed          (consumer host www.tiktok.com,
+          //     creator display_name + @handle + thumbnail; null when
+          //     post deleted / private)
+          //
+          // Goals served by always-calling oEmbed:
+          //   1. Creator display name on EVERY Spark card (the OBS 8 win
+          //      fully restored — pre-Phase-1B, only identity-failure
+          //      ads got a creator because oEmbed was fallback-only).
+          //   2. Defensive poster fallback when identity returns no
+          //      thumbnail (rare but observed on aged Spark Ads).
+          //
+          // ⚠️ HISTORICAL — the always-call design was tried once before
+          // (commit 8b350e1, 2026-06-01) and broke production: 115+
+          // simultaneous oEmbed calls to www.tiktok.com tripped an
+          // undocumented rate limit → 429 → empty grid. Reverted to
+          // fallback-only in 1f11888.
+          //
+          // What makes always-call SAFE NOW (Phase 1A landed in 7bc2d51):
+          //   - useTiktokCreativeUrlsBatch caps each POST to ≤20 ads
+          //     (MAX_OEMBED_PER_FETCH=20). pathBads.length + pathDads.length
+          //     ≤ 20 because they filter from the same capped source set.
+          //   - The hook auto-stages batches with INTER_BATCH_DELAY_MS=500
+          //     gaps, so consumer-host oEmbed never bursts past
+          //     ~13 calls/sec sustained (20 calls / 1.5s wall-time).
+          //   - 8b350e1 had no cap and no gap → 115 calls in ~10s with
+          //     zero pauses → 429. The rate limit is BURST-shaped, not
+          //     rate-shaped — Phase 1A bounds both dimensions.
+          //   - The hook also handles 429 gracefully (2s backoff + 1
+          //     retry, silent stop on second 429) so even an empirical
+          //     limit hit degrades cleanly instead of breaking the grid.
+          //
+          // Identity calls hit business-api (600/min per-advertiser limit,
+          // not the issue) — also bounded to ≤20/batch by the same cap.
+          //
+          // The persistent fix for cross-session amortization (Spark
+          // creator info doesn't expire — re-fetching it every page load
+          // is wasteful) is the server-side tiktok_creator_cache table,
+          // tracked as Phase 2 in #52.
+          const [identityResult, oembedResult] = await Promise.allSettled([
+            getIdentityVideoInfo(
               accessToken,
               advertiserId,
               ad.identity_type!,
               ad.identity_id!,
               ad.item_id!
-            );
-            if (detail) {
-              return {
-                ad,
-                urls: normalizeIdentityVideoInfoToCreative(detail),
-              };
-            }
-            primaryError = "video_not_found";
-          } catch (err) {
-            // Batch-wide errors (rate-limit / reauth) bubble immediately.
+            ),
+            resolveOembed(ad.item_id!),
+          ]);
+
+          // Batch-wide errors (rate-limit / reauth) bubble immediately
+          // from either side — preserves the fail-fast §ResolveConcurrency
+          // contract. Identity may throw a business-api 40100 or a reauth
+          // class error; oEmbed only throws on consumer-host 429.
+          if (identityResult.status === "rejected") {
+            const err = identityResult.reason;
             if (isTiktokRateLimitError(err) || classifyTiktokError(err)) {
               return { ad, urls: null, bubble: err };
             }
             console.warn(
-              `[tiktok-url-resolve] path B primary fail ad ${ad.ad_id}:`,
+              `[tiktok-url-resolve] path B identity fail ad ${ad.ad_id}:`,
               err instanceof Error ? err.message : "unknown"
             );
-            primaryError = "resolve_failed";
           }
-
-          // FALLBACK — public oEmbed (recovers BOTH poster AND creator
-          // fields when /identity/video/info/ fails per-ad — e.g., Spark
-          // Ad authorization expired, creator revoked permission, source
-          // post moved). Empirically verified item_id 7426361262524665106
-          // ("influancer OCT"): identity returned null, oEmbed returned
-          // 200 + thumbnail + author info.
-          //
-          // ⚠️ HISTORICAL NOTE — fallback-only, not always-call.
-          // An earlier iteration (commit 8b350e1, 2026-06-01) tried calling
-          // oEmbed for EVERY path-B ad in parallel with the identity call.
-          // The intent was to give every Spark Ad a creator-display name
-          // on the card, not just the identity-failure cases. But on
-          // IMAA's ~103 path-B ads, the burst of ~103 simultaneous oEmbed
-          // calls (4 parallel × ~26 chunks) tripped an UNDOCUMENTED rate
-          // limit on www.tiktok.com (consumer host) → HTTP 429 → entire
-          // grid broken. Reverted to fallback-only here.
-          //
-          // The proper fix for "creator name on every Spark Ad" is
-          // lazy-visible oEmbed (resolve only the on-screen slice,
-          // ≤ CREATIVES_PAGE_SIZE) + creator-text-cache (cache author
-          // name/handle persistently — they don't expire like the
-          // poster URL). Tracked in gh issue #52.
-          //
-          // For now: oEmbed only fires when identity fails per-ad,
-          // bounding upfront oEmbed calls to ≤ identity-failure-count
-          // (~30-50 on IMAA worst case) — well under the rate limit.
-          try {
-            const oembed = await resolveOembed(ad.item_id!);
-            if (oembed) {
-              const urls: TikTokCreativeUrls = {
-                posterUrl: oembed.thumbnailUrl,
-                playableUrl: "", // no MP4 from oEmbed; iframe handles playback
-                expiresAt: oembed.expiresAt,
-                duration: 0,
-                width: oembed.thumbnailWidth,
-                height: oembed.thumbnailHeight,
-                creatorName: oembed.authorName,
-                creatorHandle: oembed.authorHandle,
-                creatorUrl: oembed.authorUrl,
-              };
-              return {
-                ad,
-                urls,
-                // Diagnostic marker so we can later quantify how often the
-                // fallback fires (Vercel logs grep) — informs whether the
-                // path-B identity-failure rate justifies the lazy-visible
-                // refactor's complexity (#52).
-                error: "identity_failed_oembed_fallback",
-              };
-            }
-          } catch (err) {
+          if (oembedResult.status === "rejected") {
+            const err = oembedResult.reason;
             if (isTiktokRateLimitError(err)) {
               return { ad, urls: null, bubble: err };
             }
             console.warn(
-              `[tiktok-url-resolve] path B oEmbed fallback unexpected throw ad ${ad.ad_id}:`,
+              `[tiktok-url-resolve] path B oEmbed augment fail ad ${ad.ad_id}:`,
               err instanceof Error ? err.message : "unknown"
             );
           }
 
-          // Both primary and fallback returned nothing usable — STATE 3
-          // placeholder + modal iframe.
-          return { ad, urls: null, error: primaryError ?? "video_not_found" };
+          const identity =
+            identityResult.status === "fulfilled" ? identityResult.value : null;
+          const oembed =
+            oembedResult.status === "fulfilled" ? oembedResult.value : null;
+
+          // SUCCESS A — identity returned data (canonical playableUrl +
+          // posterUrl + caption). If oEmbed also returned data, merge
+          // its creator fields on top — this is the common path now
+          // (most Spark Ads have intact identity), and the merge is
+          // what gives every card the creator name.
+          if (identity) {
+            const baseUrls = normalizeIdentityVideoInfoToCreative(identity);
+            if (oembed) {
+              return {
+                ad,
+                urls: {
+                  ...baseUrls,
+                  creatorName: oembed.authorName,
+                  creatorHandle: oembed.authorHandle,
+                  creatorUrl: oembed.authorUrl,
+                },
+              };
+            }
+            // Identity succeeded but oEmbed didn't — card shows
+            // playable poster, no creator name. Graceful degradation.
+            return { ad, urls: baseUrls };
+          }
+
+          // SUCCESS B — identity null/failed but oEmbed recovered the
+          // creator + poster (the original 1f11888 fallback case,
+          // preserved verbatim semantics). Empirically verified on
+          // item_id 7426361262524665106 ("influancer OCT"): identity
+          // returned null, oEmbed returned 200 + thumbnail + author.
+          if (oembed) {
+            const urls: TikTokCreativeUrls = {
+              posterUrl: oembed.thumbnailUrl,
+              playableUrl: "", // no MP4 from oEmbed; iframe handles playback
+              expiresAt: oembed.expiresAt,
+              duration: 0,
+              width: oembed.thumbnailWidth,
+              height: oembed.thumbnailHeight,
+              creatorName: oembed.authorName,
+              creatorHandle: oembed.authorHandle,
+              creatorUrl: oembed.authorUrl,
+            };
+            return {
+              ad,
+              urls,
+              // Diagnostic marker so we can later quantify how often
+              // identity fails on path-B ads (Vercel logs grep).
+              error: "identity_failed_oembed_fallback",
+            };
+          }
+
+          // BOTH FAILED — STATE 3 placeholder + modal iframe.
+          const primaryError =
+            identityResult.status === "rejected"
+              ? "resolve_failed"
+              : "video_not_found";
+          return { ad, urls: null, error: primaryError };
         })
       );
       results.push(...chunkResults);
