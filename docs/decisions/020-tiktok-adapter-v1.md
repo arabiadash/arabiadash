@@ -1870,3 +1870,148 @@ This single endpoint resolves BOTH:
 - `scripts/_tiktok-adgroup-identity-probe.mts` — full `/adgroup/get/` default-response dump + SMART_PLUS confirmation
 - `scripts/_tiktok-oembed-probe.mts` — local 3-item_id oEmbed probe (WARP-on)
 - `src/app/api/probe/oembed/route.ts` — Vercel-side reachability probe (deleted immediately after this ADR commit, per the throwaway protocol)
+
+## §AdTypeCoverage — TikTok ad-type coverage matrix + roadmap to broad-customer completeness (2026-06-01)
+
+Path-D shipped end-to-end on IMAA (commits 1f16c09 → 2b5901f), and live verification surfaced two distinct concerns from the user. The badge-wording question is design polish, deferred to a future design pass. The structural question is whether the current 5-path router (A / B / C / D / UNKNOWN) covers the full taxonomy of TikTok ads that real customers will connect — IMAA is one Saudi perfume seller running mostly Spark Ads + DCO/SPC; a Shopify catalog seller, a Salla/Zid ecommerce account, or a non-video brand has materially different ad shapes that may route to UNKNOWN today. This amendment codifies the empirical coverage state from a 201-ad / 23-adgroup / 15-campaign probe, the priority order for closing the gaps, and three load-bearing routing invariants extracted from the probe data.
+
+### Trigger
+
+User feedback after the path-D commit chain landed on `phase-7-tiktok-v1` preview (2b5901f):
+
+> "I'm building this for users and companies, not just me — we must think of ALL solutions and ALL ad types."
+
+IMAA's ad mix is dominated by SINGLE_VIDEO (81 %) + Spark Ads (51 % path B + 40 % path A); pure-image, carousel, catalog, and exotic ad types are nearly absent. The current 5-path router was sized for IMAA's distribution. A future ecommerce customer (Shopify Plus / Salla / Zid) connecting their account will likely have a different mix — catalog/DSA ads can dominate, pure-image ads can be the majority for non-video brands. The design-for-thousands principle (build for the customer taxonomy, not the test account) requires we know, before broad launch, exactly which ad types we resolve correctly and which we don't.
+
+### Investigation — empirical IMAA coverage (probe `_tiktok-badge-correctness-probe.mts`)
+
+Sample size: 201 ads, 23 adgroups, 15 campaigns.
+
+**`ad_format` field distribution**:
+
+```
+SINGLE_VIDEO        163   (81 %)
+(null/unset)         34   (17 %)   ← ad_format NOT reliably populated
+CAROUSEL_ADS          1   (0.5 %)
+SINGLE_IMAGE          1
+CATALOG_CAROUSEL      1            ← real catalog ad on IMAA
+OTHERS                1
+```
+
+**Path-routing outcome (mirrors `routeCreativeByIdentityType` in `normalize.ts`)**:
+
+```
+B_SPARK_AD          103   (51 %)
+A_DIRECT_VIDEO       81   (40 %)
+D_DCO_OEMBED         12   (6 %)
+UNKNOWN               5   (2.5 %)
+C_PURE_IMAGE_DEFERRED  0  (0 %)    ← IMAA has zero image_ids-populated ads
+```
+
+**Signal-presence inventory** (which discriminator fields populate, independent of routing):
+
+```
+video_id            populated: 81  / 201
+tiktok_item_id      populated: 115 / 201
+identity_type       populated: 173 / 201
+identity_id         populated: 173 / 201
+image_ids           populated: 0   / 201
+```
+
+### Coverage matrix
+
+| Ad type | TikTok discriminator | Current path | Poster recoverable? | Coverage state |
+|---|---|---|---|---|
+| Single-video direct upload | `video_id` set | **A** | yes via `/file/video/ad/info/` | **complete** |
+| Single-video Spark | `tiktok_item_id` + `identity_type` + `identity_id` | **B** | yes via `/identity/video/info/` | **complete** |
+| Single-video DCO / SPC | `tiktok_item_id` only (identity stripped) | **D** | yes via `www.tiktok.com/oembed` | **complete (post-2b5901f)** |
+| Single image | `image_ids[]` (no item_id) | **C** | yes via `/file/video/image/info/` (untested) | **deferred — STATE 4 placeholder shown** |
+| Carousel pure-image | `image_ids[]` (multiple) | C | yes, needs multi-image UI | **deferred** |
+| Carousel Spark video | `tiktok_item_id` + identity + `item_type="CAROUSEL"` | B (first poster only) | partial via `carousel_info.image_info` (shape unverified) | **partial — single-poster fallback** |
+| Catalog / DSA | `catalog_id` / `product_set_id` / `sku_ids` / `hotel_ids` / `domain_ids` / `media_title_ids` | **UNKNOWN** | yes via `/catalog/product/get/` (untested) | **missing entirely** |
+| Collection (video + product grid) | normal video signals + product refs | A or B (poster shown; grid not rendered) | partial | **partial** |
+| Playable / interactive | proprietary; no static poster | UNKNOWN | NO — no static poster | **unsolvable via API** |
+| Branded effect / AR | brand effect_id | UNKNOWN | NO via current public API | **unsolvable via API** |
+| TopView / Stories / VS | placement metadata + normal video signals | A or B (same fields) | yes | **complete** |
+
+### The 4 gaps + priorities
+
+**P1 — Path C undefer (pure image, single + carousel).** `/file/video/image/info/` exists; §12c §1 marked path C deferred at v1 because IMAA has zero image-only ads. For non-video brands (fashion, decor, food display), image ads can be the majority of the surface. Required work: probe the endpoint shape on a real image-only account, normalize to a `TikTokCreativeUrls` variant or sibling shape, add a chunk-loop mirroring §ResolveConcurrency. Estimated scope: ~5 commits, similar to the path-D chain. **Blocks**: any non-video brand customer onboarding.
+
+**P1 — Path E new (catalog / DSA).** Six catalog signals (`catalog_id`, `product_set_id`, `sku_ids`, `hotel_ids`, `domain_ids`, `media_title_ids`) all map to TikTok's catalog feed system. Resolution requires `/catalog/product/get/` + a multi-product Card/Modal UX (catalog ads aren't single-creative — they're a product feed). Required work: probe shape on a real catalog account (Shopify Plus / Salla / Zid), design product-grid Card rendering, introduce a new normalization shape. Estimated scope: ~8 commits + a new ADR section. **Blocks**: every ecommerce customer with TikTok Shopping enabled.
+
+**P2 — Carousel multi-image UX.** Both pure-image carousels (path C variant) and Spark video carousels (`carousel_info.image_info`). The current single-poster Card shows only the first image — acceptable as a fallback but loses information. Required work: multi-image swiper or stacked-preview Card; modal carousel viewer. Estimated scope: ~3 commits, deferrable until C+E ship since the single-poster fallback is honest.
+
+**Deferred — Playable / branded effect.** No static-poster path exists in the public API. Acceptable to surface as STATE 4 placeholder + modal iframe fallback (the iframe IS the playable preview). Required work: when `ad_format` is one of the interactive types, swap the "creative not available" copy for "interactive ad" labeling. Estimated scope: ~1 commit. **Not a launch blocker.**
+
+### Routing invariants (3 load-bearing hidden traps)
+
+These three invariants surfaced during the probe and MUST be preserved across all future routing work:
+
+**1. Routing is ID-presence-based, NEVER `ad_format`-based.**
+
+Empirical: 34 of 201 IMAA ads (17 %) have `ad_format = null`. `ad_format` is a cosmetic label, not a structural discriminator — TikTok populates it inconsistently per ad sub-type / campaign type / API path. The dispatcher at [`normalize.ts:routeCreativeByIdentityType`](../../src/lib/tiktok/normalize.ts#L633) correctly uses ID-presence checks (`video_id` / `tiktok_item_id` / `identity_type` / `identity_id` / `image_ids`). Future paths (C + E) MUST follow the same pattern: gate on the presence of the relevant discriminator IDs (`image_ids[]`, `catalog_id` / `product_set_id` / etc.), not on `ad_format` string equality. Treat `ad_format` as a display hint, not a routing input.
+
+**2. UNKNOWN is a permanent bucket on every account, not a bug to eliminate.**
+
+Some ads have no resolvable discriminator (archived creatives, orphan rows, ad sub-types we don't yet route, ad types with no public API surface). UNKNOWN size scales with account composition: ~2.5 % on IMAA; expected 30-50 % on a catalog-heavy ecommerce account UNTIL paths C + E ship; near-zero on a pure-Spark-video boutique account. UNKNOWN is the honest catch-all, and STATE 4 placeholder + modal iframe fallback (when `tiktokVideoUrl` is derivable from `tiktok_item_id`) is the correct UX. Do NOT try to drive UNKNOWN to zero — that's a category error; some ad shapes genuinely have no public-API poster.
+
+**3. `CUSTOMIZED_USER` identity_type is untested with path B.**
+
+3 IMAA ads carry `identity_type = CUSTOMIZED_USER` (TikTok For Business custom identity, distinct from `AUTH_CODE` Spark Ad), all in SMART_PLUS campaigns, all routing to path B because identity is intact. Path B's `/identity/video/info/` may or may not return useful URLs for `CUSTOMIZED_USER` — untested empirically. **Follow-up probe required** before any non-IMAA customer with `CUSTOMIZED_USER` identities connects. Likely first appearance: agency-managed accounts using shared identity pools.
+
+### Implementation roadmap (specification — not scope for this commit chain)
+
+Suggested commit chain when picking up Path C / Path E work:
+
+```
+Phase 7.1 — Path C (pure image, single + carousel)
+  C1 — probe /file/video/image/info/ shape on a real image-only account
+  C2 — extend TikTokCreativeUrls with image-array variant
+       OR introduce TikTokImageCreativeUrls sibling shape
+  C3 — add resolveImageIds(image_ids) helper + IMAGE_CONCURRENCY=4 in api.ts
+  C4 — route.ts path-C branch (kind=C_PURE_IMAGE) — chunk-loop mirror
+  C5 — Card multi-image render (swiper or stacked) + Modal multi-image viewer
+
+Phase 7.2 — Path E (catalog / DSA)
+  E0 — new ADR section §Catalog (taxonomy + chosen design)
+  E1 — probe /catalog/* endpoints on a real Salla/Zid/Shopify account
+  E2 — introduce TIKTOK_CATALOG_AD as a new ad_type variant
+       OR keep TIKTOK_AD + type_data.subType discriminator
+  E3 — resolveCatalogProducts helper
+  E4 — route.ts path-E branch
+  E5 — Card + Modal product-grid render
+  E6 — multi-product analytics rollup (per-product CTR / conversion)
+```
+
+Both phases are sized similar to the path-D chain just completed (~5-8 commits each). Both require a real-customer test account before recon — no prior account has the necessary ad mix.
+
+### Open questions (resolve during the respective phases)
+
+1. **Path D badge semantics** — current: badge fires on identity-stripped (path D specifically); alternative: badge fires on every SPC ad regardless of identity state (would also tag the 3 `CUSTOMIZED_USER`-in-SPC path-B ads on IMAA). Decide during the batched design pass.
+2. **Path D badge wording** — "إعلان ديناميكي" confused the test user (read as contradicting "Spark"). Alternatives: "حملة ذكية" (Smart Campaign) / tooltip explainer. Defer to batched design pass.
+3. **`CUSTOMIZED_USER` identity behavior with `/identity/video/info/`** — untested. Probe required before non-IMAA launch.
+4. **TIKTOK_CATALOG_AD: new `ad_type` variant vs. `type_data.subType`** — defer to Phase 7.2 §Catalog ADR. The Meta-ad-discriminator pattern at [`types.ts:376`](../../src/lib/ads/types.ts#L376) (sub-type lives in `type_data`) is one precedent worth weighing against the PMax precedent of a new top-level `ad_type`.
+
+### Supersession + preservation
+
+**Preserves unchanged:**
+
+- All path-A / B / D routing (A unchanged from §Decision 12; B unchanged from §12c §3; D just-shipped from §DCO-Identity)
+- §12c §1's deferred-state for path C — this amendment codifies the deferral as a P1 gap with explicit roadmap, doesn't change v1 behavior
+- §ResolveConcurrency cap=4 + chunk-loop + in-loop fail-fast — Path C + Path E MUST reuse this pattern verbatim
+
+**Amends (does not supersede):**
+
+- §12c §1's implicit "4-path dispatcher is complete" framing. With this amendment the dispatcher is documented as: **v1 = 5 routes (A / B / C-deferred / D / UNKNOWN); v2 roadmap = 7+ routes (add E, expand C from deferred to live, add carousel variants)**. The dispatcher's discriminated-union shape + TypeScript exhaustiveness handle arbitrary future paths additively without consumer-side churn.
+
+### Memory carryover
+
+Two candidate memory entries for future-session retention (formalize when convenient):
+
+- **Design for the customer taxonomy, not the test account.** When scoping coverage, audit against the full set of customer ad mixes (catalog ecommerce, non-video brands, agencies, app advertisers), not against the single account being live-tested. The test account is signal, not ground truth. (User-stated principle, 2026-06-01.)
+- **Routing must be ID-presence-based, not format-string-based.** Fields like `ad_format` are cosmetic labels populated inconsistently (17 % null on IMAA's TikTok ads). Routing logic gates on structural discriminator IDs (`video_id` / `tiktok_item_id` / `image_ids` / `catalog_id` / etc.), which platforms populate reliably. Treat string-typed format fields as display hints only. (Probe-derived invariant, 2026-06-01.)
+
+### Probe artifacts (throwaway, removed in follow-up commits)
+
+- `scripts/_tiktok-badge-correctness-probe.mts` — quadrant analysis (identity × SMART_PLUS) + signal-presence inventory + path-D false-positive check on IMAA; 201 ads / 23 adgroups / 15 campaigns; zero false positives confirmed
