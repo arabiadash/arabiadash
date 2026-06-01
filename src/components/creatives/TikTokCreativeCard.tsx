@@ -136,6 +136,49 @@ export function TikTokCreativeCard({
   // forward-compat with cached rows pre-dating the v1 schema.
   const purchases = ad.purchases ?? 0;
 
+  // ============================================================
+  // Unified card-identity (OBS 4 + OBS 6, 2026-06-01).
+  // Primary title priority chain:
+  //   1. @{creatorHandle}  — when oEmbed-resolvable (best for
+  //      Spark + DCO ads; ~57 % of IMAA's mix, much higher for
+  //      influencer-heavy customer profiles per §AdTypeCoverage)
+  //   2. ad.name           — already passed through normalize's
+  //      OBS-1 fallback chain (caption-truncated for DCO
+  //      placeholders, user-set name for direct uploads,
+  //      "بدون اسم" final fallback)
+  //
+  // Secondary line (always-rendered with &nbsp; placeholder when
+  // empty, for grid-uniform card heights — resolves OBS 4):
+  //   - When primary is @handle AND ad.name is a meaningful
+  //     caption → ad.name truncated ~30 chars (dimmed, line-1)
+  //   - Else → non-breaking space (height reserved, content empty)
+  //
+  // Brand-self-handle skip (when @handle === brand's own handle,
+  // e.g. @imaa for IMAA's own Business-identity uploads) is NOT
+  // applied this commit — deferred until empirical evidence shows
+  // it dominates a column. Most customers have distinct creator
+  // handles for Spark ads; brand-self direct uploads typically
+  // route to path A which has no @handle anyway.
+  // ============================================================
+  const SECONDARY_MAX_LEN = 30;
+  const PLACEHOLDER_NAME_RE = /^_\d+$/;
+
+  const creatorHandle = resolvedUrls?.creatorHandle;
+  const hasHandle = !!creatorHandle;
+
+  const primaryLabel = hasHandle ? `@${creatorHandle}` : ad.name;
+
+  const adNameIsPlaceholder =
+    !ad.name ||
+    PLACEHOLDER_NAME_RE.test(ad.name) ||
+    ad.name === "بدون اسم";
+  const secondaryRaw =
+    hasHandle && !adNameIsPlaceholder ? ad.name : "";
+  const secondaryLabel =
+    secondaryRaw.length > SECONDARY_MAX_LEN
+      ? secondaryRaw.slice(0, SECONDARY_MAX_LEN).trim() + "…"
+      : secondaryRaw;
+
   return (
     <div
       className="group bg-white border border-gray-200 rounded-lg overflow-hidden hover:shadow-md transition cursor-pointer"
@@ -225,17 +268,29 @@ export function TikTokCreativeCard({
       </div>
 
       <div className="p-3">
+        {/* Primary title: @handle when oEmbed-resolved, else ad.name
+            (which itself ran through the OBS-1 normalize chain for
+            DCO placeholders). Single-line truncate for uniform card
+            height per the new card-identity hierarchy. The title
+            attribute preserves the ORIGINAL ad.name on hover so users
+            can still read the full TikTok-API-side name if needed. */}
         <h4
-          className="font-semibold text-gray-900 text-xs line-clamp-2 mb-2 min-h-[2rem] flex items-center gap-1.5"
+          className="font-semibold text-gray-900 text-xs truncate mb-1"
           title={ad.name}
         >
-          <span className="min-w-0 truncate">{ad.name}</span>
+          {primaryLabel}
         </h4>
-        {resolvedUrls?.creatorHandle && (
-          <p className="text-[10px] text-gray-500 -mt-1 mb-2 truncate">
-            @{resolvedUrls.creatorHandle}
-          </p>
-        )}
+        {/* Secondary line: caption snippet when title is @handle and
+            a meaningful caption exists. Always-rendered (non-breaking
+            space when absent) so all cards share the same vertical
+            footprint — resolves the OBS 4 height-delta where DCO
+            cards (with @handle line) were taller than non-DCO cards. */}
+        <p
+          className="text-[10px] text-gray-400 line-clamp-1 mb-2"
+          title={secondaryRaw || undefined}
+        >
+          {secondaryLabel || " "}
+        </p>
 
         <div className="grid grid-cols-2 gap-2 text-xs">
           <div>
