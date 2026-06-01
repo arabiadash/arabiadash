@@ -114,6 +114,10 @@ export function TikTokAdDetailModal({
   // Final fallback = no resolved video, no embed URL (path C deferred
   // or UNKNOWN with no public tiktok.com URL).
 
+  // Path-D DCO/SPC detection per ADR-020 §DCO-Identity. Mirrors the
+  // dispatcher's path-D gate condition at normalize.ts:routeCreativeByIdentityType.
+  const isDco = !!ad.type_data.tiktokItemId && !ad.type_data.identityType;
+
   // "View on TikTok" link — render whenever the ad has a public
   // tiktok.com URL, regardless of resolve state. Covers paths B + any
   // UNKNOWN ad that carried tiktok_item_id.
@@ -130,10 +134,15 @@ export function TikTokAdDetailModal({
       >
         {/* Sticky header — matches AdDetailModal pattern */}
         <div className="flex items-center justify-between p-4 border-b border-gray-100 sticky top-0 bg-white z-10">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <span className="px-2 py-0.5 bg-gradient-to-r from-pink-500 to-fuchsia-600 text-white rounded text-[10px] font-semibold">
               TikTok
             </span>
+            {isDco && (
+              <span className="px-2 py-0.5 bg-fuchsia-50 text-fuchsia-700 border border-fuchsia-200 rounded text-[10px] font-semibold">
+                إعلان ديناميكي
+              </span>
+            )}
             <h3 className="font-bold text-gray-900 text-lg">تفاصيل الإعلان</h3>
           </div>
           <button
@@ -210,6 +219,37 @@ export function TikTokAdDetailModal({
                 </div>
               )}
             </div>
+
+            {/* Creator byline — populated by path-D oEmbed lookup per
+                ADR-020 §DCO-Identity. Player-adjacent (under video,
+                above CTA) so the user sees who MADE the content next
+                to the content itself. Hidden when no creator data
+                (paths A/B/C/UNKNOWN never populate these fields). */}
+            {urls?.creatorName && (
+              <div className="mt-3 flex items-center gap-2 text-sm">
+                <span className="text-gray-500 text-xs flex-shrink-0">
+                  المنشئ:
+                </span>
+                <span className="font-medium text-gray-900 truncate">
+                  {urls.creatorName}
+                </span>
+                {urls.creatorHandle &&
+                  (urls.creatorUrl ? (
+                    <a
+                      href={urls.creatorUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-fuchsia-700 hover:underline truncate flex-shrink-0"
+                    >
+                      @{urls.creatorHandle}
+                    </a>
+                  ) : (
+                    <span className="text-xs text-gray-500 truncate flex-shrink-0">
+                      @{urls.creatorHandle}
+                    </span>
+                  ))}
+              </div>
+            )}
 
             {/* "View on TikTok" external link — beneath the player.
                 Renders whenever a public tiktok.com URL exists, even

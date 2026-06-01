@@ -110,6 +110,11 @@ export function TikTokCreativeCard({
   // Pure placeholder catches: path C without resolution, UNKNOWN, and
   // path-B errors where tiktokVideoUrl is also absent (rare).
 
+  // Path-D DCO/SPC detection per ADR-020 §DCO-Identity. Mirrors the
+  // dispatcher's path-D gate condition at normalize.ts:routeCreativeByIdentityType
+  // (itemId truthy AND identityType falsy).
+  const isDco = !!ad.type_data.tiktokItemId && !ad.type_data.identityType;
+
   const currency = (ad.currency as Currency) || accountCurrency;
 
   // ?? 0 is defensive — TikTok normalizer guarantees non-null for
@@ -181,11 +186,18 @@ export function TikTokCreativeCard({
 
         {/* Top-left: TikTok identifier badge — text, not SVG logo, per
             design spec. Pink/fuchsia gradient mirrors TikTok's brand
-            palette without copying the trademarked logo. */}
-        <div className="absolute top-2 left-2">
+            palette without copying the trademarked logo. Path-D DCO ads
+            get a sibling "إعلان ديناميكي" chip so the user can tell at
+            a glance these are dynamic-creative auto-assembled ads. */}
+        <div className="absolute top-2 left-2 flex items-center gap-1">
           <span className="px-2 py-0.5 bg-gradient-to-r from-pink-500 to-fuchsia-600 text-white rounded text-[10px] font-semibold">
             TikTok
           </span>
+          {isDco && (
+            <span className="px-2 py-0.5 bg-white/90 text-fuchsia-700 border border-fuchsia-200 rounded text-[10px] font-semibold">
+              إعلان ديناميكي
+            </span>
+          )}
         </div>
 
         {/* Top-right: status badge (same shape as CreativeCard) */}
@@ -207,6 +219,11 @@ export function TikTokCreativeCard({
         >
           <span className="min-w-0 truncate">{ad.name}</span>
         </h4>
+        {resolvedUrls?.creatorHandle && (
+          <p className="text-[10px] text-gray-500 -mt-1 mb-2 truncate">
+            @{resolvedUrls.creatorHandle}
+          </p>
+        )}
 
         <div className="grid grid-cols-2 gap-2 text-xs">
           <div>
