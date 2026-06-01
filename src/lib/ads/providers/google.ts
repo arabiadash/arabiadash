@@ -360,9 +360,28 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
 
     if (!result) return [];
 
+    // ⚠️ TEMP DIAGNOSTIC — remove after Google range-regression is settled
+    console.log(
+      `[google.getAds] result.ads.length BEFORE filter: ${result.ads.length} for ${dateFrom}..${dateTo}` +
+        (result.ads.length > 0
+          ? ` | sample: ${result.ads
+              .slice(0, 3)
+              .map(
+                (a) =>
+                  `{id=${a.id} spend=${a.spend} (${typeof a.spend}) impressions=${a.impressions} (${typeof a.impressions})}`
+              )
+              .join(" | ")}`
+          : "")
+    );
+
     // Drop ads with zero activity in the period — matches Meta behavior.
     const activeAds = result.ads.filter(
       (ad) => ad.spend > 0 || ad.impressions > 0
+    );
+
+    // ⚠️ TEMP DIAGNOSTIC — remove after Google range-regression is settled
+    console.log(
+      `[google.getAds] activeAds.length AFTER filter: ${activeAds.length} for ${dateFrom}..${dateTo}`
     );
 
     // Pass 2: collect unique asset resource names across all active ads
@@ -535,7 +554,12 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
     dateTo: string;
   } {
     if (isCustomRange(range)) {
-      return { dateFrom: range.since, dateTo: range.until };
+      // ⚠️ TEMP DIAGNOSTIC — remove after Google range-regression is settled
+      const r = { dateFrom: range.since, dateTo: range.until };
+      console.log(
+        `[google.resolveDateRange] CUSTOM branch: ${r.dateFrom}..${r.dateTo}`
+      );
+      return r;
     }
 
     if (range === "lifetime") {
@@ -550,14 +574,24 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
       const threeYearsAgo = new Date(today);
       threeYearsAgo.setFullYear(today.getFullYear() - 3);
 
-      return {
+      // ⚠️ TEMP DIAGNOSTIC — remove after Google range-regression is settled
+      const r = {
         dateFrom: formatISO(threeYearsAgo),
         dateTo: formatISO(today),
       };
+      console.log(
+        `[google.resolveDateRange] LIFETIME branch: ${r.dateFrom}..${r.dateTo}`
+      );
+      return r;
     }
 
+    // ⚠️ TEMP DIAGNOSTIC — remove after Google range-regression is settled
     const { since, until } = presetToCustomRange(range);
-    return { dateFrom: since, dateTo: until };
+    const r = { dateFrom: since, dateTo: until };
+    console.log(
+      `[google.resolveDateRange] PRESET branch range=${range}: ${r.dateFrom}..${r.dateTo}`
+    );
+    return r;
   }
 
   /**
