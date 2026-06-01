@@ -5551,6 +5551,12 @@ export default function ReportsClient({
                         ) : googleAds.length === 0 ? (
                           <div className="text-center py-10 text-gray-500">
                             <p className="text-sm">لا توجد إعلانات بإنفاق في هذه الفترة</p>
+                            <button
+                              onClick={() => refreshGoogleAds()}
+                              className="mt-2 text-sm text-indigo-600 hover:underline"
+                            >
+                              تحديث
+                            </button>
                           </div>
                         ) : (
                           <>
