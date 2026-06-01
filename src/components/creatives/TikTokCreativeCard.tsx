@@ -224,17 +224,18 @@ export function TikTokCreativeCard({
       onClick={onClick}
     >
       <div className="aspect-square relative bg-gray-100 overflow-hidden">
-        {urlsLoading ? (
-          // STATE 1 — LOADING: skeleton gradient + ad name + pulse.
-          // No spinner per design: animate-pulse on the whole tile is
-          // less visually noisy across a grid of many cards.
-          <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-pink-50 via-fuchsia-50 to-rose-50 text-fuchsia-700 p-4 animate-pulse">
-            <Play className="w-10 h-10 mb-2 opacity-60" />
-            <p className="text-[10px] text-center line-clamp-2 opacity-70">
-              {ad.name}
-            </p>
-          </div>
-        ) : hasPoster ? (
+        {/* Dispatch order — poster wins over batch-loading state.
+            This matters during Phase 1A's auto-staged batches (#52):
+            with ~100 ads on lifetime, the hook stages 5 batches × 20 ads
+            with 500ms gaps (~9s total wall-time). The hook's `loading`
+            flag stays true the entire time. Without "poster first",
+            ALL cards (including already-resolved ones from earlier
+            batches) would show STATE 1 skeleton until the very last
+            batch completed — user sees a frozen-feeling grid. With
+            "poster first", cards from completed batches immediately
+            show their content while later-batch cards stay in STATE 1
+            until their batch lands. Progress is visibly progressive. */}
+        {hasPoster ? (
           // STATE 2 — POSTER: signed URL from tiktok-url-resolve.
           // object-center crop ensures faces/products in vertical 9:16
           // posters stay centered when squeezed into aspect-square.

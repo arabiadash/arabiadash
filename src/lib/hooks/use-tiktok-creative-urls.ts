@@ -172,6 +172,47 @@ export interface UseTiktokCreativeUrlsBatchReturn {
   refresh: () => Promise<void>;
 }
 
+/**
+ * Phase 1A (2026-06-01) — hard cap on oEmbed calls per fetch + additive
+ * resolved map + auto-staged batches.
+ *
+ * THE PROBLEM: TikTok's www.tiktok.com (consumer oEmbed host) has an
+ * UNDOCUMENTED rate limit. Empirically: commit 8b350e1's "always-call
+ * oEmbed for every path-B Spark Ad" sent ~115 oEmbed calls in one
+ * burst on IMAA's lifetime view → HTTP 429 → entire batch errored →
+ * grid broken. Even the post-1f11888 fallback-only design tripped 429
+ * on lifetime when ~30-50 path-B identity failures fired their
+ * fallbacks together.
+ *
+ * THE FIX: cap each POST to ≤ MAX_OEMBED_PER_FETCH unresolved ads.
+ * Combined with additive in-memory state (never re-fetch already
+ * resolved), this bounds oEmbed calls per fetch to ~20 regardless
+ * of total ad count. For "Show all" with 100+ ads, the hook auto-
+ * stages bounded batches of 20 with 500 ms gaps (gentle pacing).
+ * On 429 inside a capped batch, back off 2 s and retry once; if still
+ * 429, give up silently (cards beyond resolved stay STATE 3/4
+ * placeholder per the graceful-degradation requirement — no
+ * batch-wide error state thrown).
+ *
+ * Resolved map persists across adsKey changes (filter / range toggles
+ * within session) — in-memory, cheap. Cleared only on refresh() so
+ * the user can force re-fetch from the tab header button.
+ *
+ * For ads beyond the cap on initial load:
+ *   - Cards render as before (the hook leaves urls[adId] undefined,
+ *     Card falls to STATE 3/4 placeholder + ad.name title).
+ *   - Subsequent "Load more" interactions (visibleCount grows →
+ *     adsKey changes → useEffect re-fires) pick up the next batch
+ *     of unresolved ads (capped 20 again).
+ *
+ * Phase 2 (#52, pre-launch) will add a server-side creator-text-cache
+ * keyed on tiktok_item_id, amortizing oEmbed calls across customers.
+ * That makes oEmbed sustainable at multi-tenant scale.
+ */
+const MAX_OEMBED_PER_FETCH = 20;
+const INTER_BATCH_DELAY_MS = 500;
+const BACKOFF_ON_429_MS = 2000;
+
 export function useTiktokCreativeUrlsBatch(
   options: UseTiktokCreativeUrlsBatchOptions
 ): UseTiktokCreativeUrlsBatchReturn {
@@ -183,6 +224,16 @@ export function useTiktokCreativeUrlsBatch(
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<CreativeUrlError | null>(null);
+
+  // Mirror refs for the resolved + errors maps. Reading from refs
+  // inside doFetch's loop avoids closure-stale issues when the loop
+  // iterates across multiple batches (state setter is async; ref
+  // lets the next iteration see the just-merged values without
+  // depending on a re-render).
+  const urlsRef = useRef(urls);
+  urlsRef.current = urls;
+  const errorsRef = useRef(errors);
+  errorsRef.current = errors;
 
   // Request-token guard per ADR-019 §6 — increments on every doFetch;
   // only the latest token's resolution writes state. Prevents stale
@@ -209,12 +260,12 @@ export function useTiktokCreativeUrlsBatch(
   // it in the sibling hook.
   const doFetch = useCallback(
     async (forceRefresh: boolean): Promise<void> => {
-      void forceRefresh; // route doesn't expose a ?refresh param; kept for API symmetry with refresh()
-
       if (!enabled || !accountId || ads.length === 0) {
-        // Clean defaults — empty maps, no loading, no error.
+        // Clean defaults on empty input. forceRefresh also clears.
         setUrls({});
         setErrors({});
+        urlsRef.current = {};
+        errorsRef.current = {};
         setError(null);
         setLoading(false);
         return;
@@ -228,31 +279,109 @@ export function useTiktokCreativeUrlsBatch(
       setLoading(true);
       setError(null);
 
+      // forceRefresh: clear resolved + errors so the loop picks up
+      // every ad again from scratch (matches user's "refresh" intent).
+      if (forceRefresh) {
+        setUrls({});
+        setErrors({});
+        urlsRef.current = {};
+        errorsRef.current = {};
+      }
+
       try {
-        const payload = ads.map(buildAdResolveRequest);
-        const res = await fetch("/api/ads/creatives/tiktok-url-resolve", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ account_id: accountId, ads: payload }),
-          signal: controller.signal,
-        });
-        if (token !== reqTokenRef.current) return;
+        // Auto-stage loop — fetch capped batches until all ads are
+        // either resolved (urls map) or errored (errors map). Each
+        // iteration fetches up to MAX_OEMBED_PER_FETCH unresolved ads.
+        // Bounded by ads.length / cap iterations max.
+        let backoffPending = false;
 
-        const errKind = await classifyResponseError(res);
-        if (errKind) {
-          setError(errKind);
-          return;
+        while (true) {
+          if (token !== reqTokenRef.current || controller.signal.aborted) return;
+
+          const currentUrls = urlsRef.current;
+          const currentErrors = errorsRef.current;
+          const unresolved = ads.filter(
+            (a) => !(a.id in currentUrls) && !(a.id in currentErrors)
+          );
+
+          if (unresolved.length === 0) break; // all done — exit loop
+
+          const toResolve = unresolved.slice(0, MAX_OEMBED_PER_FETCH);
+          const payload = toResolve.map(buildAdResolveRequest);
+
+          const res = await fetch("/api/ads/creatives/tiktok-url-resolve", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ account_id: accountId, ads: payload }),
+            signal: controller.signal,
+          });
+          if (token !== reqTokenRef.current) return;
+
+          const errKind = await classifyResponseError(res);
+          if (errKind) {
+            if (errKind === "rate_limited" && !backoffPending) {
+              // First 429 in this run: backoff and retry once. Surfaces
+              // the rate-limit pressure to the next iteration without
+              // immediately marking ads errored — gives TikTok a chance
+              // to recover before we give up.
+              backoffPending = true;
+              await new Promise((resolve) =>
+                setTimeout(resolve, BACKOFF_ON_429_MS)
+              );
+              continue;
+            }
+            if (errKind === "rate_limited") {
+              // Second consecutive 429 after backoff. Stop the loop
+              // SILENTLY — do NOT set batch-wide error state. Cards
+              // beyond resolved stay STATE 3/4 placeholder (graceful
+              // degradation per Phase 1A requirement). User can retry
+              // via the tab refresh button (forceRefresh).
+              console.warn(
+                "[useTiktokCreativeUrlsBatch] sustained 429 after backoff — stopping auto-stage, " +
+                  `${unresolved.length} ads remain unresolved (will retry on next adsKey change or refresh)`
+              );
+              return;
+            }
+            // Non-rate-limit errors (reauth, fetch_failed) ARE batch-
+            // wide and need UI surfacing.
+            setError(errKind);
+            return;
+          }
+
+          // Successful batch — merge into refs + state additively.
+          // Reading raw response keeps the loop iteration's view fresh.
+          backoffPending = false;
+          const body = (await res.json()) as BatchResponseBody;
+          if (token !== reqTokenRef.current) return;
+
+          const batchUrls: Record<string, TikTokCreativeUrls | null> = {};
+          for (const [adId, entry] of Object.entries(body.resolved ?? {})) {
+            batchUrls[adId] = entry?.urls ?? null;
+          }
+          const batchErrors = body.errors ?? {};
+
+          // Merge: previous + this batch. Refs FIRST so the next loop
+          // iteration's filter sees the just-resolved ads (state setter
+          // is async; ref is synchronous).
+          urlsRef.current = { ...urlsRef.current, ...batchUrls };
+          errorsRef.current = { ...errorsRef.current, ...batchErrors };
+          setUrls(urlsRef.current);
+          setErrors(errorsRef.current);
+
+          // Brief delay between batches — politeness toward TikTok's
+          // oEmbed endpoint + leaves headroom for the next interaction.
+          // Skipped when nothing more to fetch (loop exits via the
+          // unresolved.length check at the top).
+          const remaining = ads.filter(
+            (a) =>
+              !(a.id in urlsRef.current) && !(a.id in errorsRef.current)
+          ).length;
+          if (remaining > 0) {
+            await new Promise((resolve) =>
+              setTimeout(resolve, INTER_BATCH_DELAY_MS)
+            );
+          }
         }
-
-        const body = (await res.json()) as BatchResponseBody;
-        if (token !== reqTokenRef.current) return;
-
-        const nextUrls: Record<string, TikTokCreativeUrls | null> = {};
-        for (const [adId, entry] of Object.entries(body.resolved ?? {})) {
-          nextUrls[adId] = entry?.urls ?? null;
-        }
-        setUrls(nextUrls);
-        setErrors(body.errors ?? {});
       } catch (err) {
         if (token !== reqTokenRef.current) return;
         if (err instanceof DOMException && err.name === "AbortError") {
