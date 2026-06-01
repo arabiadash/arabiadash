@@ -246,24 +246,8 @@ export async function fetchAds(
     LIMIT 500
   `;
 
-  // ⚠️ TEMP DIAGNOSTIC — remove after Google range-regression is settled
-  console.log("[google-ads/fetchAds] GAQL query for range:", {
-    customerId: options.customerId,
-    dateFrom: options.dateFrom,
-    dateTo: options.dateTo,
-    queryPreview: query.replace(/\s+/g, " ").trim().slice(0, 300),
-  });
-
   try {
     const rows = await customer.query(query);
-
-    // ⚠️ TEMP DIAGNOSTIC — remove after Google range-regression is settled
-    console.log(
-      `[google-ads/fetchAds] rows returned: ${rows.length} for ${options.dateFrom}..${options.dateTo}` +
-        (rows.length > 0
-          ? ` | sample: cost_micros=${rows[0].metrics?.cost_micros} impressions=${rows[0].metrics?.impressions}`
-          : "")
-    );
 
     const ads: AdRow[] = rows.map((row) => {
       const spend = Number(row.metrics?.cost_micros ?? 0) / 1_000_000;
