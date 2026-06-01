@@ -266,33 +266,149 @@ async function resolveAds(
       const chunk = pathBads.slice(i, i + PATH_B_CONCURRENCY);
       const chunkResults: PathBResult[] = await Promise.all(
         chunk.map(async (ad): Promise<PathBResult> => {
-          try {
-            const detail = await getIdentityVideoInfo(
+          // Path-B unified resolver (2026-06-01) — fires BOTH primary
+          // (/identity/video/info/) AND oEmbed in parallel, then
+          // merges the results.
+          //
+          // WHY ALWAYS call both: /identity/video/info/ returns the
+          // playableUrl + posterUrl + caption when Spark Ad identity
+          // is intact, but NEVER returns creator metadata (author name
+          // / handle / URL). The card's unified-identity design needs
+          // a creator-display name on every influencer-sourced ad,
+          // which only oEmbed provides. So oEmbed is no longer a
+          // fallback — it's a supplement that runs on every path-B ad.
+          //
+          // Note for "design-for-thousands": Smart and Spark ads can
+          // be customer-uploaded videos (NOT influencer-sourced), in
+          // which case oEmbed returns 4xx and creator fields stay
+          // undefined. The Card's title chain handles that cleanly
+          // via the existing fallback (no handle → ad.name). Per-ad
+          // oEmbed 4xx is graceful (resolveOembed returns null).
+          //
+          // Merge rules:
+          //   Primary OK + oEmbed OK   → primary urls + oEmbed creator fields
+          //   Primary OK + oEmbed null → primary urls only (no creator)
+          //   Primary null + oEmbed OK → oEmbed urls (recovery; empty
+          //                              playableUrl, modal iframe still works)
+          //   Both null                → STATE 3 placeholder
+          //
+          // Concurrency: chunk has up to PATH_B_CONCURRENCY=4 ads in
+          // flight; each ad fires 2 calls in parallel within itself.
+          // Effective oEmbed concurrency at any moment in path-B
+          // chunk-loop = 4 (one per ad). Path-D chunk-loop runs AFTER
+          // path-B completes in resolveAds → zero overlap. Total
+          // oEmbed budget intact. oEmbed = www.tiktok.com (consumer
+          // host), NOT subject to TikTok's 600 req/min business-API
+          // cap, WARP-independent.
+          //
+          // Cost: per chunk wall-time = max(primary, oEmbed) ≈ ~300ms
+          // (parallel within-ad), vs serial-sequential ~600ms. Roughly
+          // halves first-fetch latency for the path-B path.
+          //
+          // Empirically verified item_id 7426361262524665106
+          // ("influancer OCT") 2026-06-01: identity returned null,
+          // oEmbed returned 200 + thumbnail + author "ليان طلال" /
+          // @cillui → merge took the oEmbed branch (recovery case).
+          const [primarySettled, oembedSettled] = await Promise.allSettled([
+            getIdentityVideoInfo(
               accessToken,
               advertiserId,
               ad.identity_type!,
               ad.identity_id!,
               ad.item_id!
+            ),
+            resolveOembed(ad.item_id!),
+          ]);
+
+          // Bubble check FIRST — rate-limit / reauth from EITHER call
+          // is batch-wide and must fail-fast before merging.
+          if (primarySettled.status === "rejected") {
+            if (
+              isTiktokRateLimitError(primarySettled.reason) ||
+              classifyTiktokError(primarySettled.reason)
+            ) {
+              return { ad, urls: null, bubble: primarySettled.reason };
+            }
+          }
+          if (
+            oembedSettled.status === "rejected" &&
+            isTiktokRateLimitError(oembedSettled.reason)
+          ) {
+            return { ad, urls: null, bubble: oembedSettled.reason };
+          }
+
+          // Extract per-call outcomes (null on rejection or empty success)
+          const primaryDetail =
+            primarySettled.status === "fulfilled" ? primarySettled.value : null;
+          const oembed =
+            oembedSettled.status === "fulfilled" ? oembedSettled.value : null;
+
+          let primaryError: string | undefined;
+          if (primarySettled.status === "rejected") {
+            console.warn(
+              `[tiktok-url-resolve] path B primary fail ad ${ad.ad_id}:`,
+              primarySettled.reason instanceof Error
+                ? primarySettled.reason.message
+                : "unknown"
             );
-            if (detail) {
+            primaryError = "resolve_failed";
+          } else if (!primaryDetail) {
+            primaryError = "video_not_found";
+          }
+
+          if (oembedSettled.status === "rejected") {
+            // Non-429 oEmbed rejection (defensive — resolveOembed swallows
+            // non-bubble errors to null internally; this catch is belt+suspenders).
+            console.warn(
+              `[tiktok-url-resolve] path B oEmbed unexpected throw ad ${ad.ad_id}:`,
+              oembedSettled.reason instanceof Error
+                ? oembedSettled.reason.message
+                : "unknown"
+            );
+          }
+
+          // Merge — primary wins for video/poster, oEmbed adds creator
+          if (primaryDetail) {
+            const primaryUrls = normalizeIdentityVideoInfoToCreative(primaryDetail);
+            if (oembed) {
               return {
                 ad,
-                urls: normalizeIdentityVideoInfoToCreative(detail),
+                urls: {
+                  ...primaryUrls,
+                  creatorName: oembed.authorName,
+                  creatorHandle: oembed.authorHandle,
+                  creatorUrl: oembed.authorUrl,
+                },
               };
             }
-            return { ad, urls: null, error: "video_not_found" };
-          } catch (err) {
-            // Tag batch-wide errors for re-throw; mark individual errors
-            // as resolve_failed without killing siblings within the chunk.
-            if (isTiktokRateLimitError(err) || classifyTiktokError(err)) {
-              return { ad, urls: null, bubble: err };
-            }
-            console.warn(
-              `[tiktok-url-resolve] path B fail ad ${ad.ad_id}:`,
-              err instanceof Error ? err.message : "unknown"
-            );
-            return { ad, urls: null, error: "resolve_failed" };
+            // Primary only — no creator info (oEmbed missed or non-influencer source)
+            return { ad, urls: primaryUrls };
           }
+
+          // Primary failed — oEmbed recovery (the OBS 7 fallback case)
+          if (oembed) {
+            const urls: TikTokCreativeUrls = {
+              posterUrl: oembed.thumbnailUrl,
+              playableUrl: "", // no MP4 from oEmbed; iframe handles playback
+              expiresAt: oembed.expiresAt,
+              duration: 0,
+              width: oembed.thumbnailWidth,
+              height: oembed.thumbnailHeight,
+              creatorName: oembed.authorName,
+              creatorHandle: oembed.authorHandle,
+              creatorUrl: oembed.authorUrl,
+            };
+            return {
+              ad,
+              urls,
+              // Diagnostic marker so we can later quantify how often the
+              // identity-failure-recovery case fires (Vercel logs grep).
+              error: "identity_failed_oembed_fallback",
+            };
+          }
+
+          // Both calls produced nothing useful — STATE 3 placeholder + modal iframe
+          return { ad, urls: null, error: primaryError ?? "video_not_found" };
         })
       );
       results.push(...chunkResults);

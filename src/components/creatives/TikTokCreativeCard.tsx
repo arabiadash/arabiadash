@@ -124,10 +124,29 @@ export function TikTokCreativeCard({
   // Pure placeholder catches: path C without resolution, UNKNOWN, and
   // path-B errors where tiktokVideoUrl is also absent (rare).
 
-  // Path-D DCO/SPC detection per ADR-020 §DCO-Identity. Mirrors the
-  // dispatcher's path-D gate condition at normalize.ts:routeCreativeByIdentityType
-  // (itemId truthy AND identityType falsy).
-  const isDco = !!ad.type_data.tiktokItemId && !ad.type_data.identityType;
+  // Badge type derivation (2026-06-01 unified TikTok card design).
+  // Three cohorts visualized via top-left badge:
+  //   - Smart (سمارت)  → DCO/SPC ads (path D) — auto-mixed material
+  //                       variant in a SMART_PLUS adgroup
+  //   - Spark (سبارك)  → Spark Ads (path B) — Spark-sourced posts
+  //                       promoted via influencer/UGC authorization
+  //   - (no badge)     → direct-upload ads (path A) — brand uploaded
+  //                       video file directly
+  //
+  // Both isSpark and isDco gate on !videoId to exclude path-A direct
+  // uploads (which may also carry identity_type/tiktok_item_id from
+  // Spark-source workflows but route to path A in the dispatcher
+  // because videoId takes precedence). Without that guard, a
+  // direct-upload-with-Spark-identity could badge as "Spark" — false
+  // positive per the user's spec (path A = no badge).
+  const isDco =
+    !ad.type_data.videoId &&
+    !!ad.type_data.tiktokItemId &&
+    !ad.type_data.identityType;
+  const isSpark =
+    !ad.type_data.videoId &&
+    !!ad.type_data.tiktokItemId &&
+    !!ad.type_data.identityType;
 
   const currency = (ad.currency as Currency) || accountCurrency;
 
@@ -164,9 +183,29 @@ export function TikTokCreativeCard({
   const PLACEHOLDER_NAME_RE = /^_\d+$/;
 
   const creatorHandle = resolvedUrls?.creatorHandle;
+  const creatorName = resolvedUrls?.creatorName;
   const hasHandle = !!creatorHandle;
 
-  const primaryLabel = hasHandle ? `@${creatorHandle}` : ad.name;
+  // OBS 8 (2026-06-01) — display creator name + @handle inline as the
+  // primary title when both are available ("حصة عبدالله 🎵 @1dierwo").
+  // Matches the modal's "المنشئ: <name> <handle>" format so Card and
+  // Modal stay consistent. Single line, truncated for narrow cards.
+  //
+  // Dedupe edge case: some TikTok accounts have display_name === handle
+  // (auto-generated handles where the user never set a display name).
+  // Case-insensitive equality check — if same, show only @handle to
+  // avoid visually awkward "user1234567 @user1234567".
+  const creatorNameTrimmed = creatorName?.trim();
+  const hasDistinctName =
+    !!creatorNameTrimmed &&
+    !!creatorHandle &&
+    creatorNameTrimmed.toLowerCase() !== creatorHandle.toLowerCase();
+
+  const primaryLabel = hasHandle
+    ? hasDistinctName
+      ? `${creatorNameTrimmed} @${creatorHandle}`
+      : `@${creatorHandle}`
+    : ad.name;
 
   const adNameIsPlaceholder =
     !ad.name ||
@@ -239,18 +278,23 @@ export function TikTokCreativeCard({
           </div>
         )}
 
-        {/* Top-left: TikTok identifier badge — text, not SVG logo, per
-            design spec. Pink/fuchsia gradient mirrors TikTok's brand
-            palette without copying the trademarked logo. Path-D DCO ads
-            get a sibling "إعلان ديناميكي" chip so the user can tell at
-            a glance these are dynamic-creative auto-assembled ads. */}
+        {/* Top-left: TikTok brand badge + ad-type sub-badge. Pink/
+            fuchsia gradient mirrors TikTok's brand palette without
+            copying the trademarked logo. The sub-badge (سمارت /
+            سبارك) tells the user at a glance which ad-type pipeline
+            this card is — direct uploads get NO sub-badge. */}
         <div className="absolute top-2 left-2 flex items-center gap-1">
           <span className="px-2 py-0.5 bg-gradient-to-r from-pink-500 to-fuchsia-600 text-white rounded text-[10px] font-semibold">
             TikTok
           </span>
+          {isSpark && (
+            <span className="px-2 py-0.5 bg-white/90 text-fuchsia-700 border border-fuchsia-200 rounded text-[10px] font-semibold">
+              سبارك
+            </span>
+          )}
           {isDco && (
             <span className="px-2 py-0.5 bg-white/90 text-fuchsia-700 border border-fuchsia-200 rounded text-[10px] font-semibold">
-              إعلان ديناميكي
+              سمارت
             </span>
           )}
         </div>

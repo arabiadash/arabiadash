@@ -114,9 +114,17 @@ export function TikTokAdDetailModal({
   // Final fallback = no resolved video, no embed URL (path C deferred
   // or UNKNOWN with no public tiktok.com URL).
 
-  // Path-D DCO/SPC detection per ADR-020 §DCO-Identity. Mirrors the
-  // dispatcher's path-D gate condition at normalize.ts:routeCreativeByIdentityType.
-  const isDco = !!ad.type_data.tiktokItemId && !ad.type_data.identityType;
+  // Badge type derivation — mirrors TikTokCreativeCard.tsx (2026-06-01
+  // unified design). Both gate on !videoId to exclude direct uploads
+  // (path A gets no sub-badge per the user's spec).
+  const isDco =
+    !ad.type_data.videoId &&
+    !!ad.type_data.tiktokItemId &&
+    !ad.type_data.identityType;
+  const isSpark =
+    !ad.type_data.videoId &&
+    !!ad.type_data.tiktokItemId &&
+    !!ad.type_data.identityType;
 
   // "View on TikTok" link — render whenever the ad has a public
   // tiktok.com URL, regardless of resolve state. Covers paths B + any
@@ -138,9 +146,14 @@ export function TikTokAdDetailModal({
             <span className="px-2 py-0.5 bg-gradient-to-r from-pink-500 to-fuchsia-600 text-white rounded text-[10px] font-semibold">
               TikTok
             </span>
+            {isSpark && (
+              <span className="px-2 py-0.5 bg-fuchsia-50 text-fuchsia-700 border border-fuchsia-200 rounded text-[10px] font-semibold">
+                سبارك
+              </span>
+            )}
             {isDco && (
               <span className="px-2 py-0.5 bg-fuchsia-50 text-fuchsia-700 border border-fuchsia-200 rounded text-[10px] font-semibold">
-                إعلان ديناميكي
+                سمارت
               </span>
             )}
             <h3 className="font-bold text-gray-900 text-lg">تفاصيل الإعلان</h3>
