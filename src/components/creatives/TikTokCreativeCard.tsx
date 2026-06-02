@@ -1,0 +1,370 @@
+import { useEffect } from "react";
+import { Play, Camera } from "lucide-react";
+import type { UnifiedAd } from "@/lib/ads/types";
+import type { TikTokCreativeUrls } from "@/lib/tiktok/normalize";
+import { formatAndConvert, formatCount, type Currency } from "@/lib/currency";
+
+// =================================================================
+// TikTokCreativeCard — TikTok variant (Phase 7 / ADR-020 §12c)
+// =================================================================
+//
+// Renders TIKTOK_AD at the SAME visual size + shape as CreativeCard
+// in ReportsClient.tsx so TikTok ads share grid rhythm with Meta and
+// Google Search/Display variants when surfaced side-by-side. Detail
+// view (caption, campaign ROAS, full video player, "View on TikTok"
+// link, path-B/C diagnostics) lives in TikTokAdDetailModal (2d-3) —
+// opened via onClick, mirroring PMaxAssetGroupCard's interaction model.
+//
+// Per-ad ROAS in the footer is reliable post-ADR-020 §2b (commit 9ac8294).
+// The §2b correction switched the revenue metric from total_purchase_value
+// (app-attributed) to total_complete_payment_rate (website-attributed),
+// which is consistent at the AUCTION_AD level. Empirical confirmation:
+// 42 of 53 spending IMAA ads return non-zero revenue, ROAS range
+// 1.65–12.59. The Card footer now mirrors Meta/Google CreativeCard's
+// ROAS rendering (getROASColor thresholds: ≥3 green / ≥1 yellow / <1 red).
+// المشاهدات is dropped from the Card footer but retained in the modal —
+// dense Card layout doesn't fit 4 metrics; TikTok video metrics remain
+// a first-class concern in the detail view.
+//
+// 4-state dispatch (§12c §3):
+//   1. LOADING            — urlsLoading=true (batch resolve in flight)
+//   2. POSTER             — resolvedUrls set; show signed poster URL
+//   3. EMBED_PLACEHOLDER  — urls null + tiktokVideoUrl set (path B
+//                            without resolved URL, e.g. unauthorized
+//                            Spark Ad). Modal can still embed via
+//                            tiktok.com/player/v1/<item_id>.
+//   4. PLACEHOLDER        — urls null + no tiktokVideoUrl (path C
+//                            pure-image or UNKNOWN with no fallback).
+//
+// Status labels (STATUS_LABELS_AR) duplicate CreativeCard inline
+// helpers — same DRY deferral rule as Commits 10/11 + PMax.
+
+type TikTokAd = Extract<UnifiedAd, { ad_type: "TIKTOK_AD" }>;
+
+interface TikTokCreativeCardProps {
+  ad: TikTokAd;
+  /**
+   * Resolved signed URLs from the tiktok-url-resolve route. NEVER
+   * cached at the parent level — the batch hook re-fetches on mount
+   * + tab switch because the URLs expire in ~1 hour (§12c §2).
+   * `null` means resolution returned no URL (path C, UNKNOWN, or
+   * resolve-route returned null for this ad).
+   */
+  resolvedUrls: TikTokCreativeUrls | null;
+  /** True while the batch resolve request is in flight. */
+  urlsLoading: boolean;
+  /**
+   * Per-ad resolve error message, if any. Surfaced as a console.warn
+   * signal only (no visual treatment in the card) — the card falls
+   * through to embed/placeholder state on error. Errors that warrant
+   * user action (e.g. reauth_required) are handled at the tab level
+   * by the hook consumer.
+   */
+  urlError?: string;
+  accountCurrency: Currency;
+  displayCurrency: Currency;
+  onClick?: () => void;
+}
+
+// -----------------------------------------------------------------
+// Localization + visual config (mirrors CreativeCard's inline tables)
+// -----------------------------------------------------------------
+
+const STATUS_COLORS: Record<string, string> = {
+  ACTIVE: "bg-green-100 text-green-700",
+  PAUSED: "bg-yellow-100 text-yellow-700",
+  DELETED: "bg-red-100 text-red-700",
+  ARCHIVED: "bg-gray-100 text-gray-700",
+};
+
+const STATUS_LABELS_AR: Record<string, string> = {
+  ACTIVE: "نشط",
+  PAUSED: "موقوف",
+  DELETED: "محذوف",
+  ARCHIVED: "مؤرشف",
+};
+
+// Mirrors getROASColor in ReportsClient.tsx:156. Inlined here to keep
+// this commit scoped to the TikTok Card; promote to a shared util when
+// Phase 7.1 / Phase 7.2 Card variants land more consumers.
+function getROASColor(roas: number): string {
+  if (roas >= 3) return "text-green-600";
+  if (roas >= 1) return "text-yellow-600";
+  return "text-red-600";
+}
+
+// -----------------------------------------------------------------
+// Main component
+// -----------------------------------------------------------------
+
+export function TikTokCreativeCard({
+  ad,
+  resolvedUrls,
+  urlsLoading,
+  urlError,
+  accountCurrency,
+  displayCurrency,
+  onClick,
+}: TikTokCreativeCardProps) {
+  // Surface URL-resolve errors as a console signal so they show up in
+  // dev/QA without polluting the user's grid. Reauth/rate-limit errors
+  // are handled at the tab level by the hook consumer.
+  useEffect(() => {
+    if (urlError) {
+      console.warn(
+        `[TikTokCreativeCard] URL resolve error for ad ${ad.id} (${ad.name}): ${urlError}`
+      );
+    }
+  }, [urlError, ad.id, ad.name]);
+
+  // 4-state dispatch — exactly one of these is true.
+  const hasPoster = !!resolvedUrls?.posterUrl;
+  const hasEmbedFallback =
+    !hasPoster && !urlsLoading && !!ad.type_data.tiktokVideoUrl;
+  // Pure placeholder catches: path C without resolution, UNKNOWN, and
+  // path-B errors where tiktokVideoUrl is also absent (rare).
+
+  // Badge type derivation (2026-06-01 unified TikTok card design).
+  // Three cohorts visualized via top-left badge:
+  //   - Smart (سمارت)  → DCO/SPC ads (path D) — auto-mixed material
+  //                       variant in a SMART_PLUS adgroup
+  //   - Spark (سبارك)  → Spark Ads (path B) — Spark-sourced posts
+  //                       promoted via influencer/UGC authorization
+  //   - (no badge)     → direct-upload ads (path A) — brand uploaded
+  //                       video file directly
+  //
+  // Both isSpark and isDco gate on !videoId to exclude path-A direct
+  // uploads (which may also carry identity_type/tiktok_item_id from
+  // Spark-source workflows but route to path A in the dispatcher
+  // because videoId takes precedence). Without that guard, a
+  // direct-upload-with-Spark-identity could badge as "Spark" — false
+  // positive per the user's spec (path A = no badge).
+  const isDco =
+    !ad.type_data.videoId &&
+    !!ad.type_data.tiktokItemId &&
+    !ad.type_data.identityType;
+  const isSpark =
+    !ad.type_data.videoId &&
+    !!ad.type_data.tiktokItemId &&
+    !!ad.type_data.identityType;
+
+  const currency = (ad.currency as Currency) || accountCurrency;
+
+  // ?? 0 is defensive — TikTok normalizer guarantees non-null for
+  // purchases, but the field type remains `number | undefined` for
+  // forward-compat with cached rows pre-dating the v1 schema.
+  const purchases = ad.purchases ?? 0;
+
+  // ============================================================
+  // Unified card-identity (OBS 4 + OBS 6, 2026-06-01).
+  // Primary title priority chain:
+  //   1. @{creatorHandle}  — when oEmbed-resolvable (best for
+  //      Spark + DCO ads; ~57 % of IMAA's mix, much higher for
+  //      influencer-heavy customer profiles per §AdTypeCoverage)
+  //   2. ad.name           — already passed through normalize's
+  //      OBS-1 fallback chain (caption-truncated for DCO
+  //      placeholders, user-set name for direct uploads,
+  //      "بدون اسم" final fallback)
+  //
+  // Secondary line (always-rendered with &nbsp; placeholder when
+  // empty, for grid-uniform card heights — resolves OBS 4):
+  //   - When primary is @handle AND ad.name is a meaningful
+  //     caption → ad.name truncated ~30 chars (dimmed, line-1)
+  //   - Else → non-breaking space (height reserved, content empty)
+  //
+  // Brand-self-handle skip (when @handle === brand's own handle,
+  // e.g. @imaa for IMAA's own Business-identity uploads) is NOT
+  // applied this commit — deferred until empirical evidence shows
+  // it dominates a column. Most customers have distinct creator
+  // handles for Spark ads; brand-self direct uploads typically
+  // route to path A which has no @handle anyway.
+  // ============================================================
+  const SECONDARY_MAX_LEN = 30;
+  const PLACEHOLDER_NAME_RE = /^_\d+$/;
+
+  const creatorHandle = resolvedUrls?.creatorHandle;
+  const creatorName = resolvedUrls?.creatorName;
+  const hasHandle = !!creatorHandle;
+
+  // OBS 8 (2026-06-01) — display creator name + @handle inline as the
+  // primary title when both are available ("حصة عبدالله 🎵 @1dierwo").
+  // Matches the modal's "المنشئ: <name> <handle>" format so Card and
+  // Modal stay consistent. Single line, truncated for narrow cards.
+  //
+  // Dedupe edge case: some TikTok accounts have display_name === handle
+  // (auto-generated handles where the user never set a display name).
+  // Case-insensitive equality check — if same, show only @handle to
+  // avoid visually awkward "user1234567 @user1234567".
+  const creatorNameTrimmed = creatorName?.trim();
+  const hasDistinctName =
+    !!creatorNameTrimmed &&
+    !!creatorHandle &&
+    creatorNameTrimmed.toLowerCase() !== creatorHandle.toLowerCase();
+
+  const primaryLabel = hasHandle
+    ? hasDistinctName
+      ? `${creatorNameTrimmed} @${creatorHandle}`
+      : `@${creatorHandle}`
+    : ad.name;
+
+  const adNameIsPlaceholder =
+    !ad.name ||
+    PLACEHOLDER_NAME_RE.test(ad.name) ||
+    ad.name === "بدون اسم";
+  const secondaryRaw =
+    hasHandle && !adNameIsPlaceholder ? ad.name : "";
+  const secondaryLabel =
+    secondaryRaw.length > SECONDARY_MAX_LEN
+      ? secondaryRaw.slice(0, SECONDARY_MAX_LEN).trim() + "…"
+      : secondaryRaw;
+
+  return (
+    <div
+      className="group bg-white border border-gray-200 rounded-lg overflow-hidden hover:shadow-md transition cursor-pointer"
+      onClick={onClick}
+    >
+      <div className="aspect-square relative bg-gray-100 overflow-hidden">
+        {/* Dispatch order — poster wins over batch-loading state.
+            This matters during Phase 1A's auto-staged batches (#52):
+            with ~100 ads on lifetime, the hook stages 5 batches × 20 ads
+            with 500ms gaps (~9s total wall-time). The hook's `loading`
+            flag stays true the entire time. Without "poster first",
+            ALL cards (including already-resolved ones from earlier
+            batches) would show STATE 1 skeleton until the very last
+            batch completed — user sees a frozen-feeling grid. With
+            "poster first", cards from completed batches immediately
+            show their content while later-batch cards stay in STATE 1
+            until their batch lands. Progress is visibly progressive. */}
+        {hasPoster ? (
+          // STATE 2 — POSTER: signed URL from tiktok-url-resolve.
+          // object-center crop ensures faces/products in vertical 9:16
+          // posters stay centered when squeezed into aspect-square.
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={resolvedUrls.posterUrl}
+            alt={ad.name}
+            className="w-full h-full object-cover object-center group-hover:scale-105 transition duration-300"
+            loading="lazy"
+            onError={(e) => {
+              (e.target as HTMLImageElement).style.display = "none";
+            }}
+          />
+        ) : hasEmbedFallback ? (
+          // STATE 3 — EMBED_PLACEHOLDER: poster missing but the ad has
+          // a public tiktok.com URL (path B Spark Ad). Modal can embed
+          // tiktok.com/player/v1/<item_id> as the fallback player.
+          <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-pink-50 via-fuchsia-50 to-rose-50 text-fuchsia-700 p-4">
+            <Play className="w-10 h-10 mb-2" />
+            <p className="text-[10px] text-center line-clamp-2">{ad.name}</p>
+          </div>
+        ) : (
+          // STATE 4 — PLACEHOLDER: no poster, no embed fallback. Path C
+          // pure-image with unresolved image_ids, or UNKNOWN ad shape.
+          <div className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-pink-50 via-fuchsia-50 to-rose-50 text-fuchsia-700 p-4">
+            <Camera className="w-10 h-10 mb-2 opacity-70" />
+            <p className="text-[10px] text-center opacity-80">
+              صورة الإعلان غير متوفرة في المعاينة
+            </p>
+          </div>
+        )}
+
+        {/* Play overlay — only on the POSTER state, to hint that the
+            card opens a video player in the modal. Subtle scrim so it
+            doesn't compete with the poster art. */}
+        {hasPoster && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <div className="w-12 h-12 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
+              <Play className="w-6 h-6 text-white fill-white ml-0.5" />
+            </div>
+          </div>
+        )}
+
+        {/* Top-left: TikTok brand badge + ad-type sub-badge. Pink/
+            fuchsia gradient mirrors TikTok's brand palette without
+            copying the trademarked logo. The sub-badge (سمارت /
+            سبارك) tells the user at a glance which ad-type pipeline
+            this card is — direct uploads get NO sub-badge. */}
+        <div className="absolute top-2 left-2 flex items-center gap-1">
+          <span className="px-2 py-0.5 bg-gradient-to-r from-pink-500 to-fuchsia-600 text-white rounded text-[10px] font-semibold">
+            TikTok
+          </span>
+          {isSpark && (
+            <span className="px-2 py-0.5 bg-white/90 text-fuchsia-700 border border-fuchsia-200 rounded text-[10px] font-semibold">
+              سبارك
+            </span>
+          )}
+          {isDco && (
+            <span className="px-2 py-0.5 bg-white/90 text-fuchsia-700 border border-fuchsia-200 rounded text-[10px] font-semibold">
+              سمارت
+            </span>
+          )}
+        </div>
+
+        {/* Top-right: status badge (same shape as CreativeCard) */}
+        <div className="absolute top-2 right-2">
+          <span
+            className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+              STATUS_COLORS[ad.status] ?? STATUS_COLORS.ARCHIVED
+            }`}
+          >
+            {STATUS_LABELS_AR[ad.status] ?? ad.status}
+          </span>
+        </div>
+      </div>
+
+      <div className="p-3">
+        {/* Primary title: @handle when oEmbed-resolved, else ad.name
+            (which itself ran through the OBS-1 normalize chain for
+            DCO placeholders). Single-line truncate for uniform card
+            height per the new card-identity hierarchy. The title
+            attribute preserves the ORIGINAL ad.name on hover so users
+            can still read the full TikTok-API-side name if needed. */}
+        <h4
+          className="font-semibold text-gray-900 text-xs truncate mb-1"
+          title={ad.name}
+        >
+          {primaryLabel}
+        </h4>
+        {/* Secondary line: caption snippet when title is @handle and
+            a meaningful caption exists. Always-rendered (non-breaking
+            space when absent) so all cards share the same vertical
+            footprint — resolves the OBS 4 height-delta where DCO
+            cards (with @handle line) were taller than non-DCO cards. */}
+        <p
+          className="text-[10px] text-gray-400 line-clamp-1 mb-2"
+          title={secondaryRaw || undefined}
+        >
+          {secondaryLabel || " "}
+        </p>
+
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <div>
+            <p className="text-gray-500 text-[10px]">ROAS</p>
+            {ad.hasConversionData && ad.roas != null ? (
+              <p className={`font-bold ${getROASColor(ad.roas)}`}>
+                {ad.roas.toFixed(2)}x
+              </p>
+            ) : (
+              <p
+                className="font-bold text-gray-400"
+                title="لم يتم إعداد تتبع الشراء في الحساب"
+              >
+                —
+              </p>
+            )}
+          </div>
+          <div className="text-left">
+            <p className="text-gray-500 text-[10px]">المبيعات</p>
+            <p className="font-bold text-gray-900">{formatCount(purchases)}</p>
+          </div>
+          <div className="col-span-2">
+            <p className="text-gray-500 text-[10px]">الإنفاق</p>
+            <p className="font-bold text-gray-900">
+              {formatAndConvert(ad.spend, currency, displayCurrency)}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

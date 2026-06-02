@@ -794,6 +794,20 @@ export class GoogleAdsAdapter implements AdProviderAdapter {
 
       return byAdId;
     } catch (err) {
+      // ADR-017: bubble reauth-class errors so the route's reauth-CTA
+      // path fires (same fix pattern as fetchAds in google-ads/ads.ts).
+      // Both helpers run in Promise.all within GoogleAdsAdapter.getAds;
+      // if either throws ReauthRequiredError, Promise.all rejects and
+      // the existing withReauthMapping wrapper (google.ts:218-226)
+      // converts it to the route-recognized error.
+      //
+      // Sub-resource permission errors + GAQL constraint rejections
+      // keep the graceful null degradation — a single sibling failure
+      // shouldn't mask the primary ad-row payload (the documented
+      // "Degrading ad-level purchases to null" behavior).
+      const reauth = classifyGoogleAdsError(err);
+      if (reauth) throw reauth;
+
       const message =
         err instanceof errors.GoogleAdsFailure
           ? err.errors?.map((e) => e.message).join("; ") ??

@@ -8,17 +8,28 @@
 
 export type ReauthReason = "invalid_grant" | "consent_revoked" | "token_expired";
 
+/**
+ * Provider-aware reauth error. ADR-017 introduced this for Google; ADR-020
+ * widens the `provider` discriminator to include TikTok. Reauth URL +
+ * provider name both drive the Arabic CTA banner branch in ReportsClient.
+ */
 export class ReauthRequiredError extends Error {
-  readonly provider: "google";
+  readonly provider: "google" | "tiktok";
   readonly reason: ReauthReason;
   readonly reauthUrl: string;
 
-  constructor(reason: ReauthReason) {
-    super(`Google Ads reauth required: ${reason}`);
+  constructor(
+    reason: ReauthReason,
+    provider: "google" | "tiktok" = "google"
+  ) {
+    super(`${provider} reauth required: ${reason}`);
     this.name = "ReauthRequiredError";
-    this.provider = "google";
+    this.provider = provider;
     this.reason = reason;
-    this.reauthUrl = "/dashboard/connections/google";
+    this.reauthUrl =
+      provider === "tiktok"
+        ? "/dashboard/connections/tiktok"
+        : "/dashboard/connections/google";
   }
 }
 

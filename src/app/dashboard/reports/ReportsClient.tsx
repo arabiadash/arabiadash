@@ -34,6 +34,8 @@ import KpiCard, { type KpiCardProps } from "@/components/reports/KpiCard";
 // via renderAdCard below; M5/M6 variants continue using the inline
 // CreativeCard so existing render behavior stays byte-for-byte identical.
 import { PMaxAssetGroupCard } from "@/components/creatives/PMaxAssetGroupCard";
+import { TikTokCreativeCard } from "@/components/creatives/TikTokCreativeCard";
+import { TikTokAdDetailModal } from "@/components/creatives/TikTokAdDetailModal";
 import type { Workspace, WorkspaceConnection } from "@/lib/workspaces";
 import {
   useInsights,
@@ -42,6 +44,8 @@ import {
 import { useProviderInsights } from "@/lib/hooks/use-provider-insights";
 import { useProviderAds } from "@/lib/hooks/use-provider-ads";
 import { useAds } from "@/lib/hooks/use-ads";
+import { useTiktokCreativeUrlsBatch } from "@/lib/hooks/use-tiktok-creative-urls";
+import type { TikTokCreativeUrls } from "@/lib/tiktok/normalize";
 import { useSearchTerms } from "@/lib/hooks/use-search-terms";
 import { useKeywords } from "@/lib/hooks/use-keywords";
 import { useDateRangeStorage } from "@/lib/hooks/use-date-range-storage";
@@ -69,6 +73,7 @@ import {
   type CustomDateRange,
   type UnifiedCampaign,
   type UnifiedAd,
+  type UnifiedAdTiktok,
   type UnifiedInsight,
 } from "@/lib/ads/types";
 import {
@@ -816,6 +821,15 @@ interface AdDetailModalProps {
    */
   range?: DateRange;
   customRange?: CustomDateRange;
+  /**
+   * Phase 7 / ADR-020 §2b — campaign-level ROAS for TIKTOK_AD only.
+   * Per-ad ROAS is misleading for TikTok (app/web pixel attribution
+   * split), so the TikTok modal surfaces the parent-campaign ROAS
+   * instead. Passed through to TikTokAdDetailModal via the early-
+   * return branch; ignored for all other variants. 2d-4 will replace
+   * the current null placeholder with a real lookup at the call site.
+   */
+  campaignRoas?: number | null;
 }
 
 function AdDetailModal({
@@ -826,6 +840,7 @@ function AdDetailModal({
   adGroupAdCount = 0,
   range,
   customRange,
+  campaignRoas = null,
 }: AdDetailModalProps) {
   // PMAX_ASSET_GROUP gets its own dedicated modal — wholly different
   // shape (tabbed asset surfaces, wider shell, in-modal YouTube embeds,
@@ -839,6 +854,23 @@ function AdDetailModal({
         accountCurrency={accountCurrency}
         displayCurrency={displayCurrency}
         onClose={onClose}
+      />
+    );
+  }
+
+  // TIKTOK_AD gets its own dedicated modal — vertical 9:16 video
+  // player, on-mount signed-URL fetch via useTiktokCreativeUrl, and
+  // a campaign-level ROAS cell (per-ad ROAS would mix TikTok's app
+  // vs web pixel attribution surfaces — §2b). Same early-return
+  // pattern as PMAX above.
+  if (ad.ad_type === "TIKTOK_AD") {
+    return (
+      <TikTokAdDetailModal
+        ad={ad}
+        accountCurrency={accountCurrency}
+        displayCurrency={displayCurrency}
+        onClose={onClose}
+        campaignRoas={campaignRoas}
       />
     );
   }
@@ -2712,6 +2744,16 @@ function renderAdCard(
     accountCurrency: Currency;
     displayCurrency: Currency;
     onClick: () => void;
+    /**
+     * TikTok URL batch lookup keyed by ad.id. Only set when CreativesGrid
+     * is rendering for the TikTok tab; undefined elsewhere. Read only by
+     * the TIKTOK_AD branch — Meta/Google/PMAX branches ignore it.
+     */
+    tiktokUrlsByAdId?: Record<string, TikTokCreativeUrls | null>;
+    /** TikTok per-ad URL-resolve errors keyed by ad.id. */
+    tiktokUrlErrors?: Record<string, string>;
+    /** TikTok batch-loading flag — true while the batch resolve is in-flight. */
+    tiktokUrlsLoading?: boolean;
   }
 ): React.ReactElement {
   switch (ad.ad_type) {
@@ -2724,14 +2766,34 @@ function renderAdCard(
           onClick={sharedProps.onClick}
         />
       );
+    case "TIKTOK_AD":
+      // Phase 7 / ADR-020 §12c — real batch-hook values from
+      // useTiktokCreativeUrlsBatch (lifted into CreativesGrid).
+      // resolvedUrls=null on this ad's key means: the route returned
+      // null for this ad (path C/UNKNOWN, OR fetch hasn't completed
+      // yet — distinguish via urlsLoading). urlError set means the
+      // route returned an error for this specific ad. The
+      // TikTokCreativeCard 4-state dispatcher handles LOADING /
+      // POSTER / EMBED_PLACEHOLDER / PLACEHOLDER from those inputs.
+      return (
+        <TikTokCreativeCard
+          ad={ad}
+          resolvedUrls={sharedProps.tiktokUrlsByAdId?.[ad.id] ?? null}
+          urlsLoading={sharedProps.tiktokUrlsLoading ?? false}
+          urlError={sharedProps.tiktokUrlErrors?.[ad.id]}
+          accountCurrency={sharedProps.accountCurrency}
+          displayCurrency={sharedProps.displayCurrency}
+          onClick={sharedProps.onClick}
+        />
+      );
     case "RSA":
     case "RDA":
     case "IMAGE_AD":
     case "META_AD":
     case "UNKNOWN_GOOGLE":
     default:
-      // Default catches any future variants (Phase 7 TikTok, Phase 8 Snap,
-      // etc.) — they render as CreativeCard until dedicated components are
+      // Default catches any future variants (Phase 8 Snap, etc.) —
+      // they render as CreativeCard until dedicated components are
       // added. Graceful degradation, not a TypeScript exhaustiveness gap.
       return (
         <CreativeCard
@@ -2777,6 +2839,84 @@ function CreativesGrid({
   useEffect(() => {
     setVisibleCount(CREATIVES_PAGE_SIZE);
   }, [filteredAds]);
+
+  // ── Phase 7 / ADR-020 §12c + §ResolveConcurrency — TikTok URL batch + campaign-ROAS Map ──
+  //
+  // CreativesGrid is SHARED across Meta/Google/TikTok tabs. The two
+  // hooks below fire on every render (Rules of Hooks — can't be
+  // conditional) but are TRUE pre-fetch no-ops when no TikTok ads are
+  // present: both have early returns before any fetch() call. So
+  // Meta/Google CreativesGrid calls hit synthetic empty-state paths
+  // (zero network, zero side effects) — behavior bit-identical to
+  // pre-2f for those tabs.
+  //
+  // Verified empty-input short-circuits:
+  //   useTiktokCreativeUrlsBatch (use-tiktok-creative-urls.ts:214-221)
+  //     `if (!enabled || !accountId || ads.length === 0) return;`
+  //   useProviderInsights (use-provider-insights.ts:137-138 + :240
+  //   + :254-262) — useEffect skip + doFetch early-return + synthetic
+  //   noConnection return when accountIds is empty.
+  //
+  // ⚠️ ORDERING: this block MUST stay AFTER `filteredAds` + the
+  // visibleCount-reset useEffect (the tiktokAds memo depends on both).
+  // Moving it earlier reintroduces the TDZ error caught during the 2f
+  // → §ResolveConcurrency reorder.
+  //
+  // §ResolveConcurrency slice-derive: tiktokAds is derived from the
+  // VISIBLE SLICE of filteredAds, not raw `ads`. This cuts the typical
+  // batch ~10× (20 visible default vs ~194 lifetime total) and combines
+  // with the route's per-chunk concurrency cap = 4 to keep first-page
+  // resolve well under TikTok's 600 req/min cap. "Load more" grows
+  // visibleCount → tiktokAds slice grows → adsKey changes in the hook
+  // → new POST for the bigger slice. REPLACE semantics on each fetch
+  // (the previously-resolved URLs re-fetch) — accepted per ADR;
+  // ~1h URL TTL means re-fetch is harmless for freshness, the
+  // concurrency cap bounds the cost, and abort handling cleanly
+  // cancels mid-resolve when pagination/filter changes happen.
+  const tiktokAds = useMemo(
+    () =>
+      filteredAds
+        .slice(0, visibleCount)
+        .filter((a): a is UnifiedAdTiktok => a.ad_type === "TIKTOK_AD"),
+    [filteredAds, visibleCount]
+  );
+  // The adapter's getAds normalizer + useProviderAds stamping guarantee
+  // accountId is set on every ad row; first ad's accountId is the
+  // implicit primary for the single-account v1 constraint (the multi-
+  // account amber warning already lives at the tab level). On the
+  // TikTok tab specifically, ALL ads are TikTok — so the slice always
+  // contains TikTok ads with accountId stamped, no edge case.
+  const tiktokAccountId = tiktokAds[0]?.accountId ?? "";
+  const hasTiktokAds = tiktokAds.length > 0 && !!tiktokAccountId;
+
+  const {
+    urls: tiktokUrlsByAdId,
+    errors: tiktokUrlErrors,
+    loading: tiktokUrlsLoading,
+  } = useTiktokCreativeUrlsBatch({
+    accountId: tiktokAccountId,
+    ads: tiktokAds,
+    enabled: hasTiktokAds,
+  });
+
+  // Campaign-level insights drive the modal's "ROAS — على مستوى الحملة"
+  // cell (per §2b: per-ad ROAS would mix app/web pixel attribution
+  // surfaces, so we surface the parent-campaign ROAS instead).
+  const tiktokCampaigns = useProviderInsights({
+    provider: "tiktok",
+    accountIds: hasTiktokAds ? [tiktokAccountId] : [],
+    range,
+    customRange,
+    level: "campaign",
+  });
+
+  const tiktokCampaignRoasById = useMemo(() => {
+    const m = new Map<string, number | null>();
+    for (const insight of tiktokCampaigns.insights) {
+      if (insight.campaignId) m.set(insight.campaignId, insight.roas);
+    }
+    return m;
+  }, [tiktokCampaigns.insights]);
 
   if (loading) {
     return (
@@ -2856,6 +2996,9 @@ function CreativesGrid({
                 accountCurrency,
                 displayCurrency,
                 onClick: () => setSelectedAd(ad),
+                tiktokUrlsByAdId,
+                tiktokUrlErrors,
+                tiktokUrlsLoading,
               })}
             </div>
           ))}
@@ -2899,6 +3042,20 @@ function CreativesGrid({
           // lazy search-terms + keywords fetches align with the cards.
           range={range}
           customRange={customRange}
+          // Phase 7 / ADR-020 §2b — campaign-level ROAS for the TikTok
+          // branch. Wired in 2f: lookup via selectedAd.campaignId in
+          // tiktokCampaignRoasById. For non-TikTok selectedAd, the
+          // ternary's null branch fires → AdDetailModal ignores the
+          // prop for Meta/Google variants (passed through to the
+          // TikTokAdDetailModal early-return only). Modal's "غير متوفر"
+          // tooltip renders when the lookup misses (e.g. campaign with
+          // no spend in window → no insight row → no Map entry).
+          campaignRoas={
+            selectedAd.ad_type === "TIKTOK_AD"
+              ? tiktokCampaignRoasById.get(selectedAd.campaignId ?? "") ??
+                null
+              : null
+          }
         />
       )}
     </>
@@ -2978,6 +3135,20 @@ export default function ReportsClient({
     );
   }, [connections]);
 
+  // Phase 7 / ADR-020 — TikTok account list. Multi-account at the
+  // data-fetch level (useProviderAds + useProviderInsights both fan
+  // out per account), but URL-resolve is single-account in v1 (the
+  // batch route + the on-mount modal hook each take ONE account_id).
+  // IMAA is single-account; workspaces with multiple TikTok accounts
+  // get an amber warning banner in the tab content.
+  const tiktokAccountIds = useMemo(
+    () =>
+      connections
+        .filter((c) => c.platform === "tiktok")
+        .map((c) => c.account_id),
+    [connections]
+  );
+
   const [dateRange, setDateRange] = useDateRangeStorage();
 
   const { currency } = useCurrency();
@@ -3013,9 +3184,15 @@ export default function ReportsClient({
     "campaigns" | "creatives"
   >("campaigns");
 
-  // Outer platform tab (Phase 4.8 M1). Defaults to Meta; auto-switches to
-  // Google when the workspace has no Meta connection but has Google.
-  const [platformTab, setPlatformTab] = useState<"meta" | "google">("meta");
+  // Outer platform tab (Phase 4.8 M1, widened Phase 7 / ADR-020).
+  // Defaults to Meta; auto-switch cascade picks the first available
+  // tab when the default isn't connected. In-memory only — NOT
+  // persisted to localStorage (intentional: the active platform
+  // should follow the workspace's connections, not stale per-tab
+  // muscle memory from another workspace).
+  const [platformTab, setPlatformTab] = useState<
+    "meta" | "google" | "tiktok"
+  >("meta");
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -3044,10 +3221,23 @@ export default function ReportsClient({
   }, [googleActiveTab]);
 
   useEffect(() => {
-    if (!metaAccountId && googleAccountIds.length > 0) {
+    // Cascade: prefer Meta → Google → TikTok. Fires only when the
+    // default (Meta) isn't available; doesn't override a user's
+    // explicit tab click.
+    if (
+      !metaAccountId &&
+      googleAccountIds.length === 0 &&
+      tiktokAccountIds.length > 0
+    ) {
+      setPlatformTab("tiktok");
+    } else if (!metaAccountId && googleAccountIds.length > 0) {
       setPlatformTab("google");
     }
-  }, [metaAccountId, googleAccountIds.length]);
+  }, [
+    metaAccountId,
+    googleAccountIds.length,
+    tiktokAccountIds.length,
+  ]);
 
   // Ads (for the Creatives tab + tab badge count). Same dateRange as the rest.
   const {
@@ -3211,6 +3401,61 @@ export default function ReportsClient({
 
   const visibleGoogleAdsCount = googleAds.length;
 
+  // Phase 7 / ADR-020 — TikTok data fanout (mirrors Google's 4-hook
+  // pattern). All hooks short-circuit cleanly via the synthetic
+  // noConnection state when tiktokAccountIds is empty, so they're
+  // cheap when no TikTok is connected.
+  const tiktokInsights = useProviderInsights({
+    provider: "tiktok",
+    accountIds: tiktokAccountIds,
+    ...dateRangeValueToOptions(dateRange),
+    level: "account",
+  });
+
+  // Note: campaign-level TikTok insights deliberately deferred to 2f
+  // (the campaign-ROAS Map lookup for the modal). 2e doesn't render
+  // a campaigns table for TikTok, so no consumer exists for them yet.
+
+  const {
+    ads: tiktokAds,
+    loading: tiktokAdsLoading,
+    error: tiktokAdsError,
+    noConnection: tiktokAdsNoConnection,
+    refresh: refreshTiktokAds,
+  } = useProviderAds({
+    provider: "tiktok",
+    accountIds: tiktokAccountIds,
+    ...dateRangeValueToOptions(dateRange),
+  });
+
+  // Per-provider cooldown for TikTok — Meta's `lastRefreshAt` rationale
+  // ("avoid hammering Meta") doesn't apply to TikTok's separate rate
+  // limit. Independent state per provider; no cross-platform spillover
+  // when the user clicks Meta's button + then wants to refresh TikTok.
+  // Reuses REFRESH_COOLDOWN_MS + the existing `now` clock tick — no
+  // duplicate effect / interval.
+  //
+  // Note: useProviderAds doesn't expose a `revalidating` flag (unlike
+  // useAds for Meta), so refreshDisabledTiktok gates only on the
+  // hook's `loading` + the per-provider cooldown. The Meta-style
+  // timestamp + "stale revalidating" + "rate-limited" banners are
+  // deferred — they'd require extending useProviderAds to expose
+  // those fields, which would touch the Google adapter path too and
+  // is out of scope for this commit.
+  const [lastRefreshAtTiktok, setLastRefreshAtTiktok] = useState<number>(0);
+  const refreshCooldownRemainingTiktok = Math.max(
+    0,
+    Math.ceil((lastRefreshAtTiktok + REFRESH_COOLDOWN_MS - now) / 1000)
+  );
+  const refreshDisabledTiktok =
+    tiktokAdsLoading || refreshCooldownRemainingTiktok > 0;
+
+  const handleRefreshTiktokAds = async () => {
+    if (refreshDisabledTiktok) return;
+    setLastRefreshAtTiktok(Date.now());
+    await refreshTiktokAds();
+  };
+
   // Phase 4.8 M4 Commit 2 — filter, status filter, sort pipeline
   const processedGoogleCampaigns = useMemo(() => {
     let result = googleCampaigns.insights.filter((r) => r.spend > 0);
@@ -3289,6 +3534,17 @@ export default function ReportsClient({
   const googleChartInsights = useProviderInsights({
     provider: "google",
     accountIds: googleAccountIds,
+    ...dateRangeValueToOptions(chartDateRange),
+    level: "account",
+    timeIncrement: chartShouldShowDaily ? 1 : undefined,
+  });
+
+  // Phase 7 / ADR-020 — TikTok chart insights (separate hook because
+  // the chart uses chartDateRange + timeIncrement, both distinct from
+  // the table-level dateRange).
+  const tiktokChartInsights = useProviderInsights({
+    provider: "tiktok",
+    accountIds: tiktokAccountIds,
     ...dateRangeValueToOptions(chartDateRange),
     level: "account",
     timeIncrement: chartShouldShowDaily ? 1 : undefined,
@@ -3723,6 +3979,78 @@ export default function ReportsClient({
         displayRevenue: row.revenue,
       }));
   }, [googleChartInsights.insights, chartShouldShowDaily, chartDayCount, currency]);
+
+  // Phase 7 / ADR-020 §2b — TikTok aggregated KPIs. Account-level ROAS
+  // is valid (§2b live-verified 5.37 at IMAA); revenue field already
+  // carries the §2b-corrected total_complete_payment_rate (the
+  // website-pixel attribution surface), wired in the normalizer.
+  // Same currency-filter policy as Google: USD + SAR supported,
+  // others dropped — matches the existing aggregation contract.
+  const tiktokAggregated = useMemo(() => {
+    if (tiktokInsights.insights.length === 0) return null;
+    const supportedRows = tiktokInsights.insights.filter((ins) => {
+      const c = ins.currency;
+      return !c || c === "USD" || c === "SAR";
+    });
+    const totals = supportedRows.reduce(
+      (acc, ins) => {
+        const src = (ins.currency as Currency) || "SAR";
+        return {
+          spend: acc.spend + convertCurrency(ins.spend, src, currency),
+          revenue: acc.revenue + convertCurrency(ins.revenue ?? 0, src, currency),
+          purchases: acc.purchases + (ins.purchases ?? 0),
+        };
+      },
+      { spend: 0, revenue: 0, purchases: 0 }
+    );
+    return {
+      spend: totals.spend,
+      revenue: totals.revenue,
+      roas: totals.spend > 0 ? totals.revenue / totals.spend : 0,
+      conversions: totals.purchases,
+    };
+  }, [tiktokInsights.insights, currency]);
+
+  // TikTok chart data — mirrors googleChartData. Source currency
+  // fallback is SAR (TikTok's primary GCC currency) rather than USD.
+  const tiktokChartData = useMemo(() => {
+    type Row = { date: string; spend: number; revenue: number };
+    const byDate = new Map<string, Row>();
+
+    tiktokChartInsights.insights.forEach((insight) => {
+      const c = insight.currency;
+      const isSupported = !c || c === "USD" || c === "SAR";
+      if (!isSupported) return;
+
+      const src = (c as Currency) || "SAR";
+      const sp = convertCurrency(insight.spend, src, currency);
+      const rv = convertCurrency(insight.revenue ?? 0, src, currency);
+
+      const existing = byDate.get(insight.dateStart);
+      if (existing) {
+        existing.spend += sp;
+        existing.revenue += rv;
+      } else {
+        byDate.set(insight.dateStart, {
+          date: insight.dateStart,
+          spend: sp,
+          revenue: rv,
+        });
+      }
+    });
+
+    return Array.from(byDate.values())
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((row) => ({
+        date: row.date,
+        dayLabel: chartShouldShowDaily
+          ? formatChartDayLabel(row.date, chartDayCount)
+          : row.date,
+        tooltipLabel: formatChartTooltipLabel(row.date),
+        displaySpend: row.spend,
+        displayRevenue: row.revenue,
+      }));
+  }, [tiktokChartInsights.insights, chartShouldShowDaily, chartDayCount, currency]);
 
   // Real KPI cards from aggregated insights (Meta + Google after M2).
   //
@@ -4276,6 +4604,18 @@ export default function ReportsClient({
                         }`}
                       >
                         🔵 Google
+                      </button>
+                    )}
+                    {tiktokAccountIds.length > 0 && (
+                      <button
+                        onClick={() => setPlatformTab("tiktok")}
+                        className={`px-5 py-3 text-base font-bold border-b-2 transition -mb-px ${
+                          platformTab === "tiktok"
+                            ? "border-pink-500 text-pink-600"
+                            : "border-transparent text-gray-500 hover:text-gray-700"
+                        }`}
+                      >
+                        🎵 TikTok
                       </button>
                     )}
                   </div>
@@ -5216,6 +5556,12 @@ export default function ReportsClient({
                         ) : googleAds.length === 0 ? (
                           <div className="text-center py-10 text-gray-500">
                             <p className="text-sm">لا توجد إعلانات بإنفاق في هذه الفترة</p>
+                            <button
+                              onClick={() => refreshGoogleAds()}
+                              className="mt-2 text-sm text-indigo-600 hover:underline"
+                            >
+                              تحديث
+                            </button>
                           </div>
                         ) : (
                           <>
@@ -5238,6 +5584,198 @@ export default function ReportsClient({
                         )}
                       </div>
                       )}
+                    </div>
+                  )}
+
+                  {/* Phase 7 / ADR-020 — TikTok tab. Mirrors Google's
+                      structure: optional multi-account warning,
+                      mini-KPI strip (§2b-verified account metrics),
+                      AreaChart, then 5-state creatives dispatch. No
+                      campaigns sub-tab in 2e (scope: data-flowing
+                      + cards rendering). */}
+                  {platformTab === "tiktok" && (
+                    <div>
+                      {/* Single-account constraint warning per
+                          ADR-020 §12c §2: the URL-resolve route + the
+                          batch hook each take ONE account_id. In v1
+                          we use the first tiktok account; additional
+                          accounts surface in insights but not in
+                          card URL resolution. IMAA is single-account
+                          so this is dormant for the current test
+                          path. */}
+                      {tiktokAccountIds.length > 1 && (
+                        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 mb-4">
+                          <p className="text-xs text-amber-800 leading-relaxed">
+                            تم اكتشاف عدة حسابات TikTok — الإصدار الحالي يدعم حساباً واحداً فقط في معاينات الإعلانات.
+                          </p>
+                        </div>
+                      )}
+
+                      {/* TikTok mini KPIs — §2b-verified metric set.
+                          Account-level ROAS is valid here (live-verified
+                          5.37 at IMAA against the platform UI). */}
+                      {tiktokAggregated && (
+                        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                          <KpiCard
+                            size="mini"
+                            label="إنفاق TikTok"
+                            value={formatCurrencyWithSymbol(tiktokAggregated.spend, currency)}
+                            icon={DollarSign}
+                            color="pink"
+                          />
+                          <KpiCard
+                            size="mini"
+                            label="إيرادات TikTok"
+                            value={formatCurrencyWithSymbol(tiktokAggregated.revenue, currency)}
+                            icon={ShoppingCart}
+                            color="green"
+                          />
+                          <KpiCard
+                            size="mini"
+                            label="ROAS TikTok"
+                            value={`${tiktokAggregated.roas.toFixed(2)}x`}
+                            icon={Target}
+                            color="purple"
+                          />
+                          <KpiCard
+                            size="mini"
+                            label="مبيعات TikTok"
+                            value={Math.round(tiktokAggregated.conversions).toLocaleString("en-US")}
+                            icon={Users}
+                            color="blue"
+                          />
+                        </div>
+                      )}
+
+                      {/* TikTok chart — same AreaChart treatment as
+                          Google, with pink (spend) + green (revenue)
+                          gradients. Pink mirrors the brand palette
+                          used in the card/modal so the tab feels
+                          unified. */}
+                      {tiktokChartData.length > 0 && (
+                        <div className="border border-gray-100 rounded-lg p-3 sm:p-4 mb-4">
+                          <h4 className="text-sm font-bold text-gray-900 mb-2">
+                            أداء TikTok — الإنفاق مقابل الإيرادات
+                          </h4>
+                          <div dir="ltr" className="h-48 sm:h-56">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <AreaChart data={tiktokChartData}>
+                                <defs>
+                                  <linearGradient id="colorTiktokRev" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#10b981" stopOpacity={0.4} />
+                                    <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                                  </linearGradient>
+                                  <linearGradient id="colorTiktokSpd" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#ec4899" stopOpacity={0.4} />
+                                    <stop offset="95%" stopColor="#ec4899" stopOpacity={0} />
+                                  </linearGradient>
+                                </defs>
+                                <CartesianGrid strokeDasharray="3 3" stroke="#f3f4f6" />
+                                <XAxis dataKey="dayLabel" stroke="#9ca3af" fontSize={11} />
+                                <YAxis stroke="#9ca3af" fontSize={11} />
+                                <Tooltip
+                                  contentStyle={{ backgroundColor: "white", border: "1px solid #e5e7eb", borderRadius: "8px" }}
+                                  labelFormatter={(label, payload) => {
+                                    const data = payload?.[0]?.payload as { tooltipLabel?: string } | undefined;
+                                    return data?.tooltipLabel ?? label;
+                                  }}
+                                  formatter={(value, name) => {
+                                    const num = typeof value === "number" ? value : 0;
+                                    return [formatCurrencyWithSymbol(num, currency), name as string];
+                                  }}
+                                />
+                                <Legend />
+                                <Area type="monotone" dataKey="displayRevenue" name="الإيرادات" stroke="#10b981" fillOpacity={1} fill="url(#colorTiktokRev)" />
+                                <Area type="monotone" dataKey="displaySpend" name="الإنفاق" stroke="#ec4899" fillOpacity={1} fill="url(#colorTiktokSpd)" />
+                              </AreaChart>
+                            </ResponsiveContainer>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Creatives container — 5-state dispatch mirroring
+                          Google's. Reauth banner links to /dashboard/
+                          connections (the parent index that lists all
+                          platforms) — TikTok has no dedicated
+                          per-platform connections page yet. */}
+                      <div className="border border-gray-100 rounded-lg p-3 sm:p-4 mt-4">
+                        {tiktokAdsNoConnection ? (
+                          <div className="text-center py-10 text-gray-500">
+                            <p className="text-sm">لا توجد حسابات TikTok مربوطة</p>
+                          </div>
+                        ) : tiktokAdsError === "reauth_required" ? (
+                          <div className="rounded-xl border-2 border-amber-400 bg-amber-50 p-4">
+                            <h3 className="font-bold text-amber-900">إعادة ربط حساب TikTok مطلوبة</h3>
+                            <p className="text-sm text-amber-800 mt-1">
+                              انتهت صلاحية الربط مع TikTok Ads. اضغط على الزر أدناه لإعادة الربط
+                              والاستمرار في عرض بيانات حملاتك.
+                            </p>
+                            <a
+                              href="/dashboard/connections"
+                              className="inline-block mt-3 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-semibold"
+                            >
+                              أعد ربط حساب TikTok
+                            </a>
+                          </div>
+                        ) : tiktokAdsLoading && tiktokAds.length === 0 ? (
+                          <div className="text-center py-10 text-gray-500">
+                            <p className="text-sm">جاري التحميل...</p>
+                          </div>
+                        ) : tiktokAdsError === "fetch_failed" ? (
+                          <div className="text-center py-10 text-gray-500">
+                            <p className="text-sm text-red-600">تعذّر تحميل الإعلانات</p>
+                            <button
+                              onClick={() => refreshTiktokAds()}
+                              className="mt-2 text-sm text-indigo-600 hover:underline"
+                            >
+                              إعادة المحاولة
+                            </button>
+                          </div>
+                        ) : tiktokAds.length === 0 ? (
+                          <div className="text-center py-10 text-gray-500">
+                            <p className="text-sm">لا توجد إعلانات بإنفاق في هذه الفترة</p>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="flex items-center justify-between mb-3">
+                              <h4 className="text-sm font-bold text-gray-900">
+                                تفاصيل الإعلانات
+                              </h4>
+                              <button
+                                onClick={handleRefreshTiktokAds}
+                                disabled={refreshDisabledTiktok}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                                title={
+                                  refreshCooldownRemainingTiktok > 0
+                                    ? `انتظر ${refreshCooldownRemainingTiktok} ثانية`
+                                    : "تحديث البيانات"
+                                }
+                              >
+                                <RefreshCw
+                                  className={`w-3.5 h-3.5 ${
+                                    tiktokAdsLoading ? "animate-spin" : ""
+                                  }`}
+                                />
+                                {refreshCooldownRemainingTiktok > 0
+                                  ? `تحديث (${refreshCooldownRemainingTiktok}ث)`
+                                  : "تحديث"}
+                              </button>
+                            </div>
+                            <CreativesGrid
+                              ads={tiktokAds}
+                              loading={tiktokAdsLoading}
+                              accountCurrency={"SAR" as Currency}
+                              displayCurrency={currency}
+                              {...dateRangeValueToOptions(dateRange)}
+                            />
+                            {tiktokAdsError === "partial_failure" && (
+                              <p className="text-xs text-amber-600 mt-2 text-center">
+                                ⚠️ بعض الحسابات لم يتم تحميلها — قد تكون البيانات غير مكتملة
+                              </p>
+                            )}
+                          </>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
