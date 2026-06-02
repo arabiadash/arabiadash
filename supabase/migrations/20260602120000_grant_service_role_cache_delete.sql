@@ -1,0 +1,38 @@
+-- Issue #30 (cache-DELETE portion) — grant service_role SELECT+DELETE on cache tables
+--
+-- ADR-020 §StatusCollapse (commit 0987387) documented that production
+-- service_role JWT received "403 Forbidden / code:42501 / permission
+-- denied" on DELETE attempts against insights_cache and creatives_cache.
+-- The error hint named `GRANT SELECT, DELETE ON public.<table> TO
+-- service_role` as the missing privilege set.
+--
+-- This blocks the Phase 7 TikTok merge-day cache invalidation:
+--   DELETE FROM insights_cache WHERE provider = 'tiktok';
+--   DELETE FROM creatives_cache WHERE provider = 'tiktok';
+-- (Required to flush stale §StatusCollapse + §Lifetime entries shaped
+-- with pre-fix normalizer output. Skipping invalidation = customers see
+-- up to 24h of stale buggy cache after the fix ships — "self-defeating"
+-- per the ADR.)
+--
+-- Tight scope: this migration unblocks ONLY the cache-DELETE pair. The
+-- broader #30 anon-role over-grant audit (TRUNCATE/TRIGGER/REFERENCES
+-- tightening across multiple tables) is deferred to a separate
+-- pre-launch migration to keep this PR's risk surface minimal.
+--
+-- Writes intentionality (matches 20260518_grant_authenticated_conversion_actions.sql):
+--   - service_role: SELECT+DELETE (granted here) + INSERT/UPDATE (pre-existing)
+--   - authenticated: SELECT under RLS only (unchanged)
+--   - anon: nothing (unchanged — see broader #30 follow-up)
+--
+-- Why both SELECT and DELETE: PostgREST evaluates WHERE-clause filters at
+-- table level via SELECT before issuing DELETE; without SELECT the DELETE
+-- 403s even when DELETE alone is granted. The original 42501 hint named
+-- this exact pair as missing.
+--
+-- SQL applied to production Supabase directly via Studio at deploy time;
+-- this migration file ensures future env clones get the grant automatically.
+--
+-- DOWN (manual rollback reference — not run automatically):
+--   REVOKE SELECT, DELETE ON public.insights_cache, public.creatives_cache FROM service_role;
+
+GRANT SELECT, DELETE ON public.insights_cache, public.creatives_cache TO service_role;
