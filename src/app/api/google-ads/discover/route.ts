@@ -8,6 +8,7 @@ import {
   type AccessibleCustomerDetails,
 } from "@/lib/google-ads/oauth";
 import { fetchCustomerDetails } from "@/lib/google-ads/customer";
+import { classifyGoogleAdsError, isReauthError } from "@/lib/google-ads/errors";
 
 export const dynamic = "force-dynamic";
 
@@ -81,21 +82,33 @@ export async function GET() {
     //
     // Each path's failure is logged + isolated via .catch so a transient
     // SDK error on one path doesn't blank the whole result.
+    // Distinguish reauth-class errors (expired refresh_token / revoked
+    // consent / token_expired) from transient SDK failures. Reauth must
+    // BUBBLE so the outer handler can surface reauth_required to the
+    // client (#46); transient errors stay isolated per the original
+    // hybrid-discovery design (one path's transient failure shouldn't
+    // blank the other path's results).
+    const handleDiscoverError = <T,>(
+      err: unknown,
+      source: string,
+      fallback: T
+    ): T => {
+      const reauth = classifyGoogleAdsError(err);
+      if (reauth) throw reauth;
+      console.error(
+        `[discover] ${source} failed:`,
+        err instanceof Error ? err.message : "unknown"
+      );
+      return fallback;
+    };
+
     const [mccResults, accessibleIds] = await Promise.all([
-      getEnrichedCustomerClients(credential.refresh_token).catch((err) => {
-        console.error(
-          "[discover] MCC query failed:",
-          err instanceof Error ? err.message : "unknown"
-        );
-        return [] as AccessibleCustomerDetails[];
-      }),
-      getAccessibleCustomers(credential.refresh_token).catch((err) => {
-        console.error(
-          "[discover] listAccessibleCustomers failed:",
-          err instanceof Error ? err.message : "unknown"
-        );
-        return [] as string[];
-      }),
+      getEnrichedCustomerClients(credential.refresh_token).catch((err) =>
+        handleDiscoverError(err, "MCC query", [] as AccessibleCustomerDetails[])
+      ),
+      getAccessibleCustomers(credential.refresh_token).catch((err) =>
+        handleDiscoverError(err, "listAccessibleCustomers", [] as string[])
+      ),
     ]);
 
     // IDs already covered by the MCC path keep that path's enrichment
@@ -127,6 +140,14 @@ export async function GET() {
                 test_account: false,
               };
             } catch (err) {
+              // Same dispatch as the top-level catches: reauth-class
+              // bubbles to the outer handler (the same refresh_token
+              // failure can surface per-account here if the master list
+              // happened to succeed before the token went bad). Other
+              // per-account failures stay isolated (returning null
+              // drops the row from the result set).
+              const reauth = classifyGoogleAdsError(err);
+              if (reauth) throw reauth;
               console.error(
                 `[discover] fetchCustomerDetails threw for ${id}:`,
                 err instanceof Error ? err.message : "unknown"
@@ -178,6 +199,18 @@ export async function GET() {
       total: discoverable.length,
     });
   } catch (err) {
+    // Reauth-class bubbled from one of the inner catches (top-level
+    // MCC / standalone path, or per-account fetchCustomerDetails) —
+    // surface as 401 + the canonical { error, provider } shape used by
+    // other ads routes (/api/ads/creatives, /api/ads/insights). The
+    // selector client renders the reauth banner inline on this response
+    // (#46).
+    if (isReauthError(err)) {
+      return NextResponse.json(
+        { error: "reauth_required", provider: "google" },
+        { status: 401 }
+      );
+    }
     console.error(
       "[google-ads/discover] Error:",
       err instanceof Error ? err.message : "unknown"
