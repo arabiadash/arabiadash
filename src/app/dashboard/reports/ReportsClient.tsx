@@ -5525,7 +5525,14 @@ export default function ReportsClient({
                             <p className="text-sm">لا توجد حسابات Google مربوطة</p>
                           </div>
                         ) : googleAdsError === "reauth_required" ? (
-                          /* ADR-017: Arabic CTA banner for invalid_grant / consent_revoked */
+                          /* ADR-017: Arabic CTA banner for invalid_grant / consent_revoked.
+                             CTA goes directly to the one-step OAuth init (#47) — bypasses
+                             the connections list page (which itself routed users into the
+                             broken #46 selector flow). activeWorkspaceId is invariant-safe
+                             here: this branch only renders when a Google connection exists
+                             in the active workspace, so the workspace ID is always defined.
+                             Consider extracting to <GoogleReauthBanner workspaceId={X}/>
+                             when #48/#49 add more occurrences (currently 2 inline copies). */
                           <div className="rounded-xl border-2 border-amber-400 bg-amber-50 p-4">
                             <h3 className="font-bold text-amber-900">إعادة ربط حساب Google مطلوبة</h3>
                             <p className="text-sm text-amber-800 mt-1">
@@ -5533,7 +5540,7 @@ export default function ReportsClient({
                               والاستمرار في عرض بيانات حملاتك.
                             </p>
                             <a
-                              href="/dashboard/connections/google"
+                              href={`/api/google-ads/auth?workspace=${activeWorkspaceId}`}
                               className="inline-block mt-3 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-semibold"
                             >
                               أعد ربط حساب Google
