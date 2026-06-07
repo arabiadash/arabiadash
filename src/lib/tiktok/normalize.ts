@@ -23,6 +23,7 @@ import type {
   TiktokIdentityVideoDetail,
   TiktokReportRow,
 } from "./api";
+import { forceHttps } from "./api";
 import type {
   UnifiedAdTiktok,
   UnifiedCampaign,
@@ -596,8 +597,8 @@ export function normalizeFileVideoAdInfoToCreative(
       : coverExpires;
 
   return {
-    posterUrl: row.video_cover_url,
-    playableUrl: row.preview_url,
+    posterUrl: forceHttps(row.video_cover_url),
+    playableUrl: forceHttps(row.preview_url),
     expiresAt,
     duration: row.duration,
     width: row.width,
@@ -620,8 +621,8 @@ export function normalizeIdentityVideoInfoToCreative(
   detail: TiktokIdentityVideoDetail
 ): TikTokCreativeUrls {
   return {
-    posterUrl: detail.video_info.poster_url,
-    playableUrl: detail.video_info.url,
+    posterUrl: forceHttps(detail.video_info.poster_url),
+    playableUrl: forceHttps(detail.video_info.url),
     expiresAt: parseExpiresFromXExpiresQueryParam(detail.video_info.url),
     duration: detail.video_info.duration,
     width: detail.video_info.width,

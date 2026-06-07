@@ -35,6 +35,20 @@ export const TIKTOK_API_VERSION = "v1.3";
 export const TIKTOK_BASE_URL = `https://business-api.tiktok.com/open_api/${TIKTOK_API_VERSION}`;
 export const TIKTOK_AUTH_BASE_URL = "https://business-api.tiktok.com";
 
+// Defensive http→https rewrite for TikTok-issued URLs. TikTok's CDN
+// (e.g. p16-common-sign.tiktokcdn.com) and oEmbed sometimes return
+// http:// scheme; browsers on https:// pages auto-upgrade but log a
+// Mixed Content warning and add a small latency hit. Rewriting at the
+// source ensures clients never see http://. Idempotent — https URLs,
+// undefined, protocol-relative (//), data: URLs all pass through. (#55)
+export function forceHttps(url: string): string;
+export function forceHttps(url: string | undefined): string | undefined;
+export function forceHttps(url: string | undefined): string | undefined {
+  if (!url) return url;
+  if (url.startsWith("http://")) return "https://" + url.slice(7);
+  return url;
+}
+
 // ───────────────────────────────────────────────────────────────────
 // Common envelope: TikTok wraps every response in { code, message,
 // data, request_id }. code=0 = success; non-zero throws via api.ts.
@@ -1243,12 +1257,12 @@ export async function resolveOembed(
   }
 
   return {
-    thumbnailUrl: json.thumbnail_url,
+    thumbnailUrl: forceHttps(json.thumbnail_url),
     thumbnailWidth: json.thumbnail_width,
     thumbnailHeight: json.thumbnail_height,
     authorName: json.author_name,
     authorHandle: json.author_unique_id,
-    authorUrl: json.author_url,
+    authorUrl: forceHttps(json.author_url),
     expiresAt,
   };
 }
