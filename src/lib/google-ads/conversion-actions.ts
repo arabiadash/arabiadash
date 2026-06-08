@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { GoogleAdsApi, type Customer, errors } from "google-ads-api";
 import type { Database } from "@/lib/supabase/database.types";
+import { classifyGoogleAdsError } from "./errors";
 
 /**
  * Google Ads conversion_action category integer enum (subset relevant to us).
@@ -242,6 +243,16 @@ export async function syncConversionActionsForCustomer(
       purchases_detected,
     };
   } catch (err) {
+    // Bubble reauth-class errors (ADR-017). The immediate caller
+    // (select-accounts route's syncGoogleAccountsForUser wrapper at
+    // lines 141-148) catches all errors as "non-fatal" by design —
+    // account row is already upserted before this runs, sync failure
+    // shouldn't undo connection, and the token is freshly-minted at
+    // this point so invalid_grant is essentially impossible. So this
+    // bubble is HARMLESS-BUT-UNREACHABLE in practice; included for
+    // consistency with the rest of the #48 sweep.
+    const reauth = classifyGoogleAdsError(err);
+    if (reauth) throw reauth;
     const message =
       err instanceof errors.GoogleAdsFailure
         ? err.errors?.map((e) => e.message).join("; ") ?? "GoogleAdsFailure (no detail)"

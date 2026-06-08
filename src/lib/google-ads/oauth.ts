@@ -3,6 +3,7 @@
  * Reference: https://developers.google.com/identity/protocols/oauth2/web-server
  */
 import { GoogleAdsApi } from "google-ads-api";
+import { classifyGoogleAdsError } from "./errors";
 
 const OAUTH_BASE = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -257,6 +258,15 @@ export async function getEnrichedCustomerClients(
       })
       .filter((r): r is AccessibleCustomerDetails => r !== null);
   } catch (err) {
+    // Bubble reauth-class errors (ADR-017). CRITICAL: closes a hole from
+    // #46 — without this bubble, the discover route's handleDiscoverError
+    // wrapper is unreachable for the MCC path because this catch resolves
+    // with [] instead of rejecting. MCC-only customers would still hit
+    // the dead-end on expired tokens. The #46 production test passed
+    // only because the standalone path (getAccessibleCustomers, no
+    // internal catch) threw and bubbled first.
+    const reauth = classifyGoogleAdsError(err);
+    if (reauth) throw reauth;
     console.error(
       "[oauth] getEnrichedCustomerClients failed:",
       err instanceof Error ? err.message : "unknown"

@@ -14,6 +14,7 @@
  */
 
 import { GoogleAdsApi, errors } from "google-ads-api";
+import { classifyGoogleAdsError } from "./errors";
 import type {
   UnifiedAdKeyword,
   KeywordMatchType,
@@ -324,6 +325,11 @@ export async function fetchKeywords(
 
     return byAdGroup;
   } catch (error) {
+    // Bubble reauth-class errors (ADR-017) so the existing route-layer
+    // isReauthError check (/api/ads/keywords/route.ts) can surface the
+    // Arabic reauth banner. Non-reauth errors keep graceful degradation.
+    const reauth = classifyGoogleAdsError(error);
+    if (reauth) throw reauth;
     const msg = formatGoogleError(error);
     console.error("[google-ads/keywords] fetchKeywords failed:", msg);
     return new Map();
@@ -479,6 +485,8 @@ async function fetchPurchaseKeywordTotals(
 
     return byCriterion;
   } catch (error) {
+    const reauth = classifyGoogleAdsError(error);
+    if (reauth) throw reauth;
     const msg = formatGoogleError(error);
     console.error(
       "[google-ads/keywords] fetchPurchaseKeywordTotals failed:",

@@ -17,6 +17,7 @@
  */
 
 import { GoogleAdsApi, errors } from "google-ads-api";
+import { classifyGoogleAdsError } from "./errors";
 import type {
   UnifiedAdSearchTerm,
   SearchTermStatus,
@@ -313,6 +314,11 @@ export async function fetchSearchTerms(
 
     return byAdGroup;
   } catch (error) {
+    // Bubble reauth-class errors (ADR-017) so the existing route-layer
+    // isReauthError check (/api/ads/search-terms/route.ts) can surface
+    // the Arabic reauth banner. Non-reauth keeps graceful degradation.
+    const reauth = classifyGoogleAdsError(error);
+    if (reauth) throw reauth;
     const msg = formatGoogleError(error);
     console.error("[google-ads/search-terms] fetchSearchTerms failed:", msg);
     return new Map();
@@ -431,6 +437,8 @@ async function fetchPurchaseSearchTermTotals(
 
     return byKey;
   } catch (error) {
+    const reauth = classifyGoogleAdsError(error);
+    if (reauth) throw reauth;
     const msg = formatGoogleError(error);
     console.error(
       "[google-ads/search-terms] fetchPurchaseSearchTermTotals failed:",

@@ -7,6 +7,7 @@ import {
   type AdProvider,
 } from "@/lib/ads/cache";
 import type { UnifiedCampaign } from "@/lib/ads/types";
+import { isReauthError } from "@/lib/google-ads/errors";
 
 const VALID_PROVIDERS: readonly AdProvider[] = [
   "meta",
@@ -84,6 +85,18 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ data: campaigns, cached: false, provider });
   } catch (err) {
+    // Surface reauth-class errors as 401 + the canonical { error, provider }
+    // shape used by /api/ads/insights and /api/ads/creatives. The
+    // useProviderInsights hook (use-provider-insights.ts:179-186) checks
+    // status === 401 + error === "reauth_required" and sets the hook's
+    // error state to "reauth_required" — which the Reports Campaigns
+    // sub-tab branches on to render the reauth banner (#49 UI fix).
+    if (isReauthError(err)) {
+      return NextResponse.json(
+        { error: "reauth_required", provider: err.provider },
+        { status: 401 }
+      );
+    }
     console.error("[ads/campaigns] Error:", err);
     return NextResponse.json({ error: "fetch_failed" }, { status: 500 });
   }

@@ -15,6 +15,7 @@ import type {
   UnifiedAdExtensions,
   ImageAssetFieldType,
 } from "@/lib/ads/types";
+import { classifyGoogleAdsError } from "./errors";
 
 /**
  * Image extension field_types per M8 / ADR-014.
@@ -263,6 +264,14 @@ export async function fetchAdExtensions(
 
     return result;
   } catch (error) {
+    // Bubble reauth-class errors (ADR-017). CRITICAL: this is the umbrella
+    // catch — without bubbling here, the sub-fetchers (fetchSitelinks,
+    // fetchCallouts, fetchImages, fetchStructuredSnippets, fetchAdLevelLinkages,
+    // fetchCampaignAssetLinkages) bubbles would still get re-swallowed at
+    // this layer. Both layers must bubble for the reauth chain to reach
+    // withReauthMapping → ReauthRequiredError → route 401 reauth_required.
+    const reauth = classifyGoogleAdsError(error);
+    if (reauth) throw reauth;
     const msg = formatGoogleError(error);
     console.error("[google-ads/extensions] unexpected failure:", msg);
     return new Map();
@@ -346,6 +355,8 @@ async function fetchAdLevelLinkages(
     }
     return out;
   } catch (error) {
+    const reauth = classifyGoogleAdsError(error);
+    if (reauth) throw reauth;
     const msg = formatGoogleError(error);
     console.error("[google-ads/extensions] fetchAdLevelLinkages failed:", msg);
     return [];
@@ -438,6 +449,8 @@ async function fetchCampaignAssetLinkages(
     }
     return out;
   } catch (error) {
+    const reauth = classifyGoogleAdsError(error);
+    if (reauth) throw reauth;
     const msg = formatGoogleError(error);
     console.error(
       "[google-ads/extensions] fetchCampaignAssetLinkages failed:",
@@ -508,6 +521,8 @@ async function fetchSitelinks(
     }
     return map;
   } catch (error) {
+    const reauth = classifyGoogleAdsError(error);
+    if (reauth) throw reauth;
     const msg = formatGoogleError(error);
     console.error("[google-ads/extensions] fetchSitelinks failed:", msg);
     return new Map();
@@ -544,6 +559,8 @@ async function fetchCallouts(
     }
     return map;
   } catch (error) {
+    const reauth = classifyGoogleAdsError(error);
+    if (reauth) throw reauth;
     const msg = formatGoogleError(error);
     console.error("[google-ads/extensions] fetchCallouts failed:", msg);
     return new Map();
@@ -646,6 +663,8 @@ async function fetchImages(
     }
     return map;
   } catch (error) {
+    const reauth = classifyGoogleAdsError(error);
+    if (reauth) throw reauth;
     const msg = formatGoogleError(error);
     console.error("[google-ads/extensions] fetchImages failed:", msg);
     return new Map();
@@ -695,6 +714,8 @@ async function fetchStructuredSnippets(
     }
     return map;
   } catch (error) {
+    const reauth = classifyGoogleAdsError(error);
+    if (reauth) throw reauth;
     const msg = formatGoogleError(error);
     console.error(
       "[google-ads/extensions] fetchStructuredSnippets failed:",
