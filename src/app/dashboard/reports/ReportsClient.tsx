@@ -5323,6 +5323,32 @@ export default function ReportsClient({
                       </div>
 
                       {googleActiveTab === "campaigns" ? (
+                      googleCampaigns.error === "reauth_required" ? (
+                        /* ADR-017: Arabic reauth banner for the Campaigns sub-tab (#49).
+                           Same target as the Creatives banner (#47) — /api/google-ads/auth
+                           as the one-step OAuth init. activeWorkspaceId is invariant-safe
+                           here (this branch only renders when a Google connection exists
+                           in the active workspace).
+                           This is now the 3rd inline occurrence of the reauth banner
+                           (Reports Creatives + Selector + Reports Campaigns) — extraction
+                           trigger met (<GoogleReauthBanner workspaceId={X}/>), deferred
+                           to a focused follow-up commit to keep #48/#49 diff tight. */
+                        <div className="border border-gray-100 rounded-lg p-3 sm:p-4 mt-4">
+                          <div className="rounded-xl border-2 border-amber-400 bg-amber-50 p-4">
+                            <h3 className="font-bold text-amber-900">إعادة ربط حساب Google مطلوبة</h3>
+                            <p className="text-sm text-amber-800 mt-1">
+                              انتهت صلاحية الربط مع Google Ads. اضغط على الزر أدناه لإعادة الربط
+                              والاستمرار في عرض بيانات حملاتك.
+                            </p>
+                            <a
+                              href={`/api/google-ads/auth?workspace=${activeWorkspaceId}`}
+                              className="inline-block mt-3 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-semibold"
+                            >
+                              أعد ربط حساب Google
+                            </a>
+                          </div>
+                        </div>
+                      ) : (
                       <div className="border border-gray-100 rounded-lg p-3 sm:p-4 mt-4">
                         <h4 className="text-sm font-bold text-gray-900 mb-3">
                           تفاصيل الحملات
@@ -5518,6 +5544,7 @@ export default function ReportsClient({
                           </div>
                         )}
                       </div>
+                      )
                       ) : (
                       <div className="border border-gray-100 rounded-lg p-3 sm:p-4 mt-4">
                         {googleAdsNoConnection ? (

@@ -10,6 +10,7 @@
  */
 
 import { GoogleAdsApi } from "google-ads-api";
+import { classifyGoogleAdsError } from "./errors";
 
 export interface FetchAssetUrlsOptions {
   customerId: string;
@@ -94,6 +95,12 @@ export async function fetchAssetUrls(
 
     return urlMap;
   } catch (error) {
+    // Bubble reauth-class errors (ADR-017) so the existing
+    // withReauthMapping / route-layer isReauthError check can surface the
+    // Arabic reauth banner. Non-reauth errors keep the graceful
+    // degradation per the original contract.
+    const reauth = classifyGoogleAdsError(error);
+    if (reauth) throw reauth;
     console.error("[google-ads/assets] Failed to fetch asset URLs:", error);
     return new Map();
   }
